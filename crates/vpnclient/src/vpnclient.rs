@@ -1384,30 +1384,7 @@ pub struct ClientEvent {
 impl VpnClient {
     fn emit_settings_snapshot(&self) {
         if let Some(tx) = &self.event_tx {
-            let (ip, mask, gw, dns_vec) = if let Some(ns) = self.get_network_settings() {
-                (
-                    ns.assigned_ipv4.map(|v| v.to_string()),
-                    ns.subnet_mask.map(|v| v.to_string()),
-                    ns.gateway.map(|v| v.to_string()),
-                    ns.dns_servers.iter().map(|d| d.to_string()).collect::<Vec<_>>()
-                )
-            } else {
-                (None, None, None, Vec::new())
-            };
-            // Build the JSON string manually
-            let dns_json = if dns_vec.is_empty() {
-                "[]".to_string()
-            } else {
-                let arr = dns_vec.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(",");
-                format!("[{}]", arr)
-            };
-            let s = format!(
-                "{{\"kind\":\"settings\",\"assigned_ipv4\":{},\"subnet_mask\":{},\"gateway\":{},\"dns_servers\":{}}}",
-                ip.map(|v| format!("\"{}\"", v)).unwrap_or_else(|| "null".to_string()),
-                mask.map(|v| format!("\"{}\"", v)).unwrap_or_else(|| "null".to_string()),
-                gw.map(|v| format!("\"{}\"", v)).unwrap_or_else(|| "null".to_string()),
-                dns_json
-            );
+            let s = settings_json_with_kind(self.get_network_settings().as_ref(), true);
             let _ = tx.send(ClientEvent { level: EventLevel::Info, code: 1001, message: s });
         }
     }
