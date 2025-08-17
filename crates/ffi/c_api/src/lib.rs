@@ -16,6 +16,7 @@ use config::ClientConfig as SharedConfig;
 use vpnclient::ClientState;
 use vpnclient::VpnClient;
 use vpnclient::{ClientEvent, EventLevel};
+use vpnclient::settings_json_with_kind;
 
 #[derive(Deserialize)]
 struct FfiConfig {
@@ -110,6 +111,56 @@ struct ClientHandle {
     ip_rx_cb: Arc<Mutex<Option<IpRxCb>>>,
     state_cb: Option<Arc<StateCb>>,
     event_cb: Option<Arc<EventCb>>,
+}
+
+impl ClientHandle {
+    /// Ensure a single adapter_rx channel is wired and a demux task is spawned
+    /// that forwards L2 frames to rx_cb and IPv4 payloads to ip_rx_cb when set.
+    fn ensure_adapter_rx(&mut self) {
+        if self.adapter_tx.is_some() {
+            return;
+        }
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        self.adapter_tx = Some(tx.clone());
+        let rx_cb = self.rx_cb.clone();
+        let ip_cb = self.ip_rx_cb.clone();
+        // Shared helper for demux
+        self.rt.spawn(async move {
+            while let Some(frame) = rx.recv().await {
+                // L2 callback if present
+                if let Some(cb) = *rx_cb.lock().unwrap() {
+                    (cb.func)(frame.as_ptr(), frame.len() as u32, cb.user);
+                }
+                // IPv4 demux
+                if let Some(ip) = eth_to_ipv4(&frame) {
+                    if let Some(cb) = *ip_cb.lock().unwrap() {
+                        (cb.func)(ip.as_ptr(), ip.len() as u32, cb.user);
+                    }
+                }
+            }
+        });
+        // Attach to dataplane if available
+        let client_arc = self.client.clone();
+        let tx2 = tx.clone();
+        let _ = self.rt.block_on(async move {
+            let c = client_arc.lock().unwrap();
+            if let Some(dp) = c.dataplane() {
+                dp.set_adapter_rx(tx2);
+            }
+        });
+    }
+}
+
+/// Extract IPv4 payload from an Ethernet frame (EtherType 0x0800)
+fn eth_to_ipv4(frame: &[u8]) -> Option<&[u8]> {
+    if frame.len() < 14 {
+        return None;
+    }
+    let ether_type = u16::from_be_bytes([frame[12], frame[13]]);
+    if ether_type != 0x0800 {
+        return None;
+    }
+    Some(&frame[14..])
 }
 
 #[repr(C)]
@@ -215,39 +266,10 @@ pub extern "C" fn softether_client_connect(handle: *mut softether_client_t) -> c
             let client_arc3 = h.client.clone();
             let _ = h.rt.spawn(async move {
                 let c = client_arc3.lock().unwrap();
-                // Build a small JSON with ip/mask/gw/dns if present
-                #[derive(serde::Serialize)]
-                struct SettingsJson {
-                    kind: &'static str,
-                    assigned_ipv4: Option<String>,
-                    subnet_mask: Option<String>,
-                    gateway: Option<String>,
-                    dns_servers: Vec<String>,
-                }
-                let mut json = SettingsJson {
-                    kind: "settings",
-                    assigned_ipv4: None,
-                    subnet_mask: None,
-                    gateway: None,
-                    dns_servers: vec![],
-                };
-                if let Some(ns) = c.get_network_settings() {
-                    if let Some(ip) = ns.assigned_ipv4 {
-                        json.assigned_ipv4 = Some(ip.to_string());
-                    }
-                    if let Some(m) = ns.subnet_mask {
-                        json.subnet_mask = Some(m.to_string());
-                    }
-                    if let Some(g) = ns.gateway {
-                        json.gateway = Some(g.to_string());
-                    }
-                    json.dns_servers = ns.dns_servers.iter().map(|d| d.to_string()).collect();
-                }
-                if let Ok(s) = serde_json::to_string(&json) {
-                    let cstr = CString::new(s).unwrap_or_else(|_| CString::new("{}").unwrap());
-                    (cb.func)(0, 1001, cstr.as_ptr(), cb.user);
-                    // Ensure CString lives long enough for the call; drop immediately after
-                }
+                let json = settings_json_with_kind(c.get_network_settings().as_ref(), true);
+                let cstr = CString::new(json).unwrap_or_else(|_| CString::new("{}").unwrap());
+                (cb.func)(0, 1001, cstr.as_ptr(), cb.user);
+                // CString dropped after callback returns
             });
         }
     }
@@ -305,32 +327,7 @@ pub extern "C" fn softether_client_get_network_settings_json(
     let client_arc = h.client.clone();
     let s = h.rt.block_on(async move {
         let c = client_arc.lock().unwrap();
-        #[derive(serde::Serialize)]
-        struct SettingsJson {
-            assigned_ipv4: Option<String>,
-            subnet_mask: Option<String>,
-            gateway: Option<String>,
-            dns_servers: Vec<String>,
-        }
-        let mut json = SettingsJson {
-            assigned_ipv4: None,
-            subnet_mask: None,
-            gateway: None,
-            dns_servers: vec![],
-        };
-    if let Some(ns) = c.get_network_settings() {
-            if let Some(ip) = ns.assigned_ipv4 {
-                json.assigned_ipv4 = Some(ip.to_string());
-            }
-            if let Some(m) = ns.subnet_mask {
-                json.subnet_mask = Some(m.to_string());
-            }
-            if let Some(g) = ns.gateway {
-                json.gateway = Some(g.to_string());
-            }
-            json.dns_servers = ns.dns_servers.iter().map(|d| d.to_string()).collect();
-        }
-        serde_json::to_string(&json).unwrap_or_else(|_| "{}".to_string())
+        settings_json_with_kind(c.get_network_settings().as_ref(), false)
     });
     CString::new(s).map(|cs| cs.into_raw()).unwrap_or(ptr::null_mut())
 }
@@ -426,44 +423,8 @@ pub extern "C" fn softether_client_set_rx_callback(
         *g = cb.map(|f| RxCb { func: f, user });
     }
 
-    // Build a single adapter_rx channel and demux frames to L2 callback and optional IP callback
-    let client_arc = h.client.clone();
-    let rx_cb = h.rx_cb.clone();
-    let ip_cb = h.ip_rx_cb.clone();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    h.adapter_tx = Some(tx.clone());
-    let _ = h.rt.spawn(async move {
-        fn eth_to_ipv4(frame: &[u8]) -> Option<&[u8]> {
-            if frame.len() < 14 {
-                return None;
-            }
-            let ether_type = u16::from_be_bytes([frame[12], frame[13]]);
-            if ether_type != 0x0800 {
-                return None;
-            }
-            Some(&frame[14..])
-        }
-        while let Some(frame) = rx.recv().await {
-            // L2 callback
-            if let Some(cb) = *rx_cb.lock().unwrap() {
-                (cb.func)(frame.as_ptr(), frame.len() as u32, cb.user);
-            }
-            // IP callback
-            if let Some(ip) = eth_to_ipv4(&frame) {
-                if let Some(cb) = *ip_cb.lock().unwrap() {
-                    (cb.func)(ip.as_ptr(), ip.len() as u32, cb.user);
-                }
-            }
-        }
-    });
-
-    // If dataplane exists, set its adapter_rx sink now
-    let _ = h.rt.block_on(async move {
-        let c = client_arc.lock().unwrap();
-        if let Some(dp) = c.dataplane() {
-            dp.set_adapter_rx(tx);
-        }
-    });
+    // Ensure a single demux task and channel are wired
+    h.ensure_adapter_rx();
     0
 }
 
@@ -506,41 +467,8 @@ pub extern "C" fn softether_client_set_ip_rx_callback(
         let mut g = h.ip_rx_cb.lock().unwrap();
         *g = cb.map(|f| IpRxCb { func: f, user });
     }
-    // If there is no adapter_rx channel yet (no L2 callback set), create one that demuxes to IP only
-    let need_wire = h.adapter_tx.is_none();
-    if need_wire {
-        let client_arc = h.client.clone();
-        let ip_cb = h.ip_rx_cb.clone();
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        h.adapter_tx = Some(tx.clone());
-        // Demux Ethernet->IPv4 and invoke IP callback
-        let _ = h.rt.spawn(async move {
-            fn eth_to_ipv4(frame: &[u8]) -> Option<&[u8]> {
-                if frame.len() < 14 {
-                    return None;
-                }
-                let ether_type = u16::from_be_bytes([frame[12], frame[13]]);
-                if ether_type != 0x0800 {
-                    return None;
-                }
-                Some(&frame[14..])
-            }
-            while let Some(frame) = rx.recv().await {
-                if let Some(ip) = eth_to_ipv4(&frame) {
-                    if let Some(cb) = *ip_cb.lock().unwrap() {
-                        (cb.func)(ip.as_ptr(), ip.len() as u32, cb.user);
-                    }
-                }
-            }
-        });
-        // Attach to dataplane if present
-        let _ = h.rt.block_on(async move {
-            let c = client_arc.lock().unwrap();
-            if let Some(dp) = c.dataplane() {
-                dp.set_adapter_rx(tx);
-            }
-        });
-    }
+    // Ensure demux is wired (will no-op if already present)
+    h.ensure_adapter_rx();
     0
 }
 

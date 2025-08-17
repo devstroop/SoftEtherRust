@@ -1,6 +1,6 @@
 # SoftEther VPN (Rust)
 
-[![CI](https://github.com/SoftEtherUnofficial/SoftEtherClient/actions/workflows/ci.yml/badge.svg)](https://github.com/SoftEtherUnofficial/SoftEtherClient/actions/workflows/ci.yml)
+[![CI](https://github.com/devstroop/softether-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/devstroop/softether-rust/actions/workflows/ci.yml)
 
 ## 🎯 Project Overview
 

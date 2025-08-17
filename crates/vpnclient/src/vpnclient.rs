@@ -36,6 +36,7 @@ use tokio::time::{sleep, timeout};
 
 use crate::config::{AuthConfig, VpnConfig};
 use crate::dhcp::DhcpClient;
+use crate::dhcp::Lease as DhcpLease;
 use crate::network::SecureConnection;
 use crate::{CLIENT_BUILD, CLIENT_STRING, CLIENT_VERSION};
 #[cfg(feature = "adapter")]
@@ -99,6 +100,63 @@ pub struct NetworkSettings {
     pub subnet_mask: Option<Ipv4Addr>,
     pub gateway: Option<Ipv4Addr>,
     pub ports: Vec<u16>,
+}
+
+/// Helper: serialize a snapshot of NetworkSettings to a compact JSON used by FFI/events.
+/// If include_kind is true, a { kind: "settings", ... } wrapper is emitted to distinguish event payloads.
+pub fn settings_json_with_kind(ns: Option<&NetworkSettings>, include_kind: bool) -> String {
+    #[derive(serde::Serialize)]
+    struct SettingsJson<'a> {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kind: Option<&'a str>,
+        assigned_ipv4: Option<String>,
+        subnet_mask: Option<String>,
+        gateway: Option<String>,
+        dns_servers: Vec<String>,
+    }
+
+    let mut json = SettingsJson {
+        kind: include_kind.then_some("settings"),
+        assigned_ipv4: None,
+        subnet_mask: None,
+        gateway: None,
+        dns_servers: vec![],
+    };
+    if let Some(ns) = ns {
+        if let Some(ip) = ns.assigned_ipv4 {
+            json.assigned_ipv4 = Some(ip.to_string());
+        }
+        if let Some(m) = ns.subnet_mask {
+            json.subnet_mask = Some(m.to_string());
+        }
+        if let Some(g) = ns.gateway {
+            json.gateway = Some(g.to_string());
+        }
+        json.dns_servers = ns.dns_servers.iter().map(|d| d.to_string()).collect();
+    }
+    serde_json::to_string(&json).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Convert a DHCP lease into NetworkSettings (IP/mask/gateway/DNS)
+fn network_settings_from_lease(lease: &DhcpLease) -> NetworkSettings {
+    let mut ns = NetworkSettings::default();
+    ns.assigned_ipv4 = Some(std::net::Ipv4Addr::new(
+        lease.yiaddr[0],
+        lease.yiaddr[1],
+        lease.yiaddr[2],
+        lease.yiaddr[3],
+    ));
+    if let Some(m) = lease.subnet {
+        ns.subnet_mask = Some(std::net::Ipv4Addr::new(m[0], m[1], m[2], m[3]));
+    }
+    if let Some(r) = lease.router {
+        ns.gateway = Some(std::net::Ipv4Addr::new(r[0], r[1], r[2], r[3]));
+    }
+    for d in &lease.dns {
+        ns.dns_servers
+            .push(std::net::Ipv4Addr::new(d[0], d[1], d[2], d[3]));
+    }
+    ns
 }
 
 impl VpnClient {
@@ -369,24 +427,7 @@ impl VpnClient {
                         .flatten();
                     if let Some(lease) = lease {
                         // Reflect DHCP lease in network_settings for consistent summary logs
-                        let mut ns = NetworkSettings::default();
-                        ns.assigned_ipv4 = Some(std::net::Ipv4Addr::new(
-                            lease.yiaddr[0],
-                            lease.yiaddr[1],
-                            lease.yiaddr[2],
-                            lease.yiaddr[3],
-                        ));
-                        if let Some(m) = lease.subnet {
-                            ns.subnet_mask = Some(std::net::Ipv4Addr::new(m[0], m[1], m[2], m[3]));
-                        }
-                        if let Some(r) = lease.router {
-                            ns.gateway = Some(std::net::Ipv4Addr::new(r[0], r[1], r[2], r[3]));
-                        }
-                        for d in lease.dns {
-                            ns.dns_servers
-                                .push(std::net::Ipv4Addr::new(d[0], d[1], d[2], d[3]));
-                        }
-                        self.network_settings = Some(ns);
+                        self.network_settings = Some(network_settings_from_lease(&lease));
                         // Notify embedders that settings are available now (JSON event 1001)
                         self.emit_settings_snapshot();
 
@@ -486,24 +527,7 @@ impl VpnClient {
                         .ok()
                         .flatten();
                     if let Some(lease) = lease {
-                        let mut ns = NetworkSettings::default();
-                        ns.assigned_ipv4 = Some(std::net::Ipv4Addr::new(
-                            lease.yiaddr[0],
-                            lease.yiaddr[1],
-                            lease.yiaddr[2],
-                            lease.yiaddr[3],
-                        ));
-                        if let Some(m) = lease.subnet {
-                            ns.subnet_mask = Some(std::net::Ipv4Addr::new(m[0], m[1], m[2], m[3]));
-                        }
-                        if let Some(r) = lease.router {
-                            ns.gateway = Some(std::net::Ipv4Addr::new(r[0], r[1], r[2], r[3]));
-                        }
-                        for d in lease.dns {
-                            ns.dns_servers
-                                .push(std::net::Ipv4Addr::new(d[0], d[1], d[2], d[3]));
-                        }
-                        self.network_settings = Some(ns);
+                        self.network_settings = Some(network_settings_from_lease(&lease));
                         // Notify embedders that settings are available now (JSON event 1001)
                         self.emit_settings_snapshot();
                         // No platform adapter apply on iOS; extension will consume settings via FFI JSON/event
