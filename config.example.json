@@ -4,7 +4,7 @@
   "hub": "DEFAULT",
   "username": "user1",
   "password_hash": "base64-of-20-byte-sha0",
-  "insecure_skip_verify": false,
+  "skip_tls_verify": false,
   "use_compress": true,
   "use_encrypt": true,
   "max_connections": 2,

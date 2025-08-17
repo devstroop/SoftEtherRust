@@ -30,7 +30,7 @@ struct FfiConfig {
     #[serde(default)]
     password_hash: Option<String>,
     #[serde(default)]
-    insecure_skip_verify: bool,
+    skip_tls_verify: bool,
     #[serde(default = "default_true")]
     use_compress: bool,
     #[serde(default = "default_true")]
@@ -175,7 +175,7 @@ fn make_shared_config(c: FfiConfig) -> SharedConfig {
         username: c.username,
         password: c.password,
         password_hash: c.password_hash,
-        insecure_skip_verify: c.insecure_skip_verify,
+        skip_tls_verify: c.skip_tls_verify,
         use_compress: c.use_compress,
         use_encrypt: c.use_encrypt,
         max_connections: c.max_connections,

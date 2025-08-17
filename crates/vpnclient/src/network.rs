@@ -29,7 +29,7 @@ impl SecureConnection {
     pub fn connect(
         host: &str,
         port: u16,
-        insecure_skip_verify: bool,
+        skip_tls_verify: bool,
         timeout: Duration,
         sni_override: Option<&str>,
     ) -> Result<Self> {
@@ -60,7 +60,7 @@ impl SecureConnection {
 
         // Configure TLS connector
         let mut tls_builder = TlsConnector::builder();
-        if insecure_skip_verify {
+        if skip_tls_verify {
             static TLS_INSECURE_WARN_ONCE: Once = Once::new();
             TLS_INSECURE_WARN_ONCE
                 .call_once(|| warn!("TLS certificate verification disabled (insecure)"));

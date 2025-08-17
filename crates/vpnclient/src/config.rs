@@ -93,7 +93,7 @@ pub struct ConnectionConfig {
 
     /// Skip TLS certificate verification (insecure)
     #[serde(default)]
-    pub insecure_skip_verify: bool,
+    pub skip_tls_verify: bool,
 
     /// HTTP proxy configuration
     #[serde(default)]
@@ -185,7 +185,7 @@ impl Default for ConnectionConfig {
             use_compression: true,
             use_encryption: true,
             udp_acceleration: true,
-            insecure_skip_verify: false,
+            skip_tls_verify: false,
             proxy: None,
             apply_dns: false,
             half_connection: false,

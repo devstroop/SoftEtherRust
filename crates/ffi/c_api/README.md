@@ -43,7 +43,7 @@ Header: `include/softether_c_api.h`
 	"use_compress": false,
 	"use_encrypt": true,
 	"max_connections": 1,
-	"insecure_skip_verify": false
+	"skip_tls_verify": false
 }
 ```
 

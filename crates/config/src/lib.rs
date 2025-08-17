@@ -30,7 +30,7 @@ pub struct ClientConfig {
     pub password_hash: Option<String>,
     /// Skip TLS certificate verification (insecure). Default: false
     #[serde(default)]
-    pub insecure_skip_verify: bool,
+    pub skip_tls_verify: bool,
     pub use_compress: bool,
     pub use_encrypt: bool,
     pub max_connections: u32,
@@ -46,7 +46,7 @@ impl Default for ClientConfig {
             username: String::new(),
             password: None,
             password_hash: None,
-            insecure_skip_verify: false,
+            skip_tls_verify: false,
             use_compress: false,
             use_encrypt: true,
             max_connections: 1,

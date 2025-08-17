@@ -111,13 +111,13 @@ The client reads `config.json` using the shared `crates/config` schema:
 | use_compress | bool | no | true | Enable compression |
 | use_encrypt | bool | no | true | Enable RC4 bulk encryption |
 | max_connections | number | no | 2 | Desired total TCP links (server may cap) |
-| insecure_skip_verify | bool | no | false | Skip TLS cert validation (dangerous; for testing) |
+| skip_tls_verify | bool | no | false | Skip TLS cert validation (dangerous; for testing) |
 | udp_port | number | no | null | Reserved for UDP accel (not wired yet) |
 
 Notes:
 - Provide only one of password or password_hash.
 - Servers commonly expect SHA‑0(password + UPPER(username)).
-- For production, prefer the hashed variants and keep `insecure_skip_verify` = false.
+- For production, prefer the hashed variants and keep `skip_tls_verify` = false.
 
 Example minimal config:
 

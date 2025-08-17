@@ -10,7 +10,7 @@ The JSON config used by `softether_client_create` maps to `crates/config::Client
 - username: string, account name
 - password: string|null, optional if hashes provided
 - password_hash: string|null, base64 of 20-byte SHA-0(password + UPPER(username)) [preferred]
-- insecure_skip_verify: bool, skip TLS verification (development only)
+- skip_tls_verify: bool, skip TLS verification (development only)
 - use_compress: bool, enable LZ4 compression
 - use_encrypt: bool, enable encryption (recommended)
 - max_connections: number, number of parallel data links (1..N)
@@ -36,6 +36,6 @@ If you can't store plain passwords:
   "use_compress": false,
   "use_encrypt": true,
   "max_connections": 1,
-  "insecure_skip_verify": false
+  "skip_tls_verify": false
 }
 ```

@@ -197,7 +197,7 @@ impl VpnClient {
         v.connection.use_compression = cc.use_compress;
         v.connection.use_encryption = cc.use_encrypt;
         // respect TLS verification toggle
-        v.connection.insecure_skip_verify = cc.insecure_skip_verify;
+        v.connection.skip_tls_verify = cc.skip_tls_verify;
         // udp_port not wired in legacy config yet; reserved for future use
         Self::new(v)
     }
@@ -705,7 +705,7 @@ impl VpnClient {
         let connection = SecureConnection::connect(
             &self.config.host,
             self.config.port,
-            self.config.connection.insecure_skip_verify,
+            self.config.connection.skip_tls_verify,
             timeout_duration,
             self.sni_host.as_deref(),
         )?;
@@ -1104,7 +1104,7 @@ impl VpnClient {
         let (host, port, insecure, timeout_s, sni) = (
             self.config.host.clone(),
             self.config.port,
-            self.config.connection.insecure_skip_verify,
+            self.config.connection.skip_tls_verify,
             self.config.connection.timeout as u64,
             self.sni_host.clone(),
         );
@@ -1781,7 +1781,7 @@ impl VpnClient {
                 name, chosen_host, chosen_port
             );
             let h = chosen_host;
-            let insecure = self.config.connection.insecure_skip_verify;
+            let insecure = self.config.connection.skip_tls_verify;
             let timeout_s = self.config.connection.timeout as u64;
             let client_str = CLIENT_STRING.to_string();
             let client_ver = CLIENT_VERSION;

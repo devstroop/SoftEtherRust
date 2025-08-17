@@ -66,7 +66,7 @@ async fn connect(config_path: &str, insecure_flag: bool) -> Result<()> {
     if insecure_flag {
         if allow_insecure {
             info!("--insecure enabled for this run (overrides config)");
-            cc.insecure_skip_verify = true;
+            cc.skip_tls_verify = true;
         } else {
             info!("--insecure ignored: enable feature 'allow-insecure' or set env SOFTETHER_VPNCLIENT_ALLOW_INSECURE=1");
         }
