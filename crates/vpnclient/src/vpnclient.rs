@@ -38,6 +38,7 @@ use crate::config::{AuthConfig, VpnConfig};
 use crate::dhcp::DhcpClient;
 use crate::network::SecureConnection;
 use crate::{CLIENT_BUILD, CLIENT_STRING, CLIENT_VERSION};
+#[cfg(feature = "adapter")]
 use adapter::VirtualAdapter;
 use config as shared_config;
 use mayaqua::get_tick64;
@@ -58,6 +59,7 @@ pub struct VpnClient {
     is_connected: bool,
     pub redirect_ticket: Option<[u8; 20]>,
     network_settings: Option<NetworkSettings>,
+    #[cfg(feature = "adapter")]
     adapter: Option<VirtualAdapter>,
     // Server policy constraints (best-effort parsed from welcome/auth)
     server_policy_max_connections: Option<u32>,
@@ -168,6 +170,7 @@ impl VpnClient {
             is_connected: false,
             redirect_ticket: None,
             network_settings: None,
+            #[cfg(feature = "adapter")]
             adapter: None,
             server_policy_max_connections: None,
             server_negotiated_max_connections: None,
@@ -329,6 +332,7 @@ impl VpnClient {
                     .and_then(|n| n.assigned_ipv4)
                     .is_none()
             {
+                #[cfg(feature = "adapter")]
                 if let (Some(dp), Some(adp)) = (self.dataplane.clone(), self.adapter.as_ref()) {
                     let ifname = adp.name().to_string();
                     // Ensure the dataplane has at least one registered link before attempting DHCP
@@ -585,6 +589,7 @@ impl VpnClient {
         }
 
         // Tear down virtual adapter (utun)
+        #[cfg(feature = "adapter")]
         if let Some(mut adp) = self.adapter.take() {
             let _ = adp.destroy().await;
         }
@@ -841,15 +846,26 @@ impl VpnClient {
         // Upload authentication using the cedar-built pack (no legacy fallback)
         let welcome_pack = connection.upload_auth(auth_pack)?;
 
-        // Validate pencore if provided by server
+        // Validate pencore if provided by server (best-effort; don't fail connection on unknown/short blobs)
         if let Ok(pencore_bytes) = welcome_pack
             .get_data("pencore")
             .or_else(|_| welcome_pack.get_data("PenCore"))
         {
-            connection
-                .handle_pencore(pencore_bytes)
-                .context("Server returned invalid pencore data")?;
-            debug!("Validated pencore blob ({} bytes)", pencore_bytes.len());
+            match connection.handle_pencore(pencore_bytes) {
+                Ok(()) => {
+                    debug!(
+                        "Validated pencore blob ({} bytes)",
+                        pencore_bytes.len()
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        "Ignoring invalid pencore blob ({} bytes): {}",
+                        pencore_bytes.len(),
+                        e
+                    );
+                }
+            }
         }
 
         // Check for redirection via either explicit host fields or Redirect flag with Ip/Port
@@ -1672,7 +1688,8 @@ impl VpnClient {
 
     /// Log a concise adapter and network summary once configured
     fn log_adapter_summary(&self) {
-        if let Some(ref adp) = self.adapter {
+    #[cfg(feature = "adapter")]
+    if let Some(ref adp) = self.adapter {
             if let Some(ref ns) = self.network_settings {
                 if let Some(ip) = ns.assigned_ipv4 {
                     let bits = ns.subnet_mask.map(Self::mask_to_prefix).unwrap_or(32);
@@ -1998,7 +2015,14 @@ impl VpnClient {
 
     /// Start the utun adapter and bi-directional bridging between the adapter and the session/dataplane
     async fn start_adapter_and_bridge(&mut self) -> Result<()> {
+        #[cfg(not(feature = "adapter"))]
+        {
+            // No adapter bridging when the adapter feature is disabled
+            self.bridge_ready = false;
+            return Ok(());
+        }
         // Ensure adapter exists
+        #[cfg(feature = "adapter")]
         if self.adapter.is_none() {
             let name = self.config.client.interface_name.clone();
             self.adapter = Some(VirtualAdapter::new(name, None));
@@ -2007,8 +2031,8 @@ impl VpnClient {
             }
         }
 
-        // Get IO handle (macOS)
-        #[cfg(target_os = "macos")]
+        // Get IO handle (macOS) – only when adapter feature is enabled
+        #[cfg(all(target_os = "macos", feature = "adapter"))]
         let io = {
             let adp = self.adapter.as_ref().expect("adapter");
             adp.io_handle()?
@@ -2020,7 +2044,7 @@ impl VpnClient {
             warn!("Dataplane not initialized; skipping adapter bridging");
             return Ok(());
         }
-        let dp = dp_opt.unwrap();
+    let dp = dp_opt.unwrap();
         // Create adapter<->dataplane channels
         let (adp_to_dp_tx, adp_to_dp_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         let (dp_to_adp_tx, mut dp_to_adp_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -2028,8 +2052,8 @@ impl VpnClient {
         dp.set_adapter_tx(adp_to_dp_rx); // adapter -> session/dataplane
         dp.set_adapter_rx(dp_to_adp_tx); // session/dataplane -> adapter
 
-        // Task: adapter -> session (read packets from utun and send into session)
-        #[cfg(target_os = "macos")]
+    // Task: adapter -> session (read packets from utun and send into session)
+    #[cfg(all(target_os = "macos", feature = "adapter"))]
         {
             let io_r = io.clone();
             let tx = adp_to_dp_tx.clone();
@@ -2096,8 +2120,8 @@ impl VpnClient {
             self.aux_tasks.push(h);
         }
 
-        // Task: session -> adapter (read frames emitted by session and write to utun)
-        #[cfg(target_os = "macos")]
+    // Task: session -> adapter (read frames emitted by session and write to utun)
+    #[cfg(all(target_os = "macos", feature = "adapter"))]
         {
             let io_w = io.clone();
             // Helper: strip Ethernet header if IPv4 and return IP payload
@@ -2229,16 +2253,20 @@ impl VpnClient {
         let ns = match &self.network_settings {
             Some(n) => n.clone(),
             None => {
-                // Even if we couldn't parse settings, ensure adapter exists and start macOS monitor best-effort
-                if self.adapter.is_none() {
-                    let name = self.config.client.interface_name.clone();
-                    self.adapter = Some(VirtualAdapter::new(name, None));
-                    if let Some(adp) = &mut self.adapter {
-                        adp.create().await?;
+                #[cfg(feature = "adapter")]
+                {
+                    // Even if we couldn't parse settings, ensure adapter exists and start macOS monitor best-effort
+                    if self.adapter.is_none() {
+                        let name = self.config.client.interface_name.clone();
+                        self.adapter = Some(VirtualAdapter::new(name, None));
+                        if let Some(adp) = &mut self.adapter {
+                            adp.create().await?;
+                        }
                     }
                 }
-                #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", feature = "adapter"))]
                 {
+                    #[cfg(feature = "adapter")]
                     if self.bridge_ready && !self.dhcp_spawned {
                         if let Some(adp) = &self.adapter {
                             let ifname = adp.name().to_string();
@@ -2264,6 +2292,7 @@ impl VpnClient {
             .iter()
             .any(|(k, v)| k.to_ascii_lowercase().contains("norouting") && *v != 0);
         // Always ensure the adapter exists so we can configure and/or monitor
+        #[cfg(feature = "adapter")]
         if self.adapter.is_none() {
             let name = self.config.client.interface_name.clone();
             self.adapter = Some(VirtualAdapter::new(name, None));
@@ -2271,13 +2300,14 @@ impl VpnClient {
                 adp.create().await?;
             }
         }
+        #[cfg(feature = "adapter")]
         let adapter = self.adapter.as_ref().unwrap();
 
         // Configure IP/mask on the adapter when provided by server; otherwise start DHCP/monitoring on macOS
         let ip = match ns.assigned_ipv4 {
             Some(i) => i,
             None => {
-                #[cfg(target_os = "macos")]
+                #[cfg(all(target_os = "macos", feature = "adapter"))]
                 {
                     if self.bridge_ready && !self.dhcp_spawned {
                         let ifname = adapter.name().to_string();
@@ -2307,18 +2337,21 @@ impl VpnClient {
             info!("[INFO] network_settings_applying");
         }
 
-        adapter
+    #[cfg(feature = "adapter")]
+    adapter
             .set_ip_address(&ip.to_string(), &mask.to_string())
             .await?;
 
         // Parity logs similar to third-party client
         let cidr = Self::mask_to_prefix(mask);
-        info!("Interface {}: {}/{}", adapter.name(), ip, cidr);
+    #[cfg(feature = "adapter")]
+    info!("Interface {}: {}/{}", adapter.name(), ip, cidr);
 
         // Only add default route when routing is allowed
-        if !no_routing {
+    if !no_routing {
             if let Some(gw) = ns.gateway {
-                let _ = adapter
+        #[cfg(feature = "adapter")]
+        let _ = adapter
                     .add_route("0.0.0.0/0", &gw.to_string())
                     .await
                     .map_err(|e| {
@@ -2337,6 +2370,7 @@ impl VpnClient {
         #[cfg(target_os = "macos")]
         {
             use tokio::process::Command;
+            #[cfg(feature = "adapter")]
             let _ = Command::new("ifconfig")
                 .arg(adapter.name())
                 .arg("mtu")
@@ -2347,15 +2381,18 @@ impl VpnClient {
         #[cfg(target_os = "linux")]
         {
             use tokio::process::Command;
-            let _ = Command::new("ip")
-                .arg("link")
-                .arg("set")
-                .arg("dev")
-                .arg(adapter.name())
-                .arg("mtu")
-                .arg("1500")
-                .output()
-                .await;
+            #[cfg(feature = "adapter")]
+            {
+                let _ = Command::new("ip")
+                    .arg("link")
+                    .arg("set")
+                    .arg("dev")
+                    .arg(adapter.name())
+                    .arg("mtu")
+                    .arg("1500")
+                    .output()
+                    .await;
+            }
         }
         info!("MTU set to 1500");
         info!("[INFO] connected");
@@ -2450,11 +2487,14 @@ impl VpnClient {
         // Spawn macOS interface/DNS monitor to mirror Go/C UX prints (best-effort)
         #[cfg(target_os = "macos")]
         {
-            let ifname = adapter.name().to_string();
-            let h = tokio::spawn(async move {
-                monitor_darwin_interfaces(&[ifname]).await;
-            });
-            self.aux_tasks.push(h);
+            #[cfg(feature = "adapter")]
+            {
+                let ifname = adapter.name().to_string();
+                let h = tokio::spawn(async move {
+                    monitor_darwin_interfaces(&[ifname]).await;
+                });
+                self.aux_tasks.push(h);
+            }
         }
 
         Ok(())

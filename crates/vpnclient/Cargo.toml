@@ -14,7 +14,7 @@ path = "src/main.rs"
 mayaqua = { path = "../mayaqua" }
 cedar = { path = "../cedar" }
 pencore = { path = "../pencore" }
-adapter = { path = "../adapter" }
+adapter = { path = "../adapter", optional = true }
 config = { path = "../config" }
 
 # Async runtime
@@ -48,12 +48,13 @@ thiserror = "1.0"
 tempfile = "3.8"
 
 [features]
-default = []
+default = ["adapter"]
 trace = []
 adapter-tests = []
 test-redirect = []
 dev-proto = []
 allow-insecure = []
+adapter = ["dep:adapter"]
 
 # Platform-specific network adapter
 [target.'cfg(target_os = "macos")'.dependencies]

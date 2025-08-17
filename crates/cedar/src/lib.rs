@@ -25,6 +25,7 @@ pub mod connection;
 pub mod constants;
 pub mod handshake;
 pub mod session;
+#[cfg(feature = "udp-accel")]
 pub mod udp_accel;
 
 pub use auth::*;
@@ -34,6 +35,7 @@ pub use dataplane::*;
 pub use redirect::*;
 pub use session_mgr::*;
 pub use types::*;
+#[cfg(feature = "udp-accel")]
 pub use udp_accel::*;
 pub use watermark::*;
 

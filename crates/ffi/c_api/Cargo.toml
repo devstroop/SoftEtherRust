@@ -12,9 +12,9 @@ crate-type = ["staticlib", "cdylib"]
 name = "softether_c_api"
 
 [dependencies]
-vpnclient = { path = "../../vpnclient" }
-cedar = { path = "../../cedar" }
-mayaqua = { path = "../../mayaqua" }
+vpnclient = { path = "../../vpnclient", default-features = false }
+cedar = { path = "../../cedar", default-features = false }
+mayaqua = { path = "../../mayaqua", default-features = false }
 config = { path = "../../config" }
 log = "0.4"
 serde = { version = "1.0", features = ["derive"] }

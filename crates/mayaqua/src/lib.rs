@@ -3,6 +3,7 @@
 //! Core utilities and platform abstraction layer for SoftEther VPN Rust implementation.
 //! Based on the original SoftEther Mayaqua kernel.
 
+#[cfg(feature = "compress")]
 pub mod compress;
 pub mod crypto;
 pub mod error;

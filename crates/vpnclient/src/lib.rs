@@ -3,7 +3,8 @@
 //! A complete VPN client implementation in Rust that connects to SoftEther VPN servers
 //! and establishes secure tunnels using virtual network adapters.
 
-// Use external adapter crate to align with module separation
+// Re-export adapter crate only when the optional feature is enabled
+#[cfg(feature = "adapter")]
 pub use adapter;
 mod config;
 pub mod dhcp;

@@ -16,9 +16,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # Networking
-tokio-tungstenite = "0.20"
-rustls = "0.21"
-tokio-rustls = "0.24"
+tokio-tungstenite = { version = "0.20", optional = true }
+rustls = { version = "0.21", optional = true }
+tokio-rustls = { version = "0.24", optional = true }
 
 # Crypto
 ring = "0.16"
@@ -32,14 +32,17 @@ log = "0.4"
 rand = "0.8"
 uuid = { version = "1.0", features = ["v4"] }
 dirs = "5.0"
-flate2 = "1.0"
+flate2 = { version = "1.0", optional = true }
 libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
 
 [features]
-default = []
+# Keep defaults to preserve behavior outside FFI builds. The FFI crate depends on mayaqua with
+# default-features = false, which disables these heavy dependencies for iOS.
+default = ["compress", "tls", "websocket"]
+
 # Feature for platform-specific functionality
 windows = []
 macos = []
@@ -47,6 +50,11 @@ linux = []
 ios = []
 android = []
 trace = []
+
+# Subsystem toggles
+compress = ["dep:flate2"]
+tls = ["dep:rustls", "dep:tokio-rustls"]
+websocket = ["dep:tokio-tungstenite"]
 
 [lib]
 name = "mayaqua"
