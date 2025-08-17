@@ -374,24 +374,6 @@ impl VpnConfig {
     }
 }
 
-/// Create a sample configuration file
-pub fn create_sample_config<P: AsRef<Path>>(path: P) -> Result<()> {
-    // Create a proper 20-byte SHA1 hash for the sample password
-    let dummy_hash = [0u8; 20]; // 20 zero bytes as a dummy SHA1 hash
-    let encoded_hash = base64::prelude::BASE64_STANDARD.encode(&dummy_hash);
-
-    let sample_config = VpnConfig::new_password(
-        "vpn.example.com".to_string(),
-        443,
-        "DEFAULT".to_string(),
-        "username".to_string(),
-        encoded_hash,
-    );
-
-    sample_config.to_file(path)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

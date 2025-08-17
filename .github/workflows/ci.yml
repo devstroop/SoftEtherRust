@@ -47,10 +47,10 @@ jobs:
       - name: Cargo test (workspace)
         run: cargo test --locked --workspace
 
-      - name: Build release artifacts (vpnclient + c_api)
+      - name: Build release artifacts (vpnclient + ffi)
         run: |
           cargo build --release -p vpnclient --locked
-          cargo build --release -p softether_c_api --locked
+          cargo build --release -p softether_ffi --locked
 
   supply-chain:
     name: Supply chain checks

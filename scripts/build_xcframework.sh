@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build the softether_c_api static library for iOS device and simulators, then produce an XCFramework.
+# Build the softether_ffi static library for iOS device and simulators, then produce an XCFramework.
 # Requires Rust targets installed: aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios.
 # Usage: ./scripts/build_xcframework.sh [--release] [--copy-to /absolute/path]
 PROFILE=debug
@@ -27,7 +27,7 @@ for ((i=1; i<=$#; i++)); do
 done
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
-HEADER="$ROOT_DIR/crates/ffi/c_api/include/softether_c_api.h"
+HEADER="$ROOT_DIR/crates/ffi/include/softether_ffi.h"
 OUT_DIR="$ROOT_DIR/target/xcframework"
 mkdir -p "$OUT_DIR"
 
@@ -41,19 +41,19 @@ done
 # Build static libs (use explicit manifest-path so script works from any CWD)
 # Use safe expansion for arrays under 'set -u'
 SAFE_FLAGS_DEV=${CARGO_FLAGS[@]:-}
-cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --target aarch64-apple-ios ${SAFE_FLAGS_DEV} -p softether_c_api
+cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --target aarch64-apple-ios ${SAFE_FLAGS_DEV} -p softether_ffi
 SAFE_FLAGS_SIM=${CARGO_FLAGS[@]:-}
-cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --target aarch64-apple-ios-sim ${SAFE_FLAGS_SIM} -p softether_c_api
+cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --target aarch64-apple-ios-sim ${SAFE_FLAGS_SIM} -p softether_ffi
 SAFE_FLAGS_X86=${CARGO_FLAGS[@]:-}
-cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --target x86_64-apple-ios ${SAFE_FLAGS_X86} -p softether_c_api
+cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --target x86_64-apple-ios ${SAFE_FLAGS_X86} -p softether_ffi
 
 # Paths
-LIB_DEV="$ROOT_DIR/target/aarch64-apple-ios/$BUILD_DIR/libsoftether_c_api.a"
-LIB_SIM_ARM64="$ROOT_DIR/target/aarch64-apple-ios-sim/$BUILD_DIR/libsoftether_c_api.a"
-LIB_SIM_X86="$ROOT_DIR/target/x86_64-apple-ios/$BUILD_DIR/libsoftether_c_api.a"
+LIB_DEV="$ROOT_DIR/target/aarch64-apple-ios/$BUILD_DIR/libsoftether_ffi.a"
+LIB_SIM_ARM64="$ROOT_DIR/target/aarch64-apple-ios-sim/$BUILD_DIR/libsoftether_ffi.a"
+LIB_SIM_X86="$ROOT_DIR/target/x86_64-apple-ios/$BUILD_DIR/libsoftether_ffi.a"
 
 # Create a universal simulator lib
-LIPO_SIM="$OUT_DIR/libsoftether_c_api_sim.a"
+LIPO_SIM="$OUT_DIR/libsoftether_ffi_sim.a"
 rm -f "$LIPO_SIM"
 lipo -create "$LIB_SIM_ARM64" "$LIB_SIM_X86" -output "$LIPO_SIM"
 

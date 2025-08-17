@@ -1,6 +1,6 @@
 # SoftEther Rust FFI: Embedding Guide
 
-This guide explains how to embed the Rust SoftEther VPN client into apps via the C API (`softether_c_api`). It covers:
+This guide explains how to embed the Rust SoftEther VPN client into apps via the C API (`softether_ffi`). It covers:
 
 - What the C API provides and how callbacks work
 - JSON config schema and password hashing options
@@ -8,7 +8,7 @@ This guide explains how to embed the Rust SoftEther VPN client into apps via the
 - Android (JNI, VpnService/TUN)
 - A tiny desktop C harness for smoke tests
 
-See also: `crates/ffi/c_api/include/softether_c_api.h`.
+See also: `crates/ffi/include/softether_ffi.h`.
 
 ## C API surface
 
@@ -62,4 +62,4 @@ For more config details, see `docs/ffi/config.md`.
 
 ## Example harness
 
-For a tiny C smoke test and build notes, see `docs/ffi/c-harness.md` and `crates/ffi/c_api/examples/ffi_harness.c`.
+For a tiny C smoke test and build notes, see `docs/ffi/c-harness.md` and `crates/ffi/examples/ffi_harness.c`.

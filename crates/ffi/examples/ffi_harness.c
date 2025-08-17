@@ -2,7 +2,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include "../include/softether_c_api.h"
+#include "../include/softether_ffi.h"
 
 static void on_state(int s, void* u) { fprintf(stderr, "state=%d\n", s); }
 static void on_event(int lvl, int code, const char* msg, void* u) { fprintf(stderr, "event[%d/%d]: %s\n", lvl, code, msg?msg:"(null)"); }

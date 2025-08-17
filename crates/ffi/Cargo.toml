@@ -1,5 +1,5 @@
 [package]
-name = "softether_c_api"
+name = "softether_ffi"
 version = "0.1.0"
 edition = "2021"
 authors = ["SoftEther VPN Rust Team"]
@@ -9,13 +9,13 @@ license = "Apache-2.0"
 [lib]
 # Build both a static library (preferred for iOS) and a dynamic library (for desktop/testing)
 crate-type = ["staticlib", "cdylib"]
-name = "softether_c_api"
+name = "softether_ffi"
 
 [dependencies]
-vpnclient = { path = "../../vpnclient", default-features = false }
-cedar = { path = "../../cedar", default-features = false }
-mayaqua = { path = "../../mayaqua", default-features = false }
-config = { path = "../../config" }
+vpnclient = { path = "../vpnclient", default-features = false }
+cedar = { path = "../cedar", default-features = false }
+mayaqua = { path = "../mayaqua", default-features = false }
+config = { path = "../config" }
 log = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

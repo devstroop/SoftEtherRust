@@ -7,7 +7,7 @@ members = [
     "crates/pencore",
     "crates/adapter",
     # FFI crates
-    "crates/ffi/c_api"
+    "crates/ffi"
 ]
 resolver = "2"
 
@@ -45,6 +45,6 @@ codegen-units = 1
 strip = "symbols"
 panic = "abort"
 
-[profile.release.package.softether_c_api]
+[profile.release.package.softether_ffi]
 opt-level = "z"
 

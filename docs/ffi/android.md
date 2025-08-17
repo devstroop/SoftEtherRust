@@ -4,9 +4,9 @@ Wire the Rust client via the C API into an Android VpnService.
 
 ## Build native libraries
 
-- Build `softether_c_api` as `.so` for each ABI you need: `armeabi-v7a`, `arm64-v8a`, `x86_64`.
-- Place them under `app/src/main/jniLibs/<abi>/libsoftether_c_api.so`.
-- Include the header `softether_c_api.h` in your JNI C/C++ folder.
+- Build `softether_ffi` as `.so` for each ABI you need: `armeabi-v7a`, `arm64-v8a`, `x86_64`.
+- Place them under `app/src/main/jniLibs/<abi>/libsoftether_ffi.so`.
+- Include the header `softether_ffi.h` in your JNI C/C++ folder.
 
 ## JNI bridge (C/C++)
 
@@ -14,7 +14,7 @@ Example signatures:
 
 ```c
 #include <jni.h>
-#include "softether_c_api.h"
+#include "softether_ffi.h"
 
 JNIEXPORT jlong JNICALL Java_com_example_vpn_Native_seCreate(JNIEnv* env, jclass, jstring jjson) {
   const char* json = (*env)->GetStringUTFChars(env, jjson, 0);
@@ -55,7 +55,7 @@ class MyVpnService: VpnService() {
 
   override fun onCreate() {
     super.onCreate()
-    System.loadLibrary("softether_c_api")
+    System.loadLibrary("softether_ffi")
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

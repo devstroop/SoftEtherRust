@@ -9,12 +9,12 @@ Use the helper script to build a universal XCFramework for device and simulator:
 - `scripts/build_xcframework.sh [--release] [--copy-to /path/to/YouriOSRepo/Vendor]`
   - Produces: `target/xcframework/SoftEtherClient.xcframework`
   - Optionally copies the `.xcframework` into your external iOS app repo via `--copy-to`.
-  - Contains static libs per-arch and `Headers/softether_c_api.h`.
+  - Contains static libs per-arch and `Headers/softether_ffi.h`.
 
 ## Add to Xcode
 
 - Add the library (per-arch) and header to your app/extension target.
-- Create a bridging header and import `softether_c_api.h`.
+- Create a bridging header and import `softether_ffi.h`.
 - In the extension capabilities, enable Network Extensions (Packet Tunnel Provider).
 
 ## Swift usage

@@ -1595,7 +1595,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "softether_c_api"
+name = "softether_ffi"
 version = "0.1.0"
 dependencies = [
  "anyhow",
