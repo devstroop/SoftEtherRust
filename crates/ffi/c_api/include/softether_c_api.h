@@ -26,6 +26,15 @@ int softether_client_set_rx_callback(softether_client_t* handle, softether_rx_cb
 // Send a single L2 frame into the tunnel. Returns 1 on queued, 0 if no link available, negative on error.
 int softether_client_send_frame(softether_client_t* handle, const uint8_t* data, uint32_t len);
 
+// IP-mode I/O (for NEPacketTunnelFlow on iOS):
+// Register an RX callback to receive IPv4 packets (EtherType 0x0800 stripped). Non-IPv4 frames are dropped.
+typedef void (*softether_ip_rx_cb_t)(const uint8_t* ip_packet, uint32_t len, void* user);
+int softether_client_set_ip_rx_callback(softether_client_t* handle, softether_ip_rx_cb_t cb, void* user);
+
+// Send a single IPv4 packet. For now, only DHCP (UDP 67/68) is wrapped into Ethernet and sent.
+// Returns 1 on queued, 0 if no link available, or a negative error (e.g., -12 for unsupported packet type).
+int softether_client_send_ip_packet(softether_client_t* handle, const uint8_t* data, uint32_t len);
+
 // State callbacks
 // Called on state changes: 0=Idle,1=Connecting,2=Established,3=Disconnecting
 typedef void (*softether_state_cb_t)(int state, void* user);

@@ -25,3 +25,10 @@ base64 = { workspace = true }
 
 [features]
 default = []
+
+[profile.release]
+# Optimize for size for the FFI archive to reduce iOS staticlib size
+opt-level = "s"
+codegen-units = 1
+lto = "thin"
+strip = "symbols"

@@ -10,6 +10,7 @@ use base64::Engine; // for STANDARD.decode()
 use serde::Deserialize;
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::mpsc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use config::ClientConfig as SharedConfig;
 use vpnclient::ClientState;
@@ -73,12 +74,40 @@ struct EventCb {
 unsafe impl Send for EventCb {}
 unsafe impl Sync for EventCb {}
 
+#[derive(Clone, Copy)]
+struct IpRxCb {
+    func: extern "C" fn(*const u8, u32, *mut std::ffi::c_void),
+    user: *mut std::ffi::c_void,
+}
+
+unsafe impl Send for IpRxCb {}
+unsafe impl Sync for IpRxCb {}
+
+fn gen_laa_mac() -> [u8; 6] {
+    // Generate a pseudo-random but locally-administered, unicast MAC from time-based seed
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut x = now ^ ((now << 13) | (now >> 7));
+    // xorshift-like mixing
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    let bytes = x.to_le_bytes();
+    let mut mac = [bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]];
+    // Ensure locally administered (bit1 = 1) and unicast (bit0 = 0)
+    mac[0] = (mac[0] | 0b0000_0010) & 0b1111_1110;
+    mac
+}
+
 struct ClientHandle {
     rt: Runtime,
     client: Arc<Mutex<VpnClient>>, // guarded for FFI concurrency
     // Frame channels (optional wiring for future use)
     adapter_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
-    rx_cb: Option<RxCb>,
+    rx_cb: Arc<Mutex<Option<RxCb>>>,
+    ip_rx_cb: Arc<Mutex<Option<IpRxCb>>>,
     state_cb: Option<Arc<StateCb>>,
     event_cb: Option<Arc<EventCb>>,
 }
@@ -138,7 +167,8 @@ pub extern "C" fn softether_client_create(json_config: *const c_char) -> *mut so
         rt,
         client: Arc::new(Mutex::new(client)),
         adapter_tx: None,
-        rx_cb: None,
+    rx_cb: Arc::new(Mutex::new(None)),
+    ip_rx_cb: Arc::new(Mutex::new(None)),
         state_cb: None,
         event_cb: None,
     };
@@ -391,17 +421,38 @@ pub extern "C" fn softether_client_set_rx_callback(
         return -1;
     }
     let h = unsafe { &mut *(handle as *mut ClientHandle) };
-    h.rx_cb = cb.map(|f| RxCb { func: f, user });
+    {
+        let mut g = h.rx_cb.lock().unwrap();
+        *g = cb.map(|f| RxCb { func: f, user });
+    }
 
-    // Wire dataplane->adapter_rx callback via channel; set now if connected or later on connect.
+    // Build a single adapter_rx channel and demux frames to L2 callback and optional IP callback
     let client_arc = h.client.clone();
-    let cb_opt = h.rx_cb;
+    let rx_cb = h.rx_cb.clone();
+    let ip_cb = h.ip_rx_cb.clone();
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
     h.adapter_tx = Some(tx.clone());
     let _ = h.rt.spawn(async move {
+        fn eth_to_ipv4(frame: &[u8]) -> Option<&[u8]> {
+            if frame.len() < 14 {
+                return None;
+            }
+            let ether_type = u16::from_be_bytes([frame[12], frame[13]]);
+            if ether_type != 0x0800 {
+                return None;
+            }
+            Some(&frame[14..])
+        }
         while let Some(frame) = rx.recv().await {
-            if let Some(cb) = cb_opt {
+            // L2 callback
+            if let Some(cb) = *rx_cb.lock().unwrap() {
                 (cb.func)(frame.as_ptr(), frame.len() as u32, cb.user);
+            }
+            // IP callback
+            if let Some(ip) = eth_to_ipv4(&frame) {
+                if let Some(cb) = *ip_cb.lock().unwrap() {
+                    (cb.func)(ip.as_ptr(), ip.len() as u32, cb.user);
+                }
             }
         }
     });
@@ -438,6 +489,111 @@ pub extern "C" fn softether_client_send_frame(
         -2
     });
     ok
+}
+
+/// Register an IPv4 RX callback to receive IP packets (EtherType 0x0800 frames converted to IP payloads).
+#[no_mangle]
+pub extern "C" fn softether_client_set_ip_rx_callback(
+    handle: *mut softether_client_t,
+    cb: Option<extern "C" fn(*const u8, u32, *mut std::ffi::c_void)>,
+    user: *mut std::ffi::c_void,
+) -> c_int {
+    if handle.is_null() {
+        return -1;
+    }
+    let h = unsafe { &mut *(handle as *mut ClientHandle) };
+    {
+        let mut g = h.ip_rx_cb.lock().unwrap();
+        *g = cb.map(|f| IpRxCb { func: f, user });
+    }
+    // If there is no adapter_rx channel yet (no L2 callback set), create one that demuxes to IP only
+    let need_wire = h.adapter_tx.is_none();
+    if need_wire {
+        let client_arc = h.client.clone();
+        let ip_cb = h.ip_rx_cb.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        h.adapter_tx = Some(tx.clone());
+        // Demux Ethernet->IPv4 and invoke IP callback
+        let _ = h.rt.spawn(async move {
+            fn eth_to_ipv4(frame: &[u8]) -> Option<&[u8]> {
+                if frame.len() < 14 {
+                    return None;
+                }
+                let ether_type = u16::from_be_bytes([frame[12], frame[13]]);
+                if ether_type != 0x0800 {
+                    return None;
+                }
+                Some(&frame[14..])
+            }
+            while let Some(frame) = rx.recv().await {
+                if let Some(ip) = eth_to_ipv4(&frame) {
+                    if let Some(cb) = *ip_cb.lock().unwrap() {
+                        (cb.func)(ip.as_ptr(), ip.len() as u32, cb.user);
+                    }
+                }
+            }
+        });
+        // Attach to dataplane if present
+        let _ = h.rt.block_on(async move {
+            let c = client_arc.lock().unwrap();
+            if let Some(dp) = c.dataplane() {
+                dp.set_adapter_rx(tx);
+            }
+        });
+    }
+    0
+}
+
+/// Send a single IPv4 packet. For now, only DHCP (UDP 67/68) is wrapped into Ethernet and sent.
+#[no_mangle]
+pub extern "C" fn softether_client_send_ip_packet(
+    handle: *mut softether_client_t,
+    data: *const u8,
+    len: u32,
+) -> c_int {
+    if handle.is_null() || data.is_null() {
+        return -1;
+    }
+    let buf = unsafe { std::slice::from_raw_parts(data, len as usize) };
+    if buf.len() < 20 {
+        return -10;
+    }
+    let ver_ihl = buf[0];
+    if (ver_ihl >> 4) != 4 {
+        return -11; // non-IPv4
+    }
+    let ihl = ((ver_ihl & 0x0f) as usize) * 4;
+    if ihl < 20 || buf.len() < ihl + 8 {
+        return -10;
+    }
+    let proto = buf[9];
+    if proto != 17 {
+        return -12; // only UDP supported initially
+    }
+    let src_port = u16::from_be_bytes([buf[ihl], buf[ihl + 1]]);
+    let dst_port = u16::from_be_bytes([buf[ihl + 2], buf[ihl + 3]]);
+    let is_dhcp = (src_port == 67 || src_port == 68) || (dst_port == 67 || dst_port == 68);
+    if !is_dhcp {
+        return -12; // unsupported packet until full IP-mode exists
+    }
+    // Wrap IP payload in Ethernet broadcast frame
+    let src_mac = gen_laa_mac();
+    let mut frame = Vec::with_capacity(14 + buf.len());
+    frame.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+    frame.extend_from_slice(&src_mac);
+    frame.extend_from_slice(&0x0800u16.to_be_bytes());
+    frame.extend_from_slice(buf);
+
+    let h = unsafe { &mut *(handle as *mut ClientHandle) };
+    let client_arc = h.client.clone();
+    let res: i32 = h.rt.block_on(async move {
+        let c = client_arc.lock().unwrap();
+        if let Some(dp) = c.dataplane() {
+            return if dp.send_frame(frame) { 1 } else { 0 };
+        }
+        -2
+    });
+    res
 }
 
 /// Register a state change callback.

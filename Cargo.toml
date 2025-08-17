@@ -43,4 +43,8 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+panic = "abort"
+
+[profile.release.package.softether_c_api]
+opt-level = "z"
 
