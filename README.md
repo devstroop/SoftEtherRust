@@ -16,6 +16,24 @@ Looking to embed the Rust client into an iOS/Android/desktop app? Start here:
 - docs/ffi/config.md – JSON config schema and password options
 - docs/ffi/c-harness.md – tiny C harness to smoke-test the FFI
 
+### iOS XCFramework (quick build)
+
+To build the Rust FFI as an XCFramework for iOS and copy it into an iOS project:
+
+Prerequisites (once):
+- rustup targets: aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios
+   - If needed: `rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios`
+
+Build and copy (release):
+
+```bash
+./scripts/build_xcframework.sh --release --copy-to /Volumes/EXT/SoftEtherUnofficial/WorxVPN-iOS/RustFramework/SoftEtherClient.xcframework
+```
+
+The script builds static libraries for device and simulators, creates `SoftEtherClient.xcframework` under `target/xcframework/`, and copies it into the specified destination path. For debug builds, use `--debug` instead of `--release`.
+
+See also: docs/ffi/ios.md for end-to-end iOS integration details (headers, bridging, and NetworkExtension setup).
+
 ## Project Structure
 
 ```
