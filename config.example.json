@@ -1,0 +1,12 @@
+{
+  "server": "vpn.example.com",
+  "port": 443,
+  "hub": "DEFAULT",
+  "username": "user1",
+  "password_hashed_sha1_b64": "base64-of-20-byte-sha1",
+  "insecure_skip_verify": false,
+  "use_compress": true,
+  "use_encrypt": true,
+  "max_connections": 2,
+  "udp_port": null
+}

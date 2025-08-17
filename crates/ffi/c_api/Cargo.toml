@@ -1,0 +1,27 @@
+[package]
+name = "softether_c_api"
+version = "0.1.0"
+edition = "2021"
+authors = ["SoftEther VPN Rust Team"]
+description = "C API for SoftEther VPN Rust client"
+license = "Apache-2.0"
+
+[lib]
+# Build both a static library (preferred for iOS) and a dynamic library (for desktop/testing)
+crate-type = ["staticlib", "cdylib"]
+name = "softether_c_api"
+
+[dependencies]
+vpnclient = { path = "../../vpnclient" }
+cedar = { path = "../../cedar" }
+mayaqua = { path = "../../mayaqua" }
+config = { path = "../../config" }
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+base64 = { workspace = true }
+
+[features]
+default = []

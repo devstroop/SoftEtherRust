@@ -1,0 +1,475 @@
+//! C API for SoftEther VPN Rust client
+//! Minimal connect/disconnect and frame IO hooks.
+
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_int};
+use std::ptr;
+use std::sync::{Arc, Mutex};
+
+use base64::Engine; // for STANDARD.decode()
+use serde::Deserialize;
+use tokio::runtime::{Builder, Runtime};
+use tokio::sync::mpsc;
+
+use config::ClientConfig as SharedConfig;
+use vpnclient::ClientState;
+use vpnclient::VpnClient;
+use vpnclient::{ClientEvent, EventLevel};
+
+#[derive(Deserialize)]
+struct FfiConfig {
+    // mirror of config::ClientConfig; keep minimal for now
+    server: String,
+    port: u16,
+    hub: String,
+    username: String,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    password_hashed_sha1_b64: Option<String>,
+    #[serde(default)]
+    password_hashed_sha0_user_b64: Option<String>,
+    #[serde(default)]
+    insecure_skip_verify: bool,
+    #[serde(default = "default_true")]
+    use_compress: bool,
+    #[serde(default = "default_true")]
+    use_encrypt: bool,
+    #[serde(default = "default_max_conn")]
+    max_connections: u32,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_max_conn() -> u32 {
+    1
+}
+
+#[derive(Clone, Copy)]
+struct RxCb {
+    func: extern "C" fn(*const u8, u32, *mut std::ffi::c_void),
+    user: *mut std::ffi::c_void,
+}
+
+unsafe impl Send for RxCb {}
+unsafe impl Sync for RxCb {}
+
+#[derive(Clone, Copy)]
+struct StateCb {
+    func: extern "C" fn(i32, *mut std::ffi::c_void),
+    user: *mut std::ffi::c_void,
+}
+
+unsafe impl Send for StateCb {}
+unsafe impl Sync for StateCb {}
+
+#[derive(Clone, Copy)]
+struct EventCb {
+    func: extern "C" fn(i32, i32, *const c_char, *mut std::ffi::c_void),
+    user: *mut std::ffi::c_void,
+}
+
+unsafe impl Send for EventCb {}
+unsafe impl Sync for EventCb {}
+
+struct ClientHandle {
+    rt: Runtime,
+    client: Arc<Mutex<VpnClient>>, // guarded for FFI concurrency
+    // Frame channels (optional wiring for future use)
+    adapter_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    rx_cb: Option<RxCb>,
+    state_cb: Option<Arc<StateCb>>,
+    event_cb: Option<Arc<EventCb>>,
+}
+
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct softether_client_t {
+    _private: [u8; 0],
+}
+
+fn make_shared_config(c: FfiConfig) -> SharedConfig {
+    SharedConfig {
+        server: c.server,
+        port: c.port,
+        hub: c.hub,
+        username: c.username,
+        password: c.password,
+        password_hashed_sha1_b64: c.password_hashed_sha1_b64,
+        password_hashed_sha0_user_b64: c.password_hashed_sha0_user_b64,
+        insecure_skip_verify: c.insecure_skip_verify,
+        use_compress: c.use_compress,
+        use_encrypt: c.use_encrypt,
+        max_connections: c.max_connections,
+        udp_port: None,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn softether_client_create(json_config: *const c_char) -> *mut softether_client_t {
+    if json_config.is_null() {
+        return ptr::null_mut();
+    }
+    let cstr = unsafe { CStr::from_ptr(json_config) };
+    let json = match cstr.to_str() {
+        Ok(s) => s,
+        Err(_) => return ptr::null_mut(),
+    };
+    let parsed: FfiConfig = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return ptr::null_mut(),
+    };
+
+    // Build runtime
+    let rt = match Builder::new_multi_thread().enable_all().build() {
+        Ok(r) => r,
+        Err(_) => return ptr::null_mut(),
+    };
+
+    // Build vpnclient from shared config
+    let cc = make_shared_config(parsed);
+    let client = match vpnclient::VpnClient::from_shared_config(cc) {
+        Ok(c) => c,
+        Err(_) => return ptr::null_mut(),
+    };
+
+    let handle = ClientHandle {
+        rt,
+        client: Arc::new(Mutex::new(client)),
+        adapter_tx: None,
+        rx_cb: None,
+        state_cb: None,
+        event_cb: None,
+    };
+    Box::into_raw(Box::new(handle)) as *mut softether_client_t
+}
+
+#[no_mangle]
+pub extern "C" fn softether_client_connect(handle: *mut softether_client_t) -> c_int {
+    if handle.is_null() {
+        return -1;
+    }
+    let h = unsafe { &mut *(handle as *mut ClientHandle) };
+    let client_arc = h.client.clone();
+    let res = h.rt.block_on(async move {
+        let mut c = client_arc.lock().unwrap();
+        c.connect().await
+    });
+    let code = match res {
+        Ok(_) => 0,
+        Err(e) => {
+            // Surface a descriptive error event to embedders
+            if let Ok(msg) = CString::new(format!("connect error: {}", e)) {
+                if let Some(cb) = &h.event_cb {
+                    (cb.func)(2, 500, msg.as_ptr(), cb.user);
+                }
+            }
+            -2
+        }
+    };
+    if code == 0 {
+        // If we had an RX callback registered before connect, wire the adapter sink now
+        let client_arc2 = h.client.clone();
+        let tx_opt = h.adapter_tx.clone();
+        let _ = h.rt.block_on(async move {
+            if let Some(tx) = tx_opt {
+                let c = client_arc2.lock().unwrap();
+                if let Some(dp) = c.dataplane() {
+                    dp.set_adapter_rx(tx);
+                }
+            }
+        });
+        // Emit a JSON network settings snapshot if available right after connect
+        if let Some(cb) = h.event_cb.clone() {
+            let client_arc3 = h.client.clone();
+            let _ = h.rt.spawn(async move {
+                let c = client_arc3.lock().unwrap();
+                // Build a small JSON with ip/mask/gw/dns if present
+                #[derive(serde::Serialize)]
+                struct SettingsJson {
+                    kind: &'static str,
+                    assigned_ipv4: Option<String>,
+                    subnet_mask: Option<String>,
+                    gateway: Option<String>,
+                    dns_servers: Vec<String>,
+                }
+                let mut json = SettingsJson {
+                    kind: "settings",
+                    assigned_ipv4: None,
+                    subnet_mask: None,
+                    gateway: None,
+                    dns_servers: vec![],
+                };
+                if let Some(ns) = c.get_network_settings() {
+                    if let Some(ip) = ns.assigned_ipv4 {
+                        json.assigned_ipv4 = Some(ip.to_string());
+                    }
+                    if let Some(m) = ns.subnet_mask {
+                        json.subnet_mask = Some(m.to_string());
+                    }
+                    if let Some(g) = ns.gateway {
+                        json.gateway = Some(g.to_string());
+                    }
+                    json.dns_servers = ns.dns_servers.iter().map(|d| d.to_string()).collect();
+                }
+                if let Ok(s) = serde_json::to_string(&json) {
+                    let cstr = CString::new(s).unwrap_or_else(|_| CString::new("{}").unwrap());
+                    (cb.func)(0, 1001, cstr.as_ptr(), cb.user);
+                    // Ensure CString lives long enough for the call; drop immediately after
+                }
+            });
+        }
+    }
+    code
+}
+
+/// Register an event callback and subscribe the client to event stream.
+#[no_mangle]
+pub extern "C" fn softether_client_set_event_callback(
+    handle: *mut softether_client_t,
+    cb: Option<extern "C" fn(i32, i32, *const c_char, *mut std::ffi::c_void)>,
+    user: *mut std::ffi::c_void,
+) -> c_int {
+    if handle.is_null() {
+        return -1;
+    }
+    let h = unsafe { &mut *(handle as *mut ClientHandle) };
+    if let Some(func) = cb {
+        h.event_cb = Some(Arc::new(EventCb { func, user }));
+    } else {
+        h.event_cb = None;
+    }
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<ClientEvent>();
+    {
+        let mut c = h.client.lock().unwrap();
+        c.set_event_channel(tx);
+    }
+    if let Some(cb) = h.event_cb.clone() {
+        let _ = h.rt.spawn(async move {
+            let cb_local = cb;
+            while let Some(ev) = rx.recv().await {
+                let level = match ev.level {
+                    EventLevel::Info => 0,
+                    EventLevel::Warn => 1,
+                    EventLevel::Error => 2,
+                };
+                let cstr = CString::new(ev.message).unwrap_or_else(|_| CString::new("").unwrap());
+                (cb_local.func)(level, ev.code, cstr.as_ptr(), cb_local.user);
+            }
+        });
+    }
+    0
+}
+
+/// Get current network settings as a JSON string. Caller must free with softether_string_free.
+#[no_mangle]
+pub extern "C" fn softether_client_get_network_settings_json(
+    handle: *mut softether_client_t,
+) -> *mut c_char {
+    if handle.is_null() {
+        return ptr::null_mut();
+    }
+    let h = unsafe { &mut *(handle as *mut ClientHandle) };
+    let client_arc = h.client.clone();
+    let s = h.rt.block_on(async move {
+        let c = client_arc.lock().unwrap();
+        #[derive(serde::Serialize)]
+        struct SettingsJson {
+            assigned_ipv4: Option<String>,
+            subnet_mask: Option<String>,
+            gateway: Option<String>,
+            dns_servers: Vec<String>,
+        }
+        let mut json = SettingsJson {
+            assigned_ipv4: None,
+            subnet_mask: None,
+            gateway: None,
+            dns_servers: vec![],
+        };
+    if let Some(ns) = c.get_network_settings() {
+            if let Some(ip) = ns.assigned_ipv4 {
+                json.assigned_ipv4 = Some(ip.to_string());
+            }
+            if let Some(m) = ns.subnet_mask {
+                json.subnet_mask = Some(m.to_string());
+            }
+            if let Some(g) = ns.gateway {
+                json.gateway = Some(g.to_string());
+            }
+            json.dns_servers = ns.dns_servers.iter().map(|d| d.to_string()).collect();
+        }
+        serde_json::to_string(&json).unwrap_or_else(|_| "{}".to_string())
+    });
+    CString::new(s).map(|cs| cs.into_raw()).unwrap_or(ptr::null_mut())
+}
+
+/// Validate Base64 and decode into out_buf; returns number of bytes or negative error.
+#[no_mangle]
+pub extern "C" fn softether_b64_decode(
+    b64: *const c_char,
+    out_buf: *mut u8,
+    out_cap: u32,
+) -> c_int {
+    if b64.is_null() || out_buf.is_null() {
+        return -1;
+    }
+    let s = unsafe { CStr::from_ptr(b64) };
+    let Ok(text) = s.to_str() else {
+        return -2;
+    };
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(text) else {
+        return -3;
+    };
+    let cap = out_cap as usize;
+    if bytes.len() > cap {
+        return -4;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
+    }
+    bytes.len() as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn softether_client_disconnect(handle: *mut softether_client_t) -> c_int {
+    if handle.is_null() {
+        return -1;
+    }
+    let h = unsafe { &mut *(handle as *mut ClientHandle) };
+    let client_arc = h.client.clone();
+    let res = h.rt.block_on(async move {
+        let mut c = client_arc.lock().unwrap();
+        c.disconnect().await
+    });
+    match res {
+        Ok(_) => 0,
+        Err(_) => -2,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn softether_client_free(handle: *mut softether_client_t) {
+    if handle.is_null() {
+        return;
+    }
+    unsafe {
+        let _ = Box::from_raw(handle as *mut ClientHandle);
+    }
+}
+
+/// Optional: retrieve a simple status string for diagnostics
+#[no_mangle]
+pub extern "C" fn softether_client_version() -> *mut c_char {
+    let s = format!(
+        "SoftEther Rust Client FFI v{}.{}",
+        vpnclient::CLIENT_VERSION,
+        vpnclient::CLIENT_BUILD
+    );
+    CString::new(s).unwrap().into_raw()
+}
+
+#[no_mangle]
+pub extern "C" fn softether_string_free(s: *mut c_char) {
+    if s.is_null() {
+        return;
+    }
+    unsafe {
+        let _ = CString::from_raw(s);
+    }
+}
+
+/// Register an RX callback to receive frames from the tunnel.
+#[no_mangle]
+pub extern "C" fn softether_client_set_rx_callback(
+    handle: *mut softether_client_t,
+    cb: Option<extern "C" fn(*const u8, u32, *mut std::ffi::c_void)>,
+    user: *mut std::ffi::c_void,
+) -> c_int {
+    if handle.is_null() {
+        return -1;
+    }
+    let h = unsafe { &mut *(handle as *mut ClientHandle) };
+    h.rx_cb = cb.map(|f| RxCb { func: f, user });
+
+    // Wire dataplane->adapter_rx callback via channel; set now if connected or later on connect.
+    let client_arc = h.client.clone();
+    let cb_opt = h.rx_cb;
+    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    h.adapter_tx = Some(tx.clone());
+    let _ = h.rt.spawn(async move {
+        while let Some(frame) = rx.recv().await {
+            if let Some(cb) = cb_opt {
+                (cb.func)(frame.as_ptr(), frame.len() as u32, cb.user);
+            }
+        }
+    });
+
+    // If dataplane exists, set its adapter_rx sink now
+    let _ = h.rt.block_on(async move {
+        let c = client_arc.lock().unwrap();
+        if let Some(dp) = c.dataplane() {
+            dp.set_adapter_rx(tx);
+        }
+    });
+    0
+}
+
+/// Send an L2 frame via any TX-capable link.
+#[no_mangle]
+pub extern "C" fn softether_client_send_frame(
+    handle: *mut softether_client_t,
+    data: *const u8,
+    len: u32,
+) -> c_int {
+    if handle.is_null() || data.is_null() {
+        return -1;
+    }
+    let h = unsafe { &mut *(handle as *mut ClientHandle) };
+    let slice = unsafe { std::slice::from_raw_parts(data, len as usize) };
+    let frame = slice.to_vec();
+    let client_arc = h.client.clone();
+    let ok = h.rt.block_on(async move {
+        let c = client_arc.lock().unwrap();
+        if let Some(dp) = c.dataplane() {
+            return dp.send_frame(frame) as i32;
+        }
+        -2
+    });
+    ok
+}
+
+/// Register a state change callback.
+#[no_mangle]
+pub extern "C" fn softether_client_set_state_callback(
+    handle: *mut softether_client_t,
+    cb: Option<extern "C" fn(i32, *mut std::ffi::c_void)>,
+    user: *mut std::ffi::c_void,
+) -> c_int {
+    if handle.is_null() {
+        return -1;
+    }
+    let h = unsafe { &mut *(handle as *mut ClientHandle) };
+    if let Some(func) = cb {
+        h.state_cb = Some(Arc::new(StateCb { func, user }));
+    } else {
+        h.state_cb = None;
+    }
+
+    // Create a channel and subscribe VpnClient to state changes, forwarding to the C callback
+    let (tx, mut rx) = mpsc::unbounded_channel::<ClientState>();
+    {
+        let mut c = h.client.lock().unwrap();
+        c.set_state_channel(tx);
+    }
+    if let Some(cb) = h.state_cb.clone() {
+        let _ = h.rt.spawn(async move {
+            let cb_local = cb; // move Arc into task
+            while let Some(s) = rx.recv().await {
+                ((*cb_local).func)(s as i32, (*cb_local).user);
+            }
+        });
+    }
+    0
+}

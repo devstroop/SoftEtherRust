@@ -1,0 +1,26 @@
+# Rust
+target/
+**/*.rs.bk
+**/*.profdata
+**/*.gcda
+**/*.gcno
+**/*.profraw
+
+# IDE/Editor files
+.idea/
+.vscode/
+*.swp
+*.bak
+*~
+.DS_Store
+Thumbs.db
+
+# Config files (keep real config out of VCS)
+config.json
+
+# SoftEther VPN
+SoftEtherVPN_Stable/
+SoftEther-Go/
+
+# Cargo
+# Commit Cargo.lock for binaries and cdylibs for reproducible builds
