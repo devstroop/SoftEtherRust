@@ -51,6 +51,8 @@ int softether_b64_decode(const char* b64, unsigned char* out_buf, unsigned int o
 // Diagnostics helpers
 char* softether_client_version(void);
 void softether_string_free(char*);
+// Retrieve and clear the last error message, or NULL if none. Must be freed with softether_string_free.
+char* softether_client_last_error(softether_client_t* handle);
 
 // Query current tunnel network settings (JSON: {assigned_ipv4, subnet_mask, gateway, dns_servers[]}).
 // The returned string must be freed with softether_string_free.

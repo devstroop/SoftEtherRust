@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use base64::Engine; // for STANDARD.decode()
 use serde::Deserialize;
 use tokio::runtime::{Builder, Runtime};
+use tokio::task::JoinHandle;
 use tokio::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -104,26 +105,48 @@ struct ClientHandle {
     rt: Runtime,
     client: Arc<Mutex<VpnClient>>, // guarded for FFI concurrency
     // Frame channels (optional wiring for future use)
-    adapter_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    adapter_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
     rx_cb: Arc<Mutex<Option<RxCb>>>,
     ip_rx_cb: Arc<Mutex<Option<IpRxCb>>>,
-    state_cb: Option<Arc<StateCb>>,
-    event_cb: Option<Arc<EventCb>>,
+    state_cb: Arc<Mutex<Option<Arc<StateCb>>>>,
+    event_cb: Arc<Mutex<Option<Arc<EventCb>>>>,
+    // Track spawned tasks to allow explicit cleanup
+    tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    // Guard to prevent duplicate demux tasks
+    demux_running: Arc<Mutex<bool>>,
+    // Last error message for diagnostics retrieval
+    last_error: Arc<Mutex<Option<String>>>,
 }
 
 impl ClientHandle {
     /// Ensure a single adapter_rx channel is wired and a demux task is spawned
     /// that forwards L2 frames to rx_cb and IPv4 payloads to ip_rx_cb when set.
     fn ensure_adapter_rx(&mut self) {
-        if self.adapter_tx.is_some() {
-            return;
+        // prevent duplicates
+        {
+            let running = self.demux_running.lock().unwrap();
+            if *running {
+                return;
+            }
         }
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        self.adapter_tx = Some(tx.clone());
+        {
+            let mut g = self.adapter_tx.lock().unwrap();
+            if g.is_some() {
+                return; // already initialized by a previous call
+            }
+            *g = Some(tx.clone());
+        }
+        // mark running
+        {
+            let mut running = self.demux_running.lock().unwrap();
+            *running = true;
+        }
         let rx_cb = self.rx_cb.clone();
         let ip_cb = self.ip_rx_cb.clone();
+        let demux_flag = self.demux_running.clone();
         // Shared helper for demux
-        self.rt.spawn(async move {
+        let handle = self.rt.spawn(async move {
             while let Some(frame) = rx.recv().await {
                 // L2 callback if present
                 if let Some(cb) = *rx_cb.lock().unwrap() {
@@ -136,7 +159,11 @@ impl ClientHandle {
                     }
                 }
             }
+            // mark not running when channel closes
+            *demux_flag.lock().unwrap() = false;
         });
+        // track task
+        self.tasks.lock().unwrap().push(handle);
         // Attach to dataplane if available
         let client_arc = self.client.clone();
         let tx2 = tx.clone();
@@ -214,11 +241,14 @@ pub extern "C" fn softether_client_create(json_config: *const c_char) -> *mut so
     let handle = ClientHandle {
         rt,
         client: Arc::new(Mutex::new(client)),
-        adapter_tx: None,
+        adapter_tx: Arc::new(Mutex::new(None)),
     rx_cb: Arc::new(Mutex::new(None)),
     ip_rx_cb: Arc::new(Mutex::new(None)),
-        state_cb: None,
-        event_cb: None,
+    state_cb: Arc::new(Mutex::new(None)),
+    event_cb: Arc::new(Mutex::new(None)),
+        tasks: Arc::new(Mutex::new(Vec::new())),
+        demux_running: Arc::new(Mutex::new(false)),
+        last_error: Arc::new(Mutex::new(None)),
     };
     Box::into_raw(Box::new(handle)) as *mut softether_client_t
 }
@@ -238,9 +268,15 @@ pub extern "C" fn softether_client_connect(handle: *mut softether_client_t) -> c
         Ok(_) => 0,
         Err(e) => {
             // Surface a descriptive error event to embedders
-            if let Ok(msg) = CString::new(format!("connect error: {}", e)) {
-                if let Some(cb) = &h.event_cb {
-                    (cb.func)(2, 500, msg.as_ptr(), cb.user);
+            {
+                let mut le = h.last_error.lock().unwrap();
+                *le = Some(format!("connect error: {}", e));
+            }
+            if let Some(msg) = h.last_error.lock().unwrap().clone() {
+                if let Ok(cmsg) = CString::new(msg) {
+                    if let Some(cb) = h.event_cb.lock().unwrap().as_ref().cloned() {
+                        (cb.func)(2, 500, cmsg.as_ptr(), cb.user);
+                    }
                 }
             }
             -2
@@ -249,7 +285,7 @@ pub extern "C" fn softether_client_connect(handle: *mut softether_client_t) -> c
     if code == 0 {
         // If we had an RX callback registered before connect, wire the adapter sink now
         let client_arc2 = h.client.clone();
-        let tx_opt = h.adapter_tx.clone();
+        let tx_opt = h.adapter_tx.lock().unwrap().clone();
         let _ = h.rt.block_on(async move {
             if let Some(tx) = tx_opt {
                 let c = client_arc2.lock().unwrap();
@@ -258,17 +294,7 @@ pub extern "C" fn softether_client_connect(handle: *mut softether_client_t) -> c
                 }
             }
         });
-        // Emit a JSON network settings snapshot if available right after connect
-        if let Some(cb) = h.event_cb.clone() {
-            let client_arc3 = h.client.clone();
-            let _ = h.rt.spawn(async move {
-                let c = client_arc3.lock().unwrap();
-                let json = settings_json_with_kind(c.get_network_settings().as_ref(), true);
-                let cstr = CString::new(json).unwrap_or_else(|_| CString::new("{}").unwrap());
-                (cb.func)(0, 1001, cstr.as_ptr(), cb.user);
-                // CString dropped after callback returns
-            });
-        }
+    // No direct event emission here; rely on VpnClient's internal event channel (1001) if configured.
     }
     code
 }
@@ -285,9 +311,9 @@ pub extern "C" fn softether_client_set_event_callback(
     }
     let h = unsafe { &mut *(handle as *mut ClientHandle) };
     if let Some(func) = cb {
-        h.event_cb = Some(Arc::new(EventCb { func, user }));
+        *h.event_cb.lock().unwrap() = Some(Arc::new(EventCb { func, user }));
     } else {
-        h.event_cb = None;
+        *h.event_cb.lock().unwrap() = None;
     }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<ClientEvent>();
@@ -295,9 +321,9 @@ pub extern "C" fn softether_client_set_event_callback(
         let mut c = h.client.lock().unwrap();
         c.set_event_channel(tx);
     }
-    if let Some(cb) = h.event_cb.clone() {
-        let _ = h.rt.spawn(async move {
-            let cb_local = cb;
+    if let Some(cb) = h.event_cb.lock().unwrap().as_ref().cloned() {
+        let handle = h.rt.spawn(async move {
+            let cb_local = cb; // Arc<EventCb>
             while let Some(ev) = rx.recv().await {
                 let level = match ev.level {
                     EventLevel::Info => 0,
@@ -308,6 +334,7 @@ pub extern "C" fn softether_client_set_event_callback(
                 (cb_local.func)(level, ev.code, cstr.as_ptr(), cb_local.user);
             }
         });
+        h.tasks.lock().unwrap().push(handle);
     }
     0
 }
@@ -379,7 +406,19 @@ pub extern "C" fn softether_client_free(handle: *mut softether_client_t) {
         return;
     }
     unsafe {
-        let _ = Box::from_raw(handle as *mut ClientHandle);
+    let boxed = Box::from_raw(handle as *mut ClientHandle);
+        // Best-effort graceful disconnect
+        let client_arc = boxed.client.clone();
+        let _ = boxed.rt.block_on(async move {
+            let mut c = client_arc.lock().unwrap();
+            let _ = c.disconnect().await;
+        });
+        // Abort spawned tasks owned by FFI
+    let tasks = std::mem::take(&mut *boxed.tasks.lock().unwrap());
+        for t in tasks {
+            t.abort();
+        }
+        // Drop occurs here
     }
 }
 
@@ -401,6 +440,24 @@ pub extern "C" fn softether_string_free(s: *mut c_char) {
     }
     unsafe {
         let _ = CString::from_raw(s);
+    }
+}
+
+/// Retrieve and clear the last error message (if any). Caller must free with softether_string_free.
+#[no_mangle]
+pub extern "C" fn softether_client_last_error(handle: *mut softether_client_t) -> *mut c_char {
+    if handle.is_null() {
+        return ptr::null_mut();
+    }
+    let h = unsafe { &mut *(handle as *mut ClientHandle) };
+    let msg = {
+        let mut g = h.last_error.lock().unwrap();
+        g.take()
+    };
+    if let Some(m) = msg {
+        CString::new(m).map(|cs| cs.into_raw()).unwrap_or(ptr::null_mut())
+    } else {
+        ptr::null_mut()
     }
 }
 
@@ -533,9 +590,9 @@ pub extern "C" fn softether_client_set_state_callback(
     }
     let h = unsafe { &mut *(handle as *mut ClientHandle) };
     if let Some(func) = cb {
-        h.state_cb = Some(Arc::new(StateCb { func, user }));
+        *h.state_cb.lock().unwrap() = Some(Arc::new(StateCb { func, user }));
     } else {
-        h.state_cb = None;
+        *h.state_cb.lock().unwrap() = None;
     }
 
     // Create a channel and subscribe VpnClient to state changes, forwarding to the C callback
@@ -544,13 +601,14 @@ pub extern "C" fn softether_client_set_state_callback(
         let mut c = h.client.lock().unwrap();
         c.set_state_channel(tx);
     }
-    if let Some(cb) = h.state_cb.clone() {
-        let _ = h.rt.spawn(async move {
-            let cb_local = cb; // move Arc into task
+    if let Some(cb) = h.state_cb.lock().unwrap().as_ref().cloned() {
+        let handle = h.rt.spawn(async move {
+            let cb_local = cb; // Arc<StateCb>
             while let Some(s) = rx.recv().await {
-                ((*cb_local).func)(s as i32, (*cb_local).user);
+                (cb_local.func)(s as i32, cb_local.user);
             }
         });
+        h.tasks.lock().unwrap().push(handle);
     }
     0
 }
