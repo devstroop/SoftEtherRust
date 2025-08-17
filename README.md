@@ -1,4 +1,4 @@
-# SoftEther VPN Rust Implementation
+# SoftEther VPN (Rust)
 
 [![CI](https://github.com/SoftEtherUnofficial/SoftEtherClient/actions/workflows/ci.yml/badge.svg)](https://github.com/SoftEtherUnofficial/SoftEtherClient/actions/workflows/ci.yml)
 
