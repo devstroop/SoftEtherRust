@@ -25,11 +25,9 @@ pub struct ClientConfig {
     pub hub: String,
     pub username: String,
     pub password: Option<String>,
-    #[serde(default)]
-    pub password_hashed_sha1_b64: Option<String>,
-    /// Base64 of SHA-0(password + username), compatible with Go prototype's genpwdhash
-    #[serde(default, alias = "password_hashed_sha0_user_b64")]
-    pub password_hashed_sha0_user_b64: Option<String>,
+    /// Base64 of SHA-0(password + UPPER(username)), compatible with Go prototype's genpwdhash
+    #[serde(default, alias = "password_hash")]
+    pub password_hash: Option<String>,
     /// Skip TLS certificate verification (insecure). Default: false
     #[serde(default)]
     pub insecure_skip_verify: bool,
@@ -47,8 +45,7 @@ impl Default for ClientConfig {
             hub: "DEFAULT".into(),
             username: String::new(),
             password: None,
-            password_hashed_sha1_b64: None,
-            password_hashed_sha0_user_b64: None,
+            password_hash: None,
             insecure_skip_verify: false,
             use_compress: false,
             use_encrypt: true,
@@ -74,19 +71,8 @@ impl ClientConfig {
         if let Some(ref pass) = self.password {
             return cedar::ClientAuth::new_password(&self.username, pass);
         }
-        // Prefer SHA-0(password + UPPER(username)) variant when provided
-        if let Some(ref b64) = self.password_hashed_sha0_user_b64 {
-            let mut auth = cedar::ClientAuth::new_password(&self.username, "__PLACEHOLDER__")?;
-            auth.plain_password.clear();
-            if let Ok(bytes) = base64::prelude::BASE64_STANDARD.decode(b64) {
-                if bytes.len() == 20 {
-                    auth.hashed_password.copy_from_slice(&bytes);
-                }
-            }
-            return Ok(auth);
-        }
-        // Otherwise accept SHA-1(password) variant
-        if let Some(ref b64) = self.password_hashed_sha1_b64 {
+    // Prefer SHA-0(password + UPPER(username)) variant when provided
+    if let Some(ref b64) = self.password_hash {
             let mut auth = cedar::ClientAuth::new_password(&self.username, "__PLACEHOLDER__")?;
             auth.plain_password.clear();
             if let Ok(bytes) = base64::prelude::BASE64_STANDARD.decode(b64) {

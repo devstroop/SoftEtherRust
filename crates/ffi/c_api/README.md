@@ -47,7 +47,7 @@ Header: `include/softether_c_api.h`
 }
 ```
 
-Alternatively, provide `password_hashed_sha1_b64` or `password_hashed_sha0_user_b64` instead of `password`.
+Alternatively, provide `password_hash` instead of `password`.
 
 ### Tunnel settings JSON
 

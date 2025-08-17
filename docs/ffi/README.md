@@ -37,8 +37,7 @@ The JSON passed to `softether_client_create` maps to `crates/config::ClientConfi
   "hub": "DEFAULT",
   "username": "user1",
   "password": "pass123",                  // optional if hashes provided
-  "password_hashed_sha1_b64": "...",     // base64(SHA1(password)) 20 bytes
-  "password_hashed_sha0_user_b64": "...",// base64(SHA0(password + UPPER(username))) 20 bytes
+  "password_hash": "...",// base64(SHA0(password + UPPER(username))) 20 bytes
   "insecure_skip_verify": false,           // skip TLS verify (development only)
   "use_compress": false,
   "use_encrypt": true,
@@ -50,8 +49,7 @@ The JSON passed to `softether_client_create` maps to `crates/config::ClientConfi
 Rules
 
 - If `password` is set, it is used to derive hashes internally.
-- If only `password_hashed_sha1_b64` is set, it is used as the 20-byte SHA-1.
-- `password_hashed_sha0_user_b64` is accepted for Go-prototype compatibility.
+- `password_hash` is recommended for compatibility; most servers expect this variant.
 
 For more config details, see `docs/ffi/config.md`.
 

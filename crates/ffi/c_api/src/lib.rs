@@ -28,9 +28,7 @@ struct FfiConfig {
     #[serde(default)]
     password: Option<String>,
     #[serde(default)]
-    password_hashed_sha1_b64: Option<String>,
-    #[serde(default)]
-    password_hashed_sha0_user_b64: Option<String>,
+    password_hash: Option<String>,
     #[serde(default)]
     insecure_skip_verify: bool,
     #[serde(default = "default_true")]
@@ -176,8 +174,7 @@ fn make_shared_config(c: FfiConfig) -> SharedConfig {
         hub: c.hub,
         username: c.username,
         password: c.password,
-        password_hashed_sha1_b64: c.password_hashed_sha1_b64,
-        password_hashed_sha0_user_b64: c.password_hashed_sha0_user_b64,
+        password_hash: c.password_hash,
         insecure_skip_verify: c.insecure_skip_verify,
         use_compress: c.use_compress,
         use_encrypt: c.use_encrypt,

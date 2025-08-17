@@ -43,6 +43,7 @@ use crate::{CLIENT_BUILD, CLIENT_STRING, CLIENT_VERSION};
 use adapter::VirtualAdapter;
 use config as shared_config;
 use mayaqua::get_tick64;
+use mayaqua::crypto::softether_password_hash; // SHA-0(password + UPPER(username))
 use std::net::Ipv4Addr;
 use std::net::{SocketAddr, ToSocketAddrs};
 
@@ -177,28 +178,17 @@ impl VpnClient {
     /// Build a VpnClient from the shared config::ClientConfig (preferred public API)
     pub fn from_shared_config(cc: shared_config::ClientConfig) -> Result<Self> {
         use base64::Engine as _;
-        use mayaqua::crypto::sha1;
-        // Map shared -> internal config
-        let auth = match (cc.password, cc.password_hashed_sha1_b64.clone()) {
-            (Some(pass), _) => {
-                let hp = sha1(pass.as_bytes());
-                let b64 = base64::prelude::BASE64_STANDARD.encode(hp);
-                AuthConfig::Password {
-                    hashed_password: b64,
-                }
-            }
-            (None, Some(b64)) => AuthConfig::Password {
-                hashed_password: b64,
-            },
-            (None, None) => {
-                if let Some(b64) = cc.password_hashed_sha0_user_b64.clone() {
-                    AuthConfig::Password {
-                        hashed_password: b64,
-                    }
-                } else {
-                    AuthConfig::Anonymous
-                }
-            }
+        // Map shared -> internal config (prefer SHA-0 of password+UPPER(username))
+        let auth = if let Some(b64) = cc.password_hash.clone() {
+            // Direct SHA-0 hash provided (20 bytes, base64)
+            AuthConfig::Password { hashed_password: b64 }
+        } else if let Some(pass) = cc.password.clone() {
+            // Derive SHA-0(password + UPPER(username)) locally
+            let hp = softether_password_hash(&pass, &cc.username);
+            let b64 = base64::prelude::BASE64_STANDARD.encode(hp);
+            AuthConfig::Password { hashed_password: b64 }
+    } else {
+            AuthConfig::Anonymous
         };
         let mut v = VpnConfig::new_anonymous(cc.server, cc.port, cc.hub);
         v.username = cc.username;

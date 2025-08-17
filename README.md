@@ -107,8 +107,7 @@ The client reads `config.json` using the shared `crates/config` schema:
 | hub | string | yes | - | Virtual hub name |
 | username | string | yes | - | Account username |
 | password | string | no | - | Plaintext; if set, SHA1 is derived client-side (dev only) |
-| password_hashed_sha1_b64 | string | no | - | Base64 of 20-byte SHA‑1(password) |
-| password_hashed_sha0_user_b64 | string | no | - | Base64 of 20-byte SHA‑0(password + UPPER(username)) |
+| password_hash | string | no | - | Base64 of 20-byte SHA‑0(password + UPPER(username)) |
 | use_compress | bool | no | true | Enable compression |
 | use_encrypt | bool | no | true | Enable RC4 bulk encryption |
 | max_connections | number | no | 2 | Desired total TCP links (server may cap) |
@@ -116,8 +115,8 @@ The client reads `config.json` using the shared `crates/config` schema:
 | udp_port | number | no | null | Reserved for UDP accel (not wired yet) |
 
 Notes:
-- Provide only one of password, password_hashed_sha1_b64, or password_hashed_sha0_user_b64.
-- Many deployments use SHA‑0(password + UPPER(username)); SHA‑1(password) is also supported.
+- Provide only one of password or password_hash.
+- Servers commonly expect SHA‑0(password + UPPER(username)).
 - For production, prefer the hashed variants and keep `insecure_skip_verify` = false.
 
 Example minimal config:
@@ -128,7 +127,7 @@ Example minimal config:
    "port": 443,
    "hub": "DEFAULT",
    "username": "user1",
-   "password_hashed_sha1_b64": "base64-of-20-byte-sha1"
+   "password_hash": "base64-of-20-byte-sha0(password+UPPER(username))"
 }
 ```
 
