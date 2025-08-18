@@ -907,9 +907,13 @@ pub extern "C" fn softether_client_send_ip_packet(
     }
 
     // Enqueue pending and emit ARP who-has
-    {
+    // Enqueue for later flush once ARP resolves; if queue is full, report an error
+    let enq_ok = {
         let mut mgr = h.arp.lock().unwrap();
-        let _ = mgr.enqueue(nh, buf.to_vec());
+        mgr.enqueue(nh, buf.to_vec())
+    };
+    if !enq_ok {
+        return -30; // queue full, packet dropped
     }
     // Build and send ARP request
     let src_ip = assigned.unwrap_or(Ipv4Addr::new(0, 0, 0, 0));
