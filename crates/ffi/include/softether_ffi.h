@@ -62,6 +62,9 @@ char* softether_client_last_error(softether_client_t* handle);
 // The returned string must be freed with softether_string_free.
 char* softether_client_get_network_settings_json(softether_client_t* handle);
 
+// Get the locally-administered source MAC used by this client. Writes 6 bytes to out_mac. Returns 0 on success.
+int softether_client_get_mac(softether_client_t* handle, uint8_t out_mac[6]);
+
 #ifdef __cplusplus
 }
 #endif

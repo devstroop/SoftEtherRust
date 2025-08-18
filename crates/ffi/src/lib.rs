@@ -92,6 +92,59 @@ fn gen_laa_mac() -> [u8; 6] {
     [0x02, 0x00, 0x5e, 0x00, 0x00, 0x01]
 }
 
+fn fnv1a64(data: &[u8]) -> u64 {
+    // Simple dependency-free 64-bit FNV-1a hash for deriving a MAC from a seed
+    let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
+    for b in data {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x00000100000001B3);
+    }
+    hash
+}
+
+fn derive_laa_mac_from_seed(seed: &[u8]) -> [u8; 6] {
+    let h = fnv1a64(seed);
+    // Locally-administered, unicast: set bit1=1 (LAA), bit0=0 (unicast)
+    let b0 = 0x02u8; // 0000_0010
+    [
+        b0,
+        ((h >> 0) & 0xFF) as u8,
+        ((h >> 8) & 0xFF) as u8,
+        ((h >> 16) & 0xFF) as u8,
+        ((h >> 24) & 0xFF) as u8,
+        ((h >> 32) & 0xFF) as u8,
+    ]
+}
+
+fn gen_laa_mac_default() -> [u8; 6] {
+    // Fallback deterministic LAA derived from a constant string
+    derive_laa_mac_from_seed(b"softether_rust_default")
+}
+
+#[inline]
+fn mac_to_string(mac: &[u8; 6]) -> String {
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    )
+}
+
+#[inline]
+fn emit_event(cb_arc: &Arc<Mutex<Option<Arc<EventCb>>>>, level: i32, code: i32, msg: &str) {
+    if let Some(cb) = cb_arc.lock().unwrap().as_ref().cloned() {
+        if let Ok(cmsg) = CString::new(msg.to_string()) {
+            (cb.func)(level, code, cmsg.as_ptr(), cb.user);
+        }
+    }
+}
+
+#[inline]
+fn pad_eth_min(mut frame: Vec<u8>) -> Vec<u8> {
+    if frame.len() < 60 {
+        frame.resize(60, 0);
+    }
+    frame
+}
 struct ClientHandle {
     rt: Runtime,
     client: Arc<Mutex<VpnClient>>, // guarded for FFI concurrency
@@ -150,6 +203,7 @@ impl ClientHandle {
         let src_mac = self.mac; // stable LAA for this client handle
         let my_ip_arc = self.assigned_ip.clone();
         let probes = self.arp_probes.clone();
+    let ev_cb = self.event_cb.clone();
         // Shared helper for demux
         let handle = self.rt.spawn(async move {
             while let Some(frame) = rx.recv().await {
@@ -158,9 +212,10 @@ impl ClientHandle {
                     let mut mgr = arp_mgr.lock().unwrap();
                     let (resolved_ip, _mac, flush) = mgr.on_frame(&frame);
                     drop(mgr);
-                    if let Some((_nh, mac, batch)) = flush {
+                    if let Some((nh, mac, batch)) = flush {
                         // Send pending frames now that we know MAC
                         let c = client_arc2.lock().unwrap();
+                        let count = batch.len();
                         if let Some(dp) = c.dataplane() {
                             for ip in batch {
                                 let mut eth = Vec::with_capacity(14 + ip.len());
@@ -168,9 +223,21 @@ impl ClientHandle {
                                 eth.extend_from_slice(&src_mac);
                                 eth.extend_from_slice(&0x0800u16.to_be_bytes());
                                 eth.extend_from_slice(&ip);
-                                let _ = dp.send_frame(eth);
+                                let _ = dp.send_frame(pad_eth_min(eth));
                             }
                         }
+                        // Emit light event so embedders can observe the flush
+                        emit_event(
+                            &ev_cb,
+                            0,     // info
+                            901,   // ARP flush event code (custom)
+                            &format!(
+                                "flushed {} pending IPv4 packet(s) for next-hop {} via {}",
+                                count,
+                                nh,
+                                mac_to_string(&mac)
+                            ),
+                        );
                     }
                     if let Some(ip) = resolved_ip {
                         // Stop probing once resolved
@@ -235,7 +302,7 @@ impl ClientHandle {
                                         arp.extend_from_slice(&spa.octets());
                                         let c = client_arc2.lock().unwrap();
                                         if let Some(dp) = c.dataplane() {
-                                            let _ = dp.send_frame(arp);
+                                            let _ = dp.send_frame(pad_eth_min(arp));
                                         }
                                     }
                                 }
@@ -402,18 +469,19 @@ impl ArpManager {
         }
         (None, None, None)
     }
-    // Queue IP packet for next-hop; returns true if enqueued
-    fn enqueue(&mut self, next_hop: Ipv4Addr, ip: Vec<u8>) -> bool {
+    // Queue IP packet for next-hop; returns Some(new_len) if enqueued, or None if dropped
+    // Caller can treat new_len == 1 as "pending started" for this next-hop.
+    fn enqueue(&mut self, next_hop: Ipv4Addr, ip: Vec<u8>) -> Option<usize> {
         let q = self
             .pending
             .entry(next_hop)
             .or_insert_with(|| VecDeque::with_capacity(16));
         if q.len() >= 16 {
             // bounded
-            return false;
+            return None;
         }
         q.push_back(ip);
-        true
+        Some(q.len())
     }
 }
 
@@ -440,7 +508,7 @@ fn build_arp_request(src_mac: [u8; 6], src_ip: Ipv4Addr, target_ip: Ipv4Addr) ->
     arp.extend_from_slice(&src_ip.octets());
     arp.extend_from_slice(&[0u8; 6]);
     arp.extend_from_slice(&target_ip.octets());
-    arp
+    pad_eth_min(arp)
 }
 
 /// Extract IPv4 payload from an Ethernet frame (EtherType 0x0800)
@@ -498,11 +566,22 @@ pub extern "C" fn softether_client_create(json_config: *const c_char) -> *mut so
         Err(_) => return ptr::null_mut(),
     };
 
+    // Keep identity fields for MAC derivation before moving parsed
+    let seed_server = parsed.server.clone();
+    let seed_hub = parsed.hub.clone();
+    let seed_username = parsed.username.clone();
+
     // Build vpnclient from shared config
     let cc = make_shared_config(parsed);
     let client = match vpnclient::VpnClient::from_shared_config(cc) {
         Ok(c) => c,
         Err(_) => return ptr::null_mut(),
+    };
+
+    // Derive a stable, locally-administered MAC from identity tuple (server|hub|username)
+    let mac: [u8; 6] = {
+        let ident = format!("{}|{}|{}", seed_server, seed_hub, seed_username);
+        derive_laa_mac_from_seed(ident.as_bytes())
     };
 
     let handle = ClientHandle {
@@ -516,7 +595,7 @@ pub extern "C" fn softether_client_create(json_config: *const c_char) -> *mut so
         tasks: Arc::new(Mutex::new(Vec::new())),
         demux_running: Arc::new(Mutex::new(false)),
         last_error: Arc::new(Mutex::new(None)),
-        mac: gen_laa_mac(),
+    mac,
         assigned_ip: Arc::new(Mutex::new(None)),
         netmask: Arc::new(Mutex::new(None)),
         gateway: Arc::new(Mutex::new(None)),
@@ -737,6 +816,15 @@ pub extern "C" fn softether_string_free(s: *mut c_char) {
     }
 }
 
+/// Retrieve the LAA MAC used by this client. Writes 6 bytes into out_buf.
+#[no_mangle]
+pub extern "C" fn softether_client_get_mac(handle: *mut softether_client_t, out_buf: *mut u8) -> c_int {
+    if handle.is_null() || out_buf.is_null() { return -1; }
+    let h = unsafe { &mut *(handle as *mut ClientHandle) };
+    unsafe { std::ptr::copy_nonoverlapping(h.mac.as_ptr(), out_buf, 6); }
+    0
+}
+
 /// Retrieve and clear the last error message (if any). Caller must free with softether_string_free.
 #[no_mangle]
 pub extern "C" fn softether_client_last_error(handle: *mut softether_client_t) -> *mut c_char {
@@ -857,7 +945,7 @@ pub extern "C" fn softether_client_send_ip_packet(
         let res: i32 = h.rt.block_on(async move {
             let c = client_arc.lock().unwrap();
             if let Some(dp) = c.dataplane() {
-                return if dp.send_frame(frame) { 1 } else { 0 };
+                return if dp.send_frame(pad_eth_min(frame)) { 1 } else { 0 };
             }
             -2
         });
@@ -898,7 +986,7 @@ pub extern "C" fn softether_client_send_ip_packet(
             let res: i32 = h.rt.block_on(async move {
                 let c = client_arc.lock().unwrap();
                 if let Some(dp) = c.dataplane() {
-                    return if dp.send_frame(frame) { 1 } else { 0 };
+                    return if dp.send_frame(pad_eth_min(frame)) { 1 } else { 0 };
                 }
                 -2
             });
@@ -908,12 +996,28 @@ pub extern "C" fn softether_client_send_ip_packet(
 
     // Enqueue pending and emit ARP who-has
     // Enqueue for later flush once ARP resolves; if queue is full, report an error
-    let enq_ok = {
+    let enq_len = {
         let mut mgr = h.arp.lock().unwrap();
         mgr.enqueue(nh, buf.to_vec())
     };
-    if !enq_ok {
+    if enq_len.is_none() {
         return -30; // queue full, packet dropped
+    }
+    // If this is the first enqueued packet for this next-hop, emit a light event and start probes
+    if let Some(1) = enq_len {
+        emit_event(
+            &h.event_cb,
+            0,
+            900, // ARP pending-started
+            &format!("pending queue started for next-hop {} (first packet enqueued)", nh),
+        );
+        // Ensure periodic ARP retries are scheduled for this next-hop until it's learned
+        let mut pr = h.arp_probes.lock().unwrap();
+        pr.entry(nh).or_insert_with(|| ProbeState {
+            // Force immediate send on next tick
+            last: Instant::now() - Duration::from_secs(10),
+            interval: Duration::from_millis(250),
+        });
     }
     // Build and send ARP request
     let src_ip = assigned.unwrap_or(Ipv4Addr::new(0, 0, 0, 0));
@@ -939,7 +1043,7 @@ pub extern "C" fn softether_client_send_ip_packet(
     let res: i32 = h.rt.block_on(async move {
         let c = client_arc.lock().unwrap();
         if let Some(dp) = c.dataplane() {
-            let _ = dp.send_frame(arp);
+            let _ = dp.send_frame(pad_eth_min(arp));
             return 0; // queued, not yet sent
         }
         -2
@@ -972,6 +1076,8 @@ pub extern "C" fn softether_client_arp_add(
             drop(mgr);
             let client_arc = h.client.clone();
             let src_mac = h.mac;
+            let flushed = batch.len();
+            let nh_ip = ip;
             let _ = h.rt.block_on(async move {
                 let c = client_arc.lock().unwrap();
                 if let Some(dp) = c.dataplane() {
@@ -981,11 +1087,28 @@ pub extern "C" fn softether_client_arp_add(
                         eth.extend_from_slice(&src_mac);
                         eth.extend_from_slice(&0x0800u16.to_be_bytes());
                         eth.extend_from_slice(&ip_pkt);
-                        let _ = dp.send_frame(eth);
+                        let _ = dp.send_frame(pad_eth_min(eth));
                     }
                 }
             });
+            // Emit event after flush so embedders see the action
+            emit_event(
+                &h.event_cb,
+                0,
+                901,
+                &format!(
+                    "flushed {} pending IPv4 packet(s) for next-hop {} via {}",
+                    flushed,
+                    nh_ip,
+                    mac_to_string(&m)
+                ),
+            );
         }
+    }
+    // Stop probing since we have the MAC now (avoid unnecessary ARP requests)
+    {
+        let mut pr = h.arp_probes.lock().unwrap();
+        pr.remove(&ip);
     }
     0
 }
