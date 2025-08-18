@@ -3,7 +3,6 @@
 use anyhow::{Context, Result};
 use base64::prelude::*;
 use cedar::WATERMARK;
-use tracing::{debug, info, warn};
 use mayaqua::{HttpRequest, HttpResponse, Pack};
 use native_tls::{TlsConnector, TlsStream};
 use pencore::Pencore;
@@ -12,6 +11,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Once;
 use std::time::Duration;
+use tracing::{debug, info, warn};
 use x509_parser::prelude::{FromDer, X509Certificate};
 
 /// Secure TLS connection wrapper
@@ -211,8 +211,8 @@ impl SecureConnection {
             ],
             body: pack_data,
         };
-    // Use persistent connections; omit Keep-Alive 'max' to avoid forced closures
-    request.add_header("Connection".to_string(), "keep-alive".to_string());
+        // Use persistent connections; omit Keep-Alive 'max' to avoid forced closures
+        request.add_header("Connection".to_string(), "keep-alive".to_string());
         // Add Host header for HTTP/1.1 compliance
         request.add_header("Host".to_string(), format!("{}:{}", self.host, self.port));
 
@@ -272,8 +272,8 @@ impl SecureConnection {
 
         let mut req = HttpRequest::new("POST".to_string(), "/vpnsvc/connect.cgi".to_string());
         req.add_header("Content-Type".to_string(), "image/jpeg".to_string());
-    // Persistent connection across watermark and auth
-    req.add_header("Connection".to_string(), "keep-alive".to_string());
+        // Persistent connection across watermark and auth
+        req.add_header("Connection".to_string(), "keep-alive".to_string());
         req.add_header("Host".to_string(), format!("{}:{}", self.host, self.port));
         req.set_body(body);
         let resp = self.send_request(&req)?;

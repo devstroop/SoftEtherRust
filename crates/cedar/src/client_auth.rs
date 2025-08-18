@@ -3,8 +3,8 @@
 use crate::constants::AuthType;
 use crate::{MAX_PASSWORD_LEN, MAX_USERNAME_LEN, SHA1_SIZE};
 use mayaqua::{Error, Result};
-use zeroize::Zeroize;
 use subtle::ConstantTimeEq;
+use zeroize::Zeroize;
 
 /// Client authentication data (matches CLIENT_AUTH structure)
 #[derive(Clone)]
@@ -26,8 +26,20 @@ impl std::fmt::Debug for ClientAuth {
             .field("username", &self.username)
             .field("hashed_password", &"<redacted>")
             .field("plain_password", &"<redacted>")
-            .field("client_cert", &self.client_cert.as_ref().map(|c| format!("{} bytes", c.len())))
-            .field("client_key", &self.client_key.as_ref().map(|k| format!("{} bytes", k.len())))
+            .field(
+                "client_cert",
+                &self
+                    .client_cert
+                    .as_ref()
+                    .map(|c| format!("{} bytes", c.len())),
+            )
+            .field(
+                "client_key",
+                &self
+                    .client_key
+                    .as_ref()
+                    .map(|k| format!("{} bytes", k.len())),
+            )
             .field("secure_public_cert_name", &self.secure_public_cert_name)
             .field("secure_private_key_name", &self.secure_private_key_name)
             .finish()
@@ -197,7 +209,12 @@ impl ClientAuth {
                     return Err(Error::InvalidParameter);
                 }
                 // Ensure ticket material present (stored in hashed_password)
-                if self.hashed_password.as_slice().ct_eq(&[0u8; SHA1_SIZE]).into() {
+                if self
+                    .hashed_password
+                    .as_slice()
+                    .ct_eq(&[0u8; SHA1_SIZE])
+                    .into()
+                {
                     return Err(Error::InvalidParameter);
                 }
                 Ok(())

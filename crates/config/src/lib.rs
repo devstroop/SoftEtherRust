@@ -71,8 +71,8 @@ impl ClientConfig {
         if let Some(ref pass) = self.password {
             return cedar::ClientAuth::new_password(&self.username, pass);
         }
-    // Prefer SHA-0(password + UPPER(username)) variant when provided
-    if let Some(ref b64) = self.password_hash {
+        // Prefer SHA-0(password + UPPER(username)) variant when provided
+        if let Some(ref b64) = self.password_hash {
             let mut auth = cedar::ClientAuth::new_password(&self.username, "__PLACEHOLDER__")?;
             auth.plain_password.clear();
             if let Ok(bytes) = base64::prelude::BASE64_STANDARD.decode(b64) {

@@ -9,18 +9,18 @@ use std::sync::{Arc, Mutex};
 use base64::Engine; // for STANDARD.decode()
 use serde::Deserialize;
 use tokio::runtime::{Builder, Runtime};
-use tokio::task::JoinHandle;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 // no time-based RNG needed for fixed LAA MAC
-use std::net::Ipv4Addr;
 use std::collections::{HashMap, VecDeque};
+use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
 use config::ClientConfig as SharedConfig;
+use vpnclient::settings_json_with_kind;
 use vpnclient::ClientState;
 use vpnclient::VpnClient;
 use vpnclient::{ClientEvent, EventLevel};
-use vpnclient::settings_json_with_kind;
 
 #[derive(Deserialize)]
 struct FfiConfig {
@@ -142,12 +142,12 @@ impl ClientHandle {
             let mut running = self.demux_running.lock().unwrap();
             *running = true;
         }
-    let rx_cb = self.rx_cb.clone();
-    let ip_cb = self.ip_rx_cb.clone();
+        let rx_cb = self.rx_cb.clone();
+        let ip_cb = self.ip_rx_cb.clone();
         let demux_flag = self.demux_running.clone();
         let arp_mgr = self.arp.clone();
         let client_arc2 = self.client.clone();
-    let src_mac = self.mac; // stable LAA for this client handle
+        let src_mac = self.mac; // stable LAA for this client handle
         let my_ip_arc = self.assigned_ip.clone();
         let probes = self.arp_probes.clone();
         // Shared helper for demux
@@ -165,7 +165,7 @@ impl ClientHandle {
                             for ip in batch {
                                 let mut eth = Vec::with_capacity(14 + ip.len());
                                 eth.extend_from_slice(&mac);
-                eth.extend_from_slice(&src_mac);
+                                eth.extend_from_slice(&src_mac);
                                 eth.extend_from_slice(&0x0800u16.to_be_bytes());
                                 eth.extend_from_slice(&ip);
                                 let _ = dp.send_frame(eth);
@@ -278,7 +278,11 @@ impl ClientHandle {
         let h = self.rt.spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(250)).await;
-                let my_ip = my_ip_arc2.lock().unwrap().clone().unwrap_or(Ipv4Addr::new(0,0,0,0));
+                let my_ip = my_ip_arc2
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or(Ipv4Addr::new(0, 0, 0, 0));
                 // Snapshot keys to probe outside locks
                 let keys: Vec<Ipv4Addr> = {
                     let mut rm: Vec<Ipv4Addr> = Vec::new();
@@ -290,15 +294,22 @@ impl ClientHandle {
                             rm.push(k);
                         }
                     }
-                    for k in rm.iter() { pr.remove(k); }
+                    for k in rm.iter() {
+                        pr.remove(k);
+                    }
                     pr.keys().cloned().collect()
                 };
-                if keys.is_empty() { continue; }
+                if keys.is_empty() {
+                    continue;
+                }
                 for nh in keys {
                     let mut send_now = false;
                     {
                         let mut pr = probes2.lock().unwrap();
-                        let st = pr.entry(nh).or_insert_with(|| ProbeState { last: Instant::now() - Duration::from_secs(10), interval: Duration::from_millis(250) });
+                        let st = pr.entry(nh).or_insert_with(|| ProbeState {
+                            last: Instant::now() - Duration::from_secs(10),
+                            interval: Duration::from_millis(250),
+                        });
                         if st.last.elapsed() >= st.interval {
                             send_now = true;
                             // backoff up to 5s
@@ -323,7 +334,9 @@ impl ClientHandle {
 // Return a stable LAA for source MAC (kept per ClientHandle.mac)
 // Note: use the stored mac in ClientHandle; this helper is unused now.
 #[allow(dead_code)]
-fn gen_laa_src() -> [u8; 6] { gen_laa_mac() }
+fn gen_laa_src() -> [u8; 6] {
+    gen_laa_mac()
+}
 
 #[derive(Default)]
 struct ArpManager {
@@ -335,22 +348,52 @@ impl ArpManager {
     fn learn(&mut self, ip: Ipv4Addr, mac: [u8; 6]) {
         self.table.insert(ip, mac);
     }
-    fn lookup(&self, ip: Ipv4Addr) -> Option<[u8; 6]> { self.table.get(&ip).cloned() }
+    fn lookup(&self, ip: Ipv4Addr) -> Option<[u8; 6]> {
+        self.table.get(&ip).cloned()
+    }
     // Inspect frame, learn ARP replies; return flush batch if any
-    fn on_frame(&mut self, frame: &[u8]) -> (Option<Ipv4Addr>, Option<[u8; 6]>, Option<(Ipv4Addr, [u8; 6], Vec<Vec<u8>>)> ) {
+    fn on_frame(
+        &mut self,
+        frame: &[u8],
+    ) -> (
+        Option<Ipv4Addr>,
+        Option<[u8; 6]>,
+        Option<(Ipv4Addr, [u8; 6], Vec<Vec<u8>>)>,
+    ) {
         if frame.len() >= 14 + 28 {
             let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
-            if ethertype == 0x0806 { // ARP
+            if ethertype == 0x0806 {
+                // ARP
                 let off = 14;
-                if frame[off+0] == 0x00 && frame[off+1] == 0x01 && frame[off+2] == 0x08 && frame[off+3] == 0x00 && frame[off+4] == 0x06 && frame[off+5] == 0x04 {
+                if frame[off + 0] == 0x00
+                    && frame[off + 1] == 0x01
+                    && frame[off + 2] == 0x08
+                    && frame[off + 3] == 0x00
+                    && frame[off + 4] == 0x06
+                    && frame[off + 5] == 0x04
+                {
                     // op at off+6..off+8 (we don't check)
-                    let sha = [frame[off+8], frame[off+9], frame[off+10], frame[off+11], frame[off+12], frame[off+13]];
-                    let spa = Ipv4Addr::new(frame[off+14], frame[off+15], frame[off+16], frame[off+17]);
+                    let sha = [
+                        frame[off + 8],
+                        frame[off + 9],
+                        frame[off + 10],
+                        frame[off + 11],
+                        frame[off + 12],
+                        frame[off + 13],
+                    ];
+                    let spa = Ipv4Addr::new(
+                        frame[off + 14],
+                        frame[off + 15],
+                        frame[off + 16],
+                        frame[off + 17],
+                    );
                     self.learn(spa, sha);
                     if let Some(mut q) = self.pending.remove(&spa) {
                         let mac = sha;
                         let mut batch = Vec::with_capacity(q.len());
-                        while let Some(pkt) = q.pop_front() { batch.push(pkt); }
+                        while let Some(pkt) = q.pop_front() {
+                            batch.push(pkt);
+                        }
                         return (Some(spa), Some(mac), Some((spa, mac, batch)));
                     }
                     return (Some(spa), Some(sha), None);
@@ -361,8 +404,12 @@ impl ArpManager {
     }
     // Queue IP packet for next-hop; returns true if enqueued
     fn enqueue(&mut self, next_hop: Ipv4Addr, ip: Vec<u8>) -> bool {
-        let q = self.pending.entry(next_hop).or_insert_with(|| VecDeque::with_capacity(16));
-        if q.len() >= 16 { // bounded
+        let q = self
+            .pending
+            .entry(next_hop)
+            .or_insert_with(|| VecDeque::with_capacity(16));
+        if q.len() >= 16 {
+            // bounded
             return false;
         }
         q.push_back(ip);
@@ -371,12 +418,15 @@ impl ArpManager {
 }
 
 #[derive(Clone, Copy)]
-struct ProbeState { last: Instant, interval: Duration }
+struct ProbeState {
+    last: Instant,
+    interval: Duration,
+}
 
-fn build_arp_request(src_mac: [u8;6], src_ip: Ipv4Addr, target_ip: Ipv4Addr) -> Vec<u8> {
+fn build_arp_request(src_mac: [u8; 6], src_ip: Ipv4Addr, target_ip: Ipv4Addr) -> Vec<u8> {
     let mut arp = Vec::with_capacity(14 + 28);
     // Ethernet broadcast
-    arp.extend_from_slice(&[0xff,0xff,0xff,0xff,0xff,0xff]);
+    arp.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
     arp.extend_from_slice(&src_mac);
     arp.extend_from_slice(&0x0806u16.to_be_bytes());
     // ARP header
@@ -385,10 +435,10 @@ fn build_arp_request(src_mac: [u8;6], src_ip: Ipv4Addr, target_ip: Ipv4Addr) -> 
     arp.push(6); // hlen
     arp.push(4); // plen
     arp.extend_from_slice(&0x0001u16.to_be_bytes()); // oper request
-    // sha, spa, tha, tpa
+                                                     // sha, spa, tha, tpa
     arp.extend_from_slice(&src_mac);
     arp.extend_from_slice(&src_ip.octets());
-    arp.extend_from_slice(&[0u8;6]);
+    arp.extend_from_slice(&[0u8; 6]);
     arp.extend_from_slice(&target_ip.octets());
     arp
 }
@@ -459,19 +509,19 @@ pub extern "C" fn softether_client_create(json_config: *const c_char) -> *mut so
         rt,
         client: Arc::new(Mutex::new(client)),
         adapter_tx: Arc::new(Mutex::new(None)),
-    rx_cb: Arc::new(Mutex::new(None)),
-    ip_rx_cb: Arc::new(Mutex::new(None)),
-    state_cb: Arc::new(Mutex::new(None)),
-    event_cb: Arc::new(Mutex::new(None)),
+        rx_cb: Arc::new(Mutex::new(None)),
+        ip_rx_cb: Arc::new(Mutex::new(None)),
+        state_cb: Arc::new(Mutex::new(None)),
+        event_cb: Arc::new(Mutex::new(None)),
         tasks: Arc::new(Mutex::new(Vec::new())),
         demux_running: Arc::new(Mutex::new(false)),
         last_error: Arc::new(Mutex::new(None)),
-    mac: gen_laa_mac(),
-    assigned_ip: Arc::new(Mutex::new(None)),
-    netmask: Arc::new(Mutex::new(None)),
-    gateway: Arc::new(Mutex::new(None)),
-    arp: Arc::new(Mutex::new(ArpManager::default())),
-    arp_probes: Arc::new(Mutex::new(HashMap::new())),
+        mac: gen_laa_mac(),
+        assigned_ip: Arc::new(Mutex::new(None)),
+        netmask: Arc::new(Mutex::new(None)),
+        gateway: Arc::new(Mutex::new(None)),
+        arp: Arc::new(Mutex::new(ArpManager::default())),
+        arp_probes: Arc::new(Mutex::new(HashMap::new())),
     };
     Box::into_raw(Box::new(handle)) as *mut softether_client_t
 }
@@ -517,7 +567,7 @@ pub extern "C" fn softether_client_connect(handle: *mut softether_client_t) -> c
                 }
             }
         });
-    // No direct event emission here; rely on VpnClient's internal event channel (1001) if configured.
+        // No direct event emission here; rely on VpnClient's internal event channel (1001) if configured.
     }
     code
 }
@@ -585,11 +635,19 @@ pub extern "C" fn softether_client_get_network_settings_json(
     });
     // Store L3 parameters for IP-mode
     {
-        if let Some(ip) = ip { *h.assigned_ip.lock().unwrap() = Some(ip); }
-        if let Some(m) = mask { *h.netmask.lock().unwrap() = Some(m); }
-        if let Some(g) = gw { *h.gateway.lock().unwrap() = Some(g); }
+        if let Some(ip) = ip {
+            *h.assigned_ip.lock().unwrap() = Some(ip);
+        }
+        if let Some(m) = mask {
+            *h.netmask.lock().unwrap() = Some(m);
+        }
+        if let Some(g) = gw {
+            *h.gateway.lock().unwrap() = Some(g);
+        }
     }
-    CString::new(s).map(|cs| cs.into_raw()).unwrap_or(ptr::null_mut())
+    CString::new(s)
+        .map(|cs| cs.into_raw())
+        .unwrap_or(ptr::null_mut())
 }
 
 /// Validate Base64 and decode into out_buf; returns number of bytes or negative error.
@@ -642,7 +700,7 @@ pub extern "C" fn softether_client_free(handle: *mut softether_client_t) {
         return;
     }
     unsafe {
-    let boxed = Box::from_raw(handle as *mut ClientHandle);
+        let boxed = Box::from_raw(handle as *mut ClientHandle);
         // Best-effort graceful disconnect
         let client_arc = boxed.client.clone();
         let _ = boxed.rt.block_on(async move {
@@ -650,7 +708,7 @@ pub extern "C" fn softether_client_free(handle: *mut softether_client_t) {
             let _ = c.disconnect().await;
         });
         // Abort spawned tasks owned by FFI
-    let tasks = std::mem::take(&mut *boxed.tasks.lock().unwrap());
+        let tasks = std::mem::take(&mut *boxed.tasks.lock().unwrap());
         for t in tasks {
             t.abort();
         }
@@ -691,7 +749,9 @@ pub extern "C" fn softether_client_last_error(handle: *mut softether_client_t) -
         g.take()
     };
     if let Some(m) = msg {
-        CString::new(m).map(|cs| cs.into_raw()).unwrap_or(ptr::null_mut())
+        CString::new(m)
+            .map(|cs| cs.into_raw())
+            .unwrap_or(ptr::null_mut())
     } else {
         ptr::null_mut()
     }
@@ -865,7 +925,7 @@ pub extern "C" fn softether_client_send_ip_packet(
     arp.push(6);
     arp.push(4);
     arp.extend_from_slice(&0x0001u16.to_be_bytes()); // request
-    // sha, spa, tha, tpa
+                                                     // sha, spa, tha, tpa
     arp.extend_from_slice(&src_mac);
     arp.extend_from_slice(&src_ip.octets());
     arp.extend_from_slice(&[0u8; 6]);
@@ -902,7 +962,9 @@ pub extern "C" fn softether_client_arp_add(
         // Flush pending immediately if any were queued for this next-hop
         if let Some(mut q) = mgr.pending.remove(&ip) {
             let mut batch = Vec::new();
-            while let Some(pkt) = q.pop_front() { batch.push(pkt); }
+            while let Some(pkt) = q.pop_front() {
+                batch.push(pkt);
+            }
             drop(mgr);
             let client_arc = h.client.clone();
             let src_mac = h.mac;

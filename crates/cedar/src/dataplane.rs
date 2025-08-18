@@ -524,8 +524,8 @@ impl DataPlane {
         });
 
         // Keepalive task: periodically send a neutral keepalive on this link
-    let tls_for_ka = tls_shared.clone();
-    let ka_handle = tokio::spawn(async move {
+        let tls_for_ka = tls_shared.clone();
+        let ka_handle = tokio::spawn(async move {
             // Many implementations use a ~20s heartbeat when idle
             let mut ticker = interval(Duration::from_secs(20));
             loop {
@@ -533,15 +533,15 @@ impl DataPlane {
                 let tls_for_ka2 = tls_for_ka.clone();
                 let res = tokio::task::spawn_blocking(move || {
                     let mut guard = tls_for_ka2.lock().unwrap();
-            // Write a SoftEther keepalive frame: magic 0xffffffff, then BE length, then payload.
-            // Use a small textual payload as seen in other implementations for compatibility.
-            const MAGIC: u32 = 0xffff_ffff;
-            let payload = crate::KEEP_ALIVE_STRING.as_bytes();
-            let mut buf = Vec::with_capacity(4 + 4 + payload.len());
-            buf.extend_from_slice(&MAGIC.to_be_bytes());
-            buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-            buf.extend_from_slice(payload);
-            guard.write_all(&buf)
+                    // Write a SoftEther keepalive frame: magic 0xffffffff, then BE length, then payload.
+                    // Use a small textual payload as seen in other implementations for compatibility.
+                    const MAGIC: u32 = 0xffff_ffff;
+                    let payload = crate::KEEP_ALIVE_STRING.as_bytes();
+                    let mut buf = Vec::with_capacity(4 + 4 + payload.len());
+                    buf.extend_from_slice(&MAGIC.to_be_bytes());
+                    buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+                    buf.extend_from_slice(payload);
+                    guard.write_all(&buf)
                 })
                 .await;
                 match res {

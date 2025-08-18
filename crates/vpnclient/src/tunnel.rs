@@ -1,8 +1,8 @@
 //! Tunnel management for VPN connections
 
 use anyhow::Result;
-use tracing::{debug, info};
 use tokio::process::Command;
+use tracing::{debug, info};
 
 /// VPN tunnel interface
 pub struct Tunnel {

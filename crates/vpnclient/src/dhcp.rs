@@ -4,9 +4,9 @@
 //! and apply assigned IP/mask/router/DNS on macOS using existing helpers.
 
 use anyhow::Result;
-use tracing::{info, warn};
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tracing::{info, warn};
 
 use cedar::DataPlane;
 

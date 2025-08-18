@@ -5,8 +5,8 @@ use base64;
 use base64::prelude::*;
 use cedar::constants::{MAX_RETRY_INTERVAL_MS, MIN_RETRY_INTERVAL_MS};
 use cedar::{ConnectionManager, ConnectionPool, DataPlane, EngineConfig, SessionManager};
-use tracing::{debug, error, info, warn};
-use rand::RngCore; // for fill_bytes
+use rand::RngCore;
+use tracing::{debug, error, info, warn}; // for fill_bytes
 #[cfg(unix)]
 fn local_hostname() -> String {
     use std::ffi::CStr;
@@ -42,8 +42,8 @@ use crate::{CLIENT_BUILD, CLIENT_STRING, CLIENT_VERSION};
 #[cfg(feature = "adapter")]
 use adapter::VirtualAdapter;
 use config as shared_config;
-use mayaqua::get_tick64;
 use mayaqua::crypto::softether_password_hash; // SHA-0(password + UPPER(username))
+use mayaqua::get_tick64;
 use std::net::Ipv4Addr;
 use std::net::{SocketAddr, ToSocketAddrs};
 
@@ -181,13 +181,17 @@ impl VpnClient {
         // Map shared -> internal config (prefer SHA-0 of password+UPPER(username))
         let auth = if let Some(b64) = cc.password_hash.clone() {
             // Direct SHA-0 hash provided (20 bytes, base64)
-            AuthConfig::Password { hashed_password: b64 }
+            AuthConfig::Password {
+                hashed_password: b64,
+            }
         } else if let Some(pass) = cc.password.clone() {
             // Derive SHA-0(password + UPPER(username)) locally
             let hp = softether_password_hash(&pass, &cc.username);
             let b64 = base64::prelude::BASE64_STANDARD.encode(hp);
-            AuthConfig::Password { hashed_password: b64 }
-    } else {
+            AuthConfig::Password {
+                hashed_password: b64,
+            }
+        } else {
             AuthConfig::Anonymous
         };
         let mut v = VpnConfig::new_anonymous(cc.server, cc.port, cc.hub);
@@ -867,10 +871,7 @@ impl VpnClient {
         {
             match connection.handle_pencore(pencore_bytes) {
                 Ok(()) => {
-                    debug!(
-                        "Validated pencore blob ({} bytes)",
-                        pencore_bytes.len()
-                    );
+                    debug!("Validated pencore blob ({} bytes)", pencore_bytes.len());
                 }
                 Err(e) => {
                     warn!(
@@ -1120,7 +1121,7 @@ impl VpnClient {
         let mut cur_host = host.clone();
         let mut cur_port = port;
         let mut redir_attempts = 0u8;
-    // Direction of this link as determined by the server (0: both, 1: c->s, 2: s->c)
+        // Direction of this link as determined by the server (0: both, 1: c->s, 2: s->c)
         'connect_and_register: loop {
             let mut conn =
                 SecureConnection::connect(&cur_host, cur_port, insecure, timeout, sni.as_deref())?;
@@ -1375,7 +1376,11 @@ impl VpnClient {
     fn emit_settings_snapshot(&self) {
         if let Some(tx) = &self.event_tx {
             let s = settings_json_with_kind(self.get_network_settings().as_ref(), true);
-            let _ = tx.send(ClientEvent { level: EventLevel::Info, code: 1001, message: s });
+            let _ = tx.send(ClientEvent {
+                level: EventLevel::Info,
+                code: 1001,
+                message: s,
+            });
         }
     }
     fn set_state(&mut self, s: ConnectionState) {
@@ -1679,8 +1684,8 @@ impl VpnClient {
 
     /// Log a concise adapter and network summary once configured
     fn log_adapter_summary(&self) {
-    #[cfg(feature = "adapter")]
-    if let Some(ref adp) = self.adapter {
+        #[cfg(feature = "adapter")]
+        if let Some(ref adp) = self.adapter {
             if let Some(ref ns) = self.network_settings {
                 if let Some(ip) = ns.assigned_ipv4 {
                     let bits = ns.subnet_mask.map(Self::mask_to_prefix).unwrap_or(32);
@@ -1751,10 +1756,10 @@ impl VpnClient {
             return;
         };
 
-    // Pin aux links to the same endpoint as the primary connection to avoid farm/session mismatches.
-    // The server may redirect individual aux connections if needed.
-    let base_host = self.config.host.clone();
-    let port = self.config.port;
+        // Pin aux links to the same endpoint as the primary connection to avoid farm/session mismatches.
+        // The server may redirect individual aux connections if needed.
+        let base_host = self.config.host.clone();
+        let port = self.config.port;
         let mgr = self.connection_manager.clone();
         let pool = self.connection_pool.clone();
         let dp = self.dataplane.clone();
@@ -1771,7 +1776,7 @@ impl VpnClient {
             })
             .unwrap_or_else(|| vec![port]);
 
-    for i in 0..to_spawn {
+        for i in 0..to_spawn {
             let name = format!("aux_link_{}", i + 1);
             let chosen_port = ports_rr[i as usize % ports_rr.len()];
             // Use the same host as the primary endpoint; allow server-side redirect to rebalance if required
@@ -1923,7 +1928,8 @@ impl VpnClient {
 
                                     );
                                     // Retry some transient errors like ERR_SESSION_TIMEOUT
-                                    if errc == 13 { // ERR_SESSION_TIMEOUT
+                                    if errc == 13 {
+                                        // ERR_SESSION_TIMEOUT
                                         sleep(Duration::from_millis(backoff_ms)).await;
                                         backoff_ms = (backoff_ms * 2).min(3000);
                                         continue 'connect_and_register;
@@ -2035,7 +2041,7 @@ impl VpnClient {
             warn!("Dataplane not initialized; skipping adapter bridging");
             return Ok(());
         }
-    let dp = dp_opt.unwrap();
+        let dp = dp_opt.unwrap();
         // Create adapter<->dataplane channels
         let (adp_to_dp_tx, adp_to_dp_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         let (dp_to_adp_tx, mut dp_to_adp_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -2043,8 +2049,8 @@ impl VpnClient {
         dp.set_adapter_tx(adp_to_dp_rx); // adapter -> session/dataplane
         dp.set_adapter_rx(dp_to_adp_tx); // session/dataplane -> adapter
 
-    // Task: adapter -> session (read packets from utun and send into session)
-    #[cfg(all(target_os = "macos", feature = "adapter"))]
+        // Task: adapter -> session (read packets from utun and send into session)
+        #[cfg(all(target_os = "macos", feature = "adapter"))]
         {
             let io_r = io.clone();
             let tx = adp_to_dp_tx.clone();
@@ -2111,8 +2117,8 @@ impl VpnClient {
             self.aux_tasks.push(h);
         }
 
-    // Task: session -> adapter (read frames emitted by session and write to utun)
-    #[cfg(all(target_os = "macos", feature = "adapter"))]
+        // Task: session -> adapter (read frames emitted by session and write to utun)
+        #[cfg(all(target_os = "macos", feature = "adapter"))]
         {
             let io_w = io.clone();
             // Helper: strip Ethernet header if IPv4 and return IP payload
@@ -2255,7 +2261,7 @@ impl VpnClient {
                         }
                     }
                 }
-            #[cfg(all(target_os = "macos", feature = "adapter"))]
+                #[cfg(all(target_os = "macos", feature = "adapter"))]
                 {
                     #[cfg(feature = "adapter")]
                     if self.bridge_ready && !self.dhcp_spawned {
@@ -2328,21 +2334,21 @@ impl VpnClient {
             info!("[INFO] network_settings_applying");
         }
 
-    #[cfg(feature = "adapter")]
-    adapter
+        #[cfg(feature = "adapter")]
+        adapter
             .set_ip_address(&ip.to_string(), &mask.to_string())
             .await?;
 
         // Parity logs similar to third-party client
         let cidr = Self::mask_to_prefix(mask);
-    #[cfg(feature = "adapter")]
-    info!("Interface {}: {}/{}", adapter.name(), ip, cidr);
+        #[cfg(feature = "adapter")]
+        info!("Interface {}: {}/{}", adapter.name(), ip, cidr);
 
         // Only add default route when routing is allowed
-    if !no_routing {
+        if !no_routing {
             if let Some(gw) = ns.gateway {
-        #[cfg(feature = "adapter")]
-        let _ = adapter
+                #[cfg(feature = "adapter")]
+                let _ = adapter
                     .add_route("0.0.0.0/0", &gw.to_string())
                     .await
                     .map_err(|e| {
