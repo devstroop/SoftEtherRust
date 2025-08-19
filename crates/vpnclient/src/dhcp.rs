@@ -4,6 +4,7 @@
 //! and apply assigned IP/mask/router/DNS on macOS using existing helpers.
 
 use anyhow::Result;
+use std::env;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -76,7 +77,7 @@ impl DhcpClient {
         }
 
         let deadline = tokio::time::Instant::now() + timeout;
-        let mut offer: Option<(Lease, [u8; 4], [u8; 4])> = None; // (lease, server_id, yiaddr)
+    let mut offer: Option<(Lease, [u8; 4], [u8; 4])> = None; // (lease, server_id, yiaddr)
         let mut last_tx = tokio::time::Instant::now();
         // Faster initial retries with exponential backoff (1.5s, 3s, 6s, 8s cap)
         let initial_ms: u64 = std::env::var("RUST_DHCP_DISCOVER_INITIAL_MS")
@@ -103,6 +104,9 @@ impl DhcpClient {
                                 "DHCP OFFER yiaddr={}.{}.{}.{}",
                                 yiaddr[0], yiaddr[1], yiaddr[2], yiaddr[3]
                             );
+                            if env::var("RUST_3RD_LOG").ok().as_deref() == Some("1") {
+                                log_dhcp_options("OFFER", &lease);
+                            }
                             offer = Some((lease, server_id, yiaddr));
                             break;
                         }
@@ -179,6 +183,9 @@ impl DhcpClient {
                             warn!("DHCP ACK has no DNS servers");
                         } else {
                             info!("DHCP ACK includes {} DNS server(s)", lease.dns.len());
+                        }
+                        if env::var("RUST_3RD_LOG").ok().as_deref() == Some("1") {
+                            log_dhcp_options("ACK", &lease);
                         }
                         info!(
                             "DHCP ACK ip={}.{}.{}.{}",
@@ -654,5 +661,29 @@ impl DhcpClient {
             }
         }
         None
+    }
+}
+
+fn dotted(ip: [u8; 4]) -> String {
+    format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
+}
+
+fn log_dhcp_options(label: &str, lease: &Lease) {
+    if let Some(mask) = lease.subnet {
+        info!("DHCP {} option: Subnet Mask {}", label, dotted(mask));
+        info!("DHCP {} option: subnet_mask {:02X}{:02X}{:02X}{:02X}", label, mask[0], mask[1], mask[2], mask[3]);
+    } else {
+        info!("DHCP {} option: Subnet Mask (missing)", label);
+    }
+    if let Some(gw) = lease.router {
+        info!("DHCP {} option: Router {}", label, dotted(gw));
+    } else {
+        info!("DHCP {} option: Router (missing)", label);
+    }
+    if lease.dns.is_empty() {
+        info!("DHCP {} option: DNS Servers (missing)", label);
+    } else {
+        let list: Vec<String> = lease.dns.iter().map(|d| dotted(*d)).collect();
+        info!("DHCP {} option: DNS Server(s) {}", label, list.join(", "));
     }
 }
