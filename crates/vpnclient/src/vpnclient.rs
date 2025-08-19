@@ -414,6 +414,8 @@ impl VpnClient {
                     mac[0] = (mac[0] & 0b1111_1110) | 0b0000_0010; // locally administered, unicast
                     let dhcp = DhcpClient::new(dp, mac);
                     info!("Attempting DHCP over tunnel on {}", ifname);
+                    // Prevent fallback system DHCP/monitor from spawning while we run in-tunnel DHCP
+                    self.dhcp_spawned = true;
                     let lease = dhcp
                         .run_once(&ifname, Duration::from_secs(30))
                         .await
@@ -490,7 +492,8 @@ impl VpnClient {
                         info!("VPN connection established successfully");
                         return Ok(());
                     }
-                    // No lease yet; defer to apply_network_settings() to kick system DHCP/monitor if needed
+                    // No lease yet; do not start system DHCP to avoid invalid placeholder IPs on utun
+                    // We keep dhcp_spawned=true to suppress fallback DHCP/monitor and avoid misleading logs
                 }
             }
 
@@ -509,14 +512,28 @@ impl VpnClient {
                     {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
-                    // Generate a locally-administered, unicast MAC; stable enough for a single run
+                    // Generate a deterministic locally-administered, unicast MAC derived from config
+                    // This helps DHCP servers consistently recognize the client across reconnects.
                     let mut mac = [0u8; 6];
-                    rand::rng().fill_bytes(&mut mac);
-                    mac[0] = (mac[0] & 0b1111_1110) | 0b0000_0010;
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    use std::hash::{Hash, Hasher};
+                    self.config.username.hash(&mut hasher);
+                    self.config.hub_name.hash(&mut hasher);
+                    self.config.host.hash(&mut hasher);
+                    let v = hasher.finish();
+                    mac.copy_from_slice(&[
+                        ((v >> 0) as u8) | 0x02, // set LAA bit
+                        ((v >> 8) as u8),
+                        ((v >> 16) as u8),
+                        ((v >> 24) as u8),
+                        ((v >> 32) as u8),
+                        ((v >> 40) as u8),
+                    ]);
+                    mac[0] = (mac[0] & 0b1111_1110) | 0b0000_0010; // locally administered, unicast
                     let dhcp = DhcpClient::new(dp, mac);
                     info!("Attempting DHCP over tunnel (iOS)");
                     let lease = dhcp
-                        .run_once("utun", Duration::from_secs(30))
+                        .run_once("utun", Duration::from_secs(40))
                         .await
                         .ok()
                         .flatten();
@@ -1449,7 +1466,8 @@ async fn monitor_darwin_interfaces(names: &[String]) {
         return;
     }
 
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(60);
     let mut printed_ip = false;
     let mut printed_router = false;
 
@@ -1461,15 +1479,22 @@ async fn monitor_darwin_interfaces(names: &[String]) {
             let v = quick_ipv4_info(n).await;
 
             // Print IP if valid
-            if !v.ip.is_empty() && !v.ip.starts_with("169.254.") {
+        if !v.ip.is_empty() && !v.ip.starts_with("169.254.") {
                 if !printed_ip {
                     let bits = mask_to_cidr(&v.subnet_mask);
-                    if bits > 0 {
-                        info!("IP Address {}/{}", v.ip, bits);
-                    } else {
-                        info!("IP Address {}", v.ip);
+                    let have_router = !v.router.is_empty();
+                    let grace_elapsed = Instant::now().saturating_duration_since(start)
+                        >= Duration::from_secs(5);
+                    // Avoid misleading /8 printed too early; wait briefly for accurate mask/router
+            let looks_bogus = v.ip == "10.0.0.1" && bits <= 8 && !have_router;
+            if (bits >= 15 || have_router || grace_elapsed) && !looks_bogus {
+                        if bits > 0 {
+                            info!("IP Address {}/{}", v.ip, bits);
+                        } else {
+                            info!("IP Address {}", v.ip);
+                        }
+                        printed_ip = true;
                     }
-                    printed_ip = true;
                 }
             }
 
@@ -1549,30 +1574,21 @@ async fn quick_ipv4_info(iface: &str) -> IfaceInfo {
         subnet_mask: String::new(),
         router: String::new(),
     };
-    if let Ok(out) = Command::new("ipconfig")
-        .arg("getifaddr")
-        .arg(iface)
-        .output()
-        .await
-    {
+    // Prefer ifconfig for IP; ipconfig getifaddr as a fallback only
+    // Also parse ifconfig <iface> for more accurate mask (ipconfig can be misleading)
+    if let Ok(out) = Command::new("ifconfig").arg(iface).output().await {
         if out.status.success() {
-            info.ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        }
-    }
-    // Fallback: parse ifconfig <iface> when ipconfig returns empty
-    if info.ip.is_empty() {
-        if let Ok(out) = Command::new("ifconfig").arg(iface).output().await {
-            if out.status.success() {
-                let s = String::from_utf8_lossy(&out.stdout);
-                for line in s.lines() {
-                    let l = line.trim();
-                    // inet 10.0.0.12 netmask 0xffffff00 broadcast 10.0.0.255
-                    if l.starts_with("inet ") {
-                        let parts: Vec<&str> = l.split_whitespace().collect();
-                        if parts.len() >= 2 {
-                            info.ip = parts[1].to_string();
-                        }
-                        // Convert hex netmask to dotted-decimal if present
+            let s = String::from_utf8_lossy(&out.stdout);
+            for line in s.lines() {
+                let l = line.trim();
+                // inet 10.0.0.12 netmask 0xffffff00 broadcast 10.0.0.255
+                if l.starts_with("inet ") {
+                    let parts: Vec<&str> = l.split_whitespace().collect();
+                    if info.ip.is_empty() && parts.len() >= 2 {
+                        info.ip = parts[1].to_string();
+                    }
+                    // Convert hex netmask to dotted-decimal if present
+                    if info.subnet_mask.is_empty() {
                         if let Some(idx) = parts.iter().position(|p| *p == "netmask") {
                             if let Some(hexmask) = parts.get(idx + 1) {
                                 if hexmask.starts_with("0x") && hexmask.len() == 10 {
@@ -1589,15 +1605,30 @@ async fn quick_ipv4_info(iface: &str) -> IfaceInfo {
             }
         }
     }
-    if let Ok(out) = Command::new("ipconfig")
+    // Prefer ifconfig-derived mask; fall back to ipconfig option only if still empty
+    if info.subnet_mask.is_empty() {
+        if let Ok(out) = Command::new("ipconfig")
         .arg("getoption")
         .arg(iface)
         .arg("subnet_mask")
         .output()
         .await
-    {
-        if out.status.success() {
-            info.subnet_mask = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        {
+            if out.status.success() {
+                info.subnet_mask = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            }
+        }
+    }
+    if info.ip.is_empty() {
+        if let Ok(out) = Command::new("ipconfig")
+            .arg("getifaddr")
+            .arg(iface)
+            .output()
+            .await
+        {
+            if out.status.success() {
+                info.ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            }
         }
     }
     if let Ok(out) = Command::new("ipconfig")
@@ -1652,12 +1683,10 @@ fn mask_to_cidr(mask: &str) -> i32 {
             return 0;
         }
     }
-    let (ones, _) = std::net::Ipv4Addr::from(bytes)
+    let ones = std::net::Ipv4Addr::from(bytes)
         .octets()
         .into_iter()
-        .fold((0u32, 0u32), |(acc, _), b| {
-            (acc + (b as u8).count_ones(), 0)
-        });
+        .fold(0u32, |acc, b| acc + b.count_ones());
     ones as i32
 }
 
