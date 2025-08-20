@@ -1,10 +1,11 @@
 use anyhow::Result;
-use rand::RngCore;
-use tokio::time::Duration;
 use tracing::warn;
 
 #[cfg(feature = "adapter")]
 use adapter::VirtualAdapter;
+
+#[cfg(all(target_os = "macos", feature = "adapter"))]
+use rand::RngCore;
 
 use super::VpnClient;
 
@@ -42,8 +43,8 @@ impl VpnClient {
         }
         let dp = dp_opt.unwrap();
         // Create adapter<->dataplane channels
-        let (adp_to_dp_tx, adp_to_dp_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        let (dp_to_adp_tx, mut dp_to_adp_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let (_adp_to_dp_tx, adp_to_dp_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let (dp_to_adp_tx, mut _dp_to_adp_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         // Register with dataplane
         dp.set_adapter_tx(adp_to_dp_rx); // adapter -> session/dataplane
         dp.set_adapter_rx(dp_to_adp_tx); // session/dataplane -> adapter
@@ -52,7 +53,7 @@ impl VpnClient {
         #[cfg(all(target_os = "macos", feature = "adapter"))]
         {
             let io_r = io.clone();
-            let tx = adp_to_dp_tx.clone();
+            let tx = _adp_to_dp_tx.clone();
             // Generate a stable locally-administered MAC used when wrapping DHCP IP packets into Ethernet frames
             let mut mac = [0u8; 6];
             rand::rng().fill_bytes(&mut mac);
@@ -108,7 +109,7 @@ impl VpnClient {
                         }
                         Err(e) => {
                             warn!("adapter->session read error: {}", e);
-                            tokio::time::sleep(Duration::from_millis(250)).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                         }
                     }
                 }
@@ -132,12 +133,12 @@ impl VpnClient {
                 Some(frame[14..].to_vec())
             }
             let h = tokio::spawn(async move {
-                while let Some(frame) = dp_to_adp_rx.recv().await {
+                while let Some(frame) = _dp_to_adp_rx.recv().await {
                     // Convert SoftEther L2 frame to utun L3 IP packet when possible
                     if let Some(ipv4) = eth_to_ipv4(&frame) {
                         if let Err(e) = io_w.write(&ipv4).await {
                             warn!("session->adapter write error: {}", e);
-                            tokio::time::sleep(Duration::from_millis(250)).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                         }
                     } else {
                         // Drop non-IPv4 frames (e.g., ARP) as utun can't carry them

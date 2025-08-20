@@ -467,11 +467,13 @@ fn udp_checksum(src_ip: &[u8; 4], dst_ip: &[u8; 4], udp: &[u8]) -> u16 {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn prefix_len(mask: [u8; 4]) -> u8 {
     (mask[0].count_ones() + mask[1].count_ones() + mask[2].count_ones() + mask[3].count_ones())
         as u8
 }
 
+#[cfg(target_os = "macos")]
 fn classful_mask(first_octet: u8) -> [u8; 4] {
     if first_octet < 128 {
         [255, 0, 0, 0]

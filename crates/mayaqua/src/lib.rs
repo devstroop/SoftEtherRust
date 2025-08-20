@@ -45,6 +45,7 @@ pub const HTTP_PACK_RAND_SIZE_MAX: u32 = 1000; // Random padding size
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::assertions_on_constants)]
     use super::*;
 
     #[test]

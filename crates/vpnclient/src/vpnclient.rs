@@ -38,6 +38,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
 use crate::config::{AuthConfig, VpnConfig};
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 use crate::dhcp::DhcpClient;
 // use crate::dhcp::Lease as DhcpLease;
 use crate::network::SecureConnection;
@@ -94,7 +95,9 @@ pub struct VpnClient {
     event_tx: Option<mpsc::UnboundedSender<ClientEvent>>,
 }
 
-use crate::types::{mask_to_prefix, network_settings_from_lease, settings_json_with_kind};
+use crate::types::{mask_to_prefix, settings_json_with_kind};
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+use crate::types::network_settings_from_lease;
 use crate::types::{ClientEvent, ClientState, EventLevel, NetworkSettings, SessionStats};
 
 impl VpnClient {
