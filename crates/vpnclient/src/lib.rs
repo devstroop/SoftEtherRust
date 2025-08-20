@@ -10,12 +10,14 @@ mod config;
 pub mod dhcp;
 pub mod network;
 pub mod tunnel;
+pub mod types;
 pub mod vpnclient; // internal-only legacy config used by vpnclient implementation
                    // Re-export legacy config type for CLI fallback parsing
 pub use config::VpnConfig as LegacyVpnConfig;
 
 pub use network::*;
 pub use tunnel::*;
+pub use types::*;
 pub use vpnclient::*;
 
 use mayaqua::Result;

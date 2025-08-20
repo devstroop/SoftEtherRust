@@ -8,15 +8,15 @@ use std::sync::{Arc, Mutex};
 
 use base64::Engine; // for STANDARD.decode()
 use serde::Deserialize;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::mpsc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use config::ClientConfig as SharedConfig;
+use vpnclient::settings_json_with_kind;
 use vpnclient::ClientState;
 use vpnclient::VpnClient;
 use vpnclient::{ClientEvent, EventLevel};
-use vpnclient::settings_json_with_kind;
 
 #[derive(Deserialize)]
 struct FfiConfig {
@@ -215,8 +215,8 @@ pub extern "C" fn softether_client_create(json_config: *const c_char) -> *mut so
         rt,
         client: Arc::new(Mutex::new(client)),
         adapter_tx: None,
-    rx_cb: Arc::new(Mutex::new(None)),
-    ip_rx_cb: Arc::new(Mutex::new(None)),
+        rx_cb: Arc::new(Mutex::new(None)),
+        ip_rx_cb: Arc::new(Mutex::new(None)),
         state_cb: None,
         event_cb: None,
     };
@@ -326,7 +326,9 @@ pub extern "C" fn softether_client_get_network_settings_json(
         let c = client_arc.lock().unwrap();
         settings_json_with_kind(c.get_network_settings().as_ref(), false)
     });
-    CString::new(s).map(|cs| cs.into_raw()).unwrap_or(ptr::null_mut())
+    CString::new(s)
+        .map(|cs| cs.into_raw())
+        .unwrap_or(ptr::null_mut())
 }
 
 /// Validate Base64 and decode into out_buf; returns number of bytes or negative error.
