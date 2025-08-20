@@ -152,30 +152,6 @@ pub struct ClientConfig {
     /// Log level
     #[serde(default = "default_log_level")]
     pub log_level: String,
-
-    /// DHCP: initial settle delay before first DISCOVER (ms)
-    #[serde(default = "default_dhcp_settle_ms")]
-    pub dhcp_settle_ms: u64,
-
-    /// DHCP: initial retry interval (ms)
-    #[serde(default = "default_dhcp_initial_ms")]
-    pub dhcp_initial_ms: u64,
-
-    /// DHCP: maximum retry interval cap (ms)
-    #[serde(default = "default_dhcp_max_ms")]
-    pub dhcp_max_ms: u64,
-
-    /// DHCP: jitter fraction applied to retry intervals (0.0..0.5)
-    #[serde(default = "default_dhcp_jitter_pct")]
-    pub dhcp_jitter_pct: f64,
-
-    /// macOS: start system DHCP kick after this delay (ms); if 0, start immediately in parallel
-    #[serde(default = "default_dhcp_fallback_after_ms")]
-    pub dhcp_fallback_after_ms: u64,
-
-    /// macOS: total duration to keep kicking DHCP (ms)
-    #[serde(default = "default_dhcp_kick_timeout_ms")]
-    pub dhcp_kick_timeout_ms: u64,
 }
 
 // Default value functions
@@ -199,24 +175,6 @@ fn default_interface_name() -> String {
 }
 fn default_log_level() -> String {
     "info".to_string()
-}
-fn default_dhcp_settle_ms() -> u64 {
-    200
-}
-fn default_dhcp_initial_ms() -> u64 {
-    800
-}
-fn default_dhcp_max_ms() -> u64 {
-    8000
-}
-fn default_dhcp_jitter_pct() -> f64 {
-    0.15
-}
-fn default_dhcp_fallback_after_ms() -> u64 {
-    6000
-}
-fn default_dhcp_kick_timeout_ms() -> u64 {
-    20000
 }
 
 impl Default for ConnectionConfig {
@@ -244,12 +202,6 @@ impl Default for ClientConfig {
             macos_dns_service_name: None,
             verbose: false,
             log_level: default_log_level(),
-            dhcp_settle_ms: default_dhcp_settle_ms(),
-            dhcp_initial_ms: default_dhcp_initial_ms(),
-            dhcp_max_ms: default_dhcp_max_ms(),
-            dhcp_jitter_pct: default_dhcp_jitter_pct(),
-            dhcp_fallback_after_ms: default_dhcp_fallback_after_ms(),
-            dhcp_kick_timeout_ms: default_dhcp_kick_timeout_ms(),
         }
     }
 }

@@ -302,11 +302,6 @@ impl VpnClient {
             self.is_connected = true;
             self.set_state(ConnectionState::Established);
             info!("SoftEther tunnel opened");
-                        // Apply DHCP timing from config via environment overrides consumed by dhcp.rs
-                        std::env::set_var("RUST_DHCP_SETTLE_MS", self.config.client.dhcp_settle_ms.to_string());
-                        std::env::set_var("RUST_DHCP_DISCOVER_INITIAL_MS", self.config.client.dhcp_initial_ms.to_string());
-                        std::env::set_var("RUST_DHCP_DISCOVER_MAX_MS", self.config.client.dhcp_max_ms.to_string());
-                        std::env::set_var("RUST_DHCP_JITTER_PCT", format!("{}", self.config.client.dhcp_jitter_pct));
             self.emit_event(EventLevel::Info, 220, "tunnel opened");
             // Establish the first bulk data link via additional_connect before bridging/DHCP
             if let Err(e) = self.open_primary_data_link().await {
@@ -356,33 +351,12 @@ impl VpnClient {
                     mac[0] = (mac[0] & 0b1111_1110) | 0b0000_0010; // locally administered, unicast
                     let dhcp = DhcpClient::new(dp, mac);
                     info!("Attempting DHCP over tunnel on {}", ifname);
-
-                    // Fallback: after configured delay without success, nudge macOS DHCP in parallel
-                    let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
-                    let ifname_kick = ifname.clone();
-                    let kick_after = self.config.client.dhcp_fallback_after_ms;
-                    let kick_timeout = self.config.client.dhcp_kick_timeout_ms;
-                    let fallback = tokio::spawn(async move {
-                        let delay = Duration::from_millis(kick_after);
-                        let timed_out = tokio::time::timeout(delay, &mut cancel_rx).await.is_err();
-                        if timed_out {
-                            crate::vpnclient::network_config::kick_dhcp_until_ip(
-                                &ifname_kick,
-                                Duration::from_millis(kick_timeout),
-                            ).await;
-                        }
-                    });
                     let lease = dhcp
                         .run_once(&ifname, Duration::from_secs(30))
                         .await
                         .ok()
                         .flatten();
                     if let Some(lease) = lease {
-                    let _ = cancel_tx.send(());
-                    // Best-effort: avoid a dangling task if not used
-                    if fallback.is_finished() == false {
-                        self.aux_tasks.push(fallback);
-                    }
                         // Reflect DHCP lease in network_settings for consistent summary logs
                         self.network_settings = Some(network_settings_from_lease(&lease));
                         // Notify embedders that settings are available now (JSON event 1001)
