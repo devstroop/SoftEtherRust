@@ -1,10 +1,11 @@
 //! C API for SoftEther VPN Rust client
-//! Minimal connect/disconnect and frame IO hooks.
+//! Split into smaller modules for maintainability; public C symbols unchanged.
 
-use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int};
-use std::ptr;
-use std::sync::{Arc, Mutex};
+mod utils;
+mod callbacks;
+mod arp;
+mod client_handle;
+mod api;
 
 use base64::Engine; // for STANDARD.decode()
 use serde::Deserialize;

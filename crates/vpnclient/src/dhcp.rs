@@ -76,7 +76,7 @@ impl DhcpClient {
         }
 
         let deadline = tokio::time::Instant::now() + timeout;
-        let mut offer: Option<(Lease, [u8; 4], [u8; 4])> = None; // (lease, server_id, yiaddr)
+    let mut offer: Option<(Lease, [u8; 4], [u8; 4])> = None; // (lease, server_id, yiaddr)
         let mut last_tx = tokio::time::Instant::now();
         // Faster initial retries with exponential backoff (1.5s, 3s, 6s, 8s cap)
         let initial_ms: u64 = std::env::var("RUST_DHCP_DISCOVER_INITIAL_MS")
@@ -103,6 +103,9 @@ impl DhcpClient {
                                 "DHCP OFFER yiaddr={}.{}.{}.{}",
                                 yiaddr[0], yiaddr[1], yiaddr[2], yiaddr[3]
                             );
+                            if env::var("RUST_3RD_LOG").ok().as_deref() == Some("1") {
+                                log_dhcp_options("OFFER", &lease);
+                            }
                             offer = Some((lease, server_id, yiaddr));
                             break;
                         }
@@ -127,7 +130,7 @@ impl DhcpClient {
             }
         }
 
-        let Some((lease_offer, server_id, yiaddr)) = offer else {
+    let Some((lease_offer, server_id, yiaddr)) = offer else {
             return Ok(None);
         };
 
@@ -139,7 +142,7 @@ impl DhcpClient {
             warn!("DHCP: failed to queue REQUEST (no TX-capable link)");
         }
 
-        // Wait for ACK
+    // Wait for ACK
         while tokio::time::Instant::now() < deadline {
             if let Some(frame) = rx.recv().await {
                 if let Some((mt, mut lease, _server_id, _yiaddr, rx_xid)) = parse_dhcp(&frame) {
@@ -180,6 +183,9 @@ impl DhcpClient {
                         } else {
                             info!("DHCP ACK includes {} DNS server(s)", lease.dns.len());
                         }
+                        if env::var("RUST_3RD_LOG").ok().as_deref() == Some("1") {
+                            log_dhcp_options("ACK", &lease);
+                        }
                         info!(
                             "DHCP ACK ip={}.{}.{}.{}",
                             lease.yiaddr[0], lease.yiaddr[1], lease.yiaddr[2], lease.yiaddr[3]
@@ -192,9 +198,10 @@ impl DhcpClient {
                                 "{}.{}.{}.{}",
                                 lease.yiaddr[0], lease.yiaddr[1], lease.yiaddr[2], lease.yiaddr[3]
                             );
+                            // Fallback to /32 if subnet is missing; avoid classful /8 which is misleading for tunnels
                             let mask = lease
                                 .subnet
-                                .unwrap_or_else(|| classful_mask(lease.yiaddr[0]));
+                                .unwrap_or([255, 255, 255, 255]);
                             let mask_s = format!("{}.{}.{}.{}", mask[0], mask[1], mask[2], mask[3]);
                             let _ = Command::new("ifconfig")
                                 .arg(ifname)
@@ -236,8 +243,63 @@ impl DhcpClient {
                 break;
             }
         }
-
-        Ok(Some(lease_offer))
+        // No ACK received: use the OFFER as best-effort. Try INFORM to obtain mask/router/DNS.
+        let mut lease = lease_offer;
+        if lease.subnet.is_none() || lease.router.is_none() || lease.dns.is_empty() {
+            if let Some(informed) = self.try_inform(&lease, &mut rx, deadline).await {
+                if lease.subnet.is_none() {
+                    lease.subnet = informed.subnet;
+                }
+                if lease.router.is_none() {
+                    lease.router = informed.router;
+                }
+                if lease.dns.is_empty() && !informed.dns.is_empty() {
+                    lease.dns = informed.dns;
+                }
+            }
+        }
+        // Apply on macOS using existing helpers (same as ACK path)
+        #[cfg(target_os = "macos")]
+        {
+            use tokio::process::Command;
+            let ip = format!(
+                "{}.{}.{}.{}",
+                lease.yiaddr[0], lease.yiaddr[1], lease.yiaddr[2], lease.yiaddr[3]
+            );
+            let mask = lease.subnet.unwrap_or([255, 255, 255, 255]);
+            let mask_s = format!("{}.{}.{}.{}", mask[0], mask[1], mask[2], mask[3]);
+            let _ = Command::new("ifconfig")
+                .arg(ifname)
+                .arg("inet")
+                .arg(&ip)
+                .arg(&ip)
+                .arg("netmask")
+                .arg(&mask_s)
+                .output()
+                .await;
+            if let Some(router) = lease.router {
+                let gw = format!("{}.{}.{}.{}", router[0], router[1], router[2], router[3]);
+                let _ = Command::new("route")
+                    .arg("add")
+                    .arg("default")
+                    .arg(&gw)
+                    .output()
+                    .await;
+                info!("Router {}", gw);
+            }
+            let cidr = prefix_len(mask);
+            info!("Interface {}: {}/{}", ifname, ip, cidr);
+            if !lease.dns.is_empty() {
+                let dns_list: Vec<String> = lease
+                    .dns
+                    .iter()
+                    .map(|d| format!("{}.{}.{}.{}", d[0], d[1], d[2], d[3]))
+                    .collect();
+                info!("DNS {}", dns_list.join(", "));
+            }
+        }
+        info!("Using DHCP OFFER without ACK (applied best-effort)");
+        Ok(Some(lease))
     }
 }
 
@@ -598,5 +660,29 @@ impl DhcpClient {
             }
         }
         None
+    }
+}
+
+fn dotted(ip: [u8; 4]) -> String {
+    format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
+}
+
+fn log_dhcp_options(label: &str, lease: &Lease) {
+    if let Some(mask) = lease.subnet {
+        info!("DHCP {} option: Subnet Mask {}", label, dotted(mask));
+        info!("DHCP {} option: subnet_mask {:02X}{:02X}{:02X}{:02X}", label, mask[0], mask[1], mask[2], mask[3]);
+    } else {
+        info!("DHCP {} option: Subnet Mask (missing)", label);
+    }
+    if let Some(gw) = lease.router {
+        info!("DHCP {} option: Router {}", label, dotted(gw));
+    } else {
+        info!("DHCP {} option: Router (missing)", label);
+    }
+    if lease.dns.is_empty() {
+        info!("DHCP {} option: DNS Servers (missing)", label);
+    } else {
+        let list: Vec<String> = lease.dns.iter().map(|d| dotted(*d)).collect();
+        info!("DHCP {} option: DNS Server(s) {}", label, list.join(", "));
     }
 }

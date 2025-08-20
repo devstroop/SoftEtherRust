@@ -133,6 +133,7 @@ impl SecureConnection {
                 }
             }
         }
+    // Note: native-tls exposes only the peer certificate here; full chain is not available portably.
 
         Ok(Self {
             stream: tls_stream,
@@ -157,6 +158,17 @@ impl SecureConnection {
     /// Send an HTTP request and receive the response
     pub fn send_request(&mut self, request: &HttpRequest) -> Result<HttpResponse> {
         debug!("Sending HTTP request: {} {}", request.method, request.path);
+        if std::env::var("RUST_3RD_LOG").ok().as_deref() == Some("1") {
+            // Emulate third-party style request line and headers
+            info!("{} {} HTTP/1.1", request.method, request.path);
+            for (k, v) in &request.headers {
+                if k.eq_ignore_ascii_case("authorization") {
+                    info!("{}: *****", k);
+                } else {
+                    info!("{}: {}", k, v);
+                }
+            }
+        }
 
         // Send request
         let request_data = request.to_bytes();
@@ -171,6 +183,17 @@ impl SecureConnection {
             HttpResponse::from_stream(&mut self.stream).context("Failed to read HTTP response")?;
 
         debug!("Received HTTP response: {}", response.status_code);
+        if std::env::var("RUST_3RD_LOG").ok().as_deref() == Some("1") {
+            // We only know status code; print a generic OK mapping for 200
+            if response.status_code == 200 {
+                info!("HTTP/1.1 200 OK");
+            } else {
+                info!("HTTP/1.1 {}", response.status_code);
+            }
+            for (k, v) in &response.headers {
+                info!("{}: {}", k, v);
+            }
+        }
 
         Ok(response)
     }
@@ -256,6 +279,9 @@ impl SecureConnection {
     /// parse that response body instead of sending an extra 'signature' method pack (which caused ERR_PROTOCOL_ERROR=4).
     pub fn initial_hello(&mut self) -> Result<Pack> {
         debug!("Starting initial handshake (watermark + hello)");
+        if std::env::var("RUST_3RD_LOG").ok().as_deref() == Some("1") {
+            info!("Send Client Signature");
+        }
 
         // Random padding up to 2000 bytes (Go reference client behavior)
         const HTTP_PACK_RAND_SIZE_MAX: usize = 1000;
@@ -281,6 +307,9 @@ impl SecureConnection {
             anyhow::bail!("Watermark upload failed HTTP status {}", resp.status_code);
         }
         debug!("Watermark uploaded ({} bytes incl pad)", req.body.len());
+        if std::env::var("RUST_3RD_LOG").ok().as_deref() == Some("1") {
+            info!("Received Server Hello");
+        }
 
         // Parse the response body as hello pack
         let hello_pack = Pack::from_buffer(&resp.body)
@@ -313,9 +342,20 @@ impl SecureConnection {
         }
 
         if std::env::var("RUST_3RD_LOG").ok().as_deref() == Some("1") {
+            if let Ok(hs) = hello_pack.get_str("hello") {
+                info!("hello={}", hs);
+            }
+            if let Some(sr) = self.server_random {
+                let hex = sr.iter().map(|b| format!("{:02X}", b)).collect::<String>();
+                info!("random={}", hex);
+            }
+            info!("version=[{}]", self.server_version);
+            info!("build=[{}]", self.server_build);
             info!(
-                "Initial hello received (ver={} build={})",
-                self.server_version, self.server_build
+                "SoftEther VPN Server (64 bit) Version {}.{} Build {}",
+                (self.server_version as f64) / 100.0,
+                0,
+                self.server_build
             );
         } else {
             debug!(
@@ -378,6 +418,10 @@ impl SecureConnection {
     /// Upload authentication information
     pub fn upload_auth(&mut self, auth_pack: Pack) -> Result<Pack> {
         debug!("Uploading authentication");
+        if std::env::var("RUST_3RD_LOG").ok().as_deref() == Some("1") {
+            info!("Verifying login credentials");
+            info!("Send Client Authentication");
+        }
 
         let response = self.send_pack(&auth_pack)?;
         debug!("welcome_pack fields: {}", response.debug_dump());

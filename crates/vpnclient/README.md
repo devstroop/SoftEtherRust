@@ -50,7 +50,7 @@ If omitted, the client will try a best-effort heuristic and otherwise print a ma
 ## Run
 
 ```bash
-cargo run -p client -- --config config.json connect
+cargo run -p vpnclient -- --config config.json connect
 ```
 
 Use Ctrl+C to disconnect. Set `RUST_LOG=info` or `RUST_LOG=debug` for more detail.

@@ -35,6 +35,10 @@ int softether_client_set_ip_rx_callback(softether_client_t* handle, softether_ip
 // Returns 1 on queued, 0 if no link available, or a negative error (e.g., -12 for unsupported packet type).
 int softether_client_send_ip_packet(softether_client_t* handle, const uint8_t* data, uint32_t len);
 
+// Networking helpers
+// Add a static ARP entry mapping an IPv4 next-hop to a MAC address. Returns 0 on success.
+int softether_client_arp_add(softether_client_t* handle, uint32_t ipv4_be, const uint8_t mac[6]);
+
 // State callbacks
 // Called on state changes: 0=Idle,1=Connecting,2=Established,3=Disconnecting
 typedef void (*softether_state_cb_t)(int state, void* user);
@@ -51,10 +55,15 @@ int softether_b64_decode(const char* b64, unsigned char* out_buf, unsigned int o
 // Diagnostics helpers
 char* softether_client_version(void);
 void softether_string_free(char*);
+// Retrieve and clear the last error message, or NULL if none. Must be freed with softether_string_free.
+char* softether_client_last_error(softether_client_t* handle);
 
 // Query current tunnel network settings (JSON: {assigned_ipv4, subnet_mask, gateway, dns_servers[]}).
 // The returned string must be freed with softether_string_free.
 char* softether_client_get_network_settings_json(softether_client_t* handle);
+
+// Get the locally-administered source MAC used by this client. Writes 6 bytes to out_mac. Returns 0 on success.
+int softether_client_get_mac(softether_client_t* handle, uint8_t out_mac[6]);
 
 #ifdef __cplusplus
 }

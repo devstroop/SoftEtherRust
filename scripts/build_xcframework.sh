@@ -3,8 +3,11 @@ set -euo pipefail
 
 # Build the softether_ffi static library for iOS device and simulators, then produce an XCFramework.
 # Requires Rust targets installed: aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios.
-# Usage: ./scripts/build_xcframework.sh [--release] [--copy-to /absolute/path]
+# Usage: ./scripts/build_xcframework.sh [--release] [--strip] [--sim-arm64-only] [--copy-to /absolute/path]
 PROFILE=debug
+STRIP_BINARIES=0
+SIM_ARM64_ONLY=0
+# Quick first-arg shorthands for profile
 if [[ ${1:-} == "--release" ]]; then PROFILE=release; fi
 if [[ ${1:-} == "-r" ]]; then PROFILE=release; fi
 if [[ ${1:-} == "release" ]]; then PROFILE=release; fi
@@ -18,6 +21,12 @@ if [[ "$PROFILE" == "release" ]]; then CARGO_FLAGS=(--release); else CARGO_FLAGS
 COPY_TO=""
 for ((i=1; i<=$#; i++)); do
   arg="${!i}"
+  if [[ "$arg" == "--strip" ]]; then
+    STRIP_BINARIES=1
+  fi
+  if [[ "$arg" == "--sim-arm64-only" ]]; then
+    SIM_ARM64_ONLY=1
+  fi
   if [[ "$arg" == "--copy-to" ]]; then
     j=$((i+1))
     if [[ $j -le $# ]]; then
@@ -45,17 +54,30 @@ cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --target aarch64-apple-ios ${
 SAFE_FLAGS_SIM=${CARGO_FLAGS[@]:-}
 cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --target aarch64-apple-ios-sim ${SAFE_FLAGS_SIM} -p softether_ffi
 SAFE_FLAGS_X86=${CARGO_FLAGS[@]:-}
-cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --target x86_64-apple-ios ${SAFE_FLAGS_X86} -p softether_ffi
+if [[ $SIM_ARM64_ONLY -eq 0 ]]; then
+  cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --target x86_64-apple-ios ${SAFE_FLAGS_X86} -p softether_ffi
+fi
 
 # Paths
 LIB_DEV="$ROOT_DIR/target/aarch64-apple-ios/$BUILD_DIR/libsoftether_ffi.a"
 LIB_SIM_ARM64="$ROOT_DIR/target/aarch64-apple-ios-sim/$BUILD_DIR/libsoftether_ffi.a"
 LIB_SIM_X86="$ROOT_DIR/target/x86_64-apple-ios/$BUILD_DIR/libsoftether_ffi.a"
 
-# Create a universal simulator lib
+# Create a simulator lib (either universal or arm64-only)
 LIPO_SIM="$OUT_DIR/libsoftether_ffi_sim.a"
 rm -f "$LIPO_SIM"
-lipo -create "$LIB_SIM_ARM64" "$LIB_SIM_X86" -output "$LIPO_SIM"
+if [[ $SIM_ARM64_ONLY -eq 1 ]]; then
+  cp "$LIB_SIM_ARM64" "$LIPO_SIM"
+else
+  lipo -create "$LIB_SIM_ARM64" "$LIB_SIM_X86" -output "$LIPO_SIM"
+fi
+
+# Optionally strip symbols to reduce size (affects both device and sim libs)
+if [[ $STRIP_BINARIES -eq 1 ]]; then
+  echo "Stripping symbols from static libraries to reduce size..."
+  xcrun strip -S -x "$LIB_DEV" || true
+  xcrun strip -S -x "$LIPO_SIM" || true
+fi
 
 # Create the XCFramework
 XC_OUT="$OUT_DIR/SoftEtherClient.xcframework"

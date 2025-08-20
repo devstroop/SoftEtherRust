@@ -12,6 +12,7 @@ use cedar::{ConnectionManager, ConnectionPool, DataPlane, EngineConfig, SessionM
 #[cfg(target_os = "ios")]
 use rand::RngCore;
 use tracing::{debug, error, info, warn}; // for fill_bytes in iOS DHCP path
+
 #[cfg(unix)]
 fn local_hostname() -> String {
     use std::ffi::CStr;
@@ -351,6 +352,8 @@ impl VpnClient {
                     mac[0] = (mac[0] & 0b1111_1110) | 0b0000_0010; // locally administered, unicast
                     let dhcp = DhcpClient::new(dp, mac);
                     info!("Attempting DHCP over tunnel on {}", ifname);
+                    // Prevent fallback system DHCP/monitor from spawning while we run in-tunnel DHCP
+                    self.dhcp_spawned = true;
                     let lease = dhcp
                         .run_once(&ifname, Duration::from_secs(30))
                         .await
@@ -427,7 +430,8 @@ impl VpnClient {
                         info!("VPN connection established successfully");
                         return Ok(());
                     }
-                    // No lease yet; defer to apply_network_settings() to kick system DHCP/monitor if needed
+                    // No lease yet; do not start system DHCP to avoid invalid placeholder IPs on utun
+                    // We keep dhcp_spawned=true to suppress fallback DHCP/monitor and avoid misleading logs
                 }
             }
 
@@ -446,14 +450,28 @@ impl VpnClient {
                     {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
-                    // Generate a locally-administered, unicast MAC; stable enough for a single run
+                    // Generate a deterministic locally-administered, unicast MAC derived from config
+                    // This helps DHCP servers consistently recognize the client across reconnects.
                     let mut mac = [0u8; 6];
-                    rand::rng().fill_bytes(&mut mac);
-                    mac[0] = (mac[0] & 0b1111_1110) | 0b0000_0010;
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    use std::hash::{Hash, Hasher};
+                    self.config.username.hash(&mut hasher);
+                    self.config.hub_name.hash(&mut hasher);
+                    self.config.host.hash(&mut hasher);
+                    let v = hasher.finish();
+                    mac.copy_from_slice(&[
+                        ((v >> 0) as u8) | 0x02, // set LAA bit
+                        ((v >> 8) as u8),
+                        ((v >> 16) as u8),
+                        ((v >> 24) as u8),
+                        ((v >> 32) as u8),
+                        ((v >> 40) as u8),
+                    ]);
+                    mac[0] = (mac[0] & 0b1111_1110) | 0b0000_0010; // locally administered, unicast
                     let dhcp = DhcpClient::new(dp, mac);
                     info!("Attempting DHCP over tunnel (iOS)");
                     let lease = dhcp
-                        .run_once("utun", Duration::from_secs(30))
+                        .run_once("utun", Duration::from_secs(40))
                         .await
                         .ok()
                         .flatten();
@@ -638,9 +656,10 @@ impl VpnClient {
         }
         Ok(())
     }
-
+  
     // auth-related methods moved to vpnclient/auth.rs
     // connection keepalive/establish moved to vpnclient/connection.rs
+
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -734,7 +753,7 @@ impl VpnClient {
             info!("[INFO] adapter name={} (awaiting IP/DNS)", adp.name());
         }
     }
-
+  
     // policy helpers moved to vpnclient/policy.rs
 
     // network parsing/apply moved to vpnclient/network_config.rs
