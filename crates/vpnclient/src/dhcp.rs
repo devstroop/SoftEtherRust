@@ -6,7 +6,7 @@
 use anyhow::Result;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use cedar::DataPlane;
 
@@ -67,6 +67,15 @@ impl DhcpClient {
         // Transaction ID for this exchange
         let xid: u32 = rand::random();
 
+        // Small settle delay to let bridge/RX tap propagate
+        let settle_ms: u64 = std::env::var("RUST_DHCP_SETTLE_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200);
+        if settle_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(settle_ms)).await;
+        }
+
         // Send DISCOVER (broadcast)
         let discover = build_dhcp_discover(self.mac, xid);
         if self.dp.send_frame(discover) {
@@ -78,16 +87,20 @@ impl DhcpClient {
         let deadline = tokio::time::Instant::now() + timeout;
         let mut offer: Option<(Lease, [u8; 4], [u8; 4])> = None; // (lease, server_id, yiaddr)
         let mut last_tx = tokio::time::Instant::now();
-        // Faster initial retries with exponential backoff (1.5s, 3s, 6s, 8s cap)
+        // Faster initial retries with exponential backoff (+/- jitter)
         let initial_ms: u64 = std::env::var("RUST_DHCP_DISCOVER_INITIAL_MS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(1500);
+            .unwrap_or(800);
         let max_ms: u64 = std::env::var("RUST_DHCP_DISCOVER_MAX_MS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(8000);
         let mut retry_iv = std::time::Duration::from_millis(initial_ms);
+        let jitter_pct: f64 = std::env::var("RUST_DHCP_JITTER_PCT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.15);
         // Wait for OFFER with periodic retransmit of DISCOVER
         while tokio::time::Instant::now() < deadline {
             let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -117,12 +130,19 @@ impl DhcpClient {
             if tokio::time::Instant::now().saturating_duration_since(last_tx) >= retry_iv {
                 let discover = build_dhcp_discover(self.mac, xid);
                 if self.dp.send_frame(discover) {
-                    info!("DHCP: DISCOVER re-sent (xid={:#x})", xid);
+                    debug!("DHCP: DISCOVER re-sent (xid={:#x})", xid);
                 }
                 last_tx = tokio::time::Instant::now();
                 // Exponential backoff up to max
-                let next = retry_iv.as_millis() as u64 * 2;
-                let next = next.min(max_ms).max(initial_ms);
+                let mut next = retry_iv.as_millis() as u64 * 2;
+                next = next.min(max_ms).max(initial_ms);
+                // Apply +/- jitter
+                if jitter_pct > 0.0 {
+                    let span = (next as f64 * jitter_pct) as i64;
+                    let jitter = (rand::random::<f64>() * (span as f64) * 2.0 - span as f64) as i64;
+                    let adj = (next as i64 + jitter).max(initial_ms as i64) as u64;
+                    next = adj.min(max_ms);
+                }
                 retry_iv = std::time::Duration::from_millis(next);
             }
         }

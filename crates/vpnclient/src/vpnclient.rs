@@ -351,12 +351,31 @@ impl VpnClient {
                     mac[0] = (mac[0] & 0b1111_1110) | 0b0000_0010; // locally administered, unicast
                     let dhcp = DhcpClient::new(dp, mac);
                     info!("Attempting DHCP over tunnel on {}", ifname);
+
+                    // Fallback: after 6s without success, nudge macOS DHCP in parallel
+                    let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+                    let ifname_kick = ifname.clone();
+                    let fallback = tokio::spawn(async move {
+                        let delay = Duration::from_secs(6);
+                        let timed_out = tokio::time::timeout(delay, &mut cancel_rx).await.is_err();
+                        if timed_out {
+                            crate::vpnclient::network_config::kick_dhcp_until_ip(
+                                &ifname_kick,
+                                Duration::from_secs(20),
+                            ).await;
+                        }
+                    });
                     let lease = dhcp
                         .run_once(&ifname, Duration::from_secs(30))
                         .await
                         .ok()
                         .flatten();
                     if let Some(lease) = lease {
+                    let _ = cancel_tx.send(());
+                    // Best-effort: avoid a dangling task if not used
+                    if fallback.is_finished() == false {
+                        self.aux_tasks.push(fallback);
+                    }
                         // Reflect DHCP lease in network_settings for consistent summary logs
                         self.network_settings = Some(network_settings_from_lease(&lease));
                         // Notify embedders that settings are available now (JSON event 1001)

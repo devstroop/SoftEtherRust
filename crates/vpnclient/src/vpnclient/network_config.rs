@@ -291,6 +291,12 @@ mod macos {
     }
 }
 
+// Re-export helper for external callers (vpnclient.rs) without exposing the private macOS module
+#[cfg(target_os = "macos")]
+pub(crate) async fn kick_dhcp_until_ip(iface: &str, timeout: std::time::Duration) {
+    macos::kick_dhcp_until_ip(iface, timeout).await
+}
+
 impl VpnClient {
     /// Apply parsed network settings to a platform virtual adapter (macOS / Linux only for now)
     pub(super) async fn apply_network_settings(&mut self) -> Result<()> {
