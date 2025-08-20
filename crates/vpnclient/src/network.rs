@@ -46,7 +46,7 @@ impl SecureConnection {
         }
 
         // Resolve hostname to socket address
-    let addr = format!("{host}:{port}")
+        let addr = format!("{host}:{port}")
             .to_socket_addrs()
             .context("Failed to resolve hostname")?
             .next()
@@ -99,38 +99,38 @@ impl SecureConnection {
             }
         }
         // Try to dump server certificate subjects like third-party logs
-    if let Ok(Some(cert)) = tls_stream.peer_certificate() {
-                // native-tls exposes end-entity; no chain. Try to parse and log subject.
-                if let Ok(der) = cert.to_der() {
-                    if let Ok((_rem, x509)) = X509Certificate::from_der(&der) {
-                        let cn = x509
-                            .subject()
-                            .iter_common_name()
-                            .next()
-                            .and_then(|cn| cn.as_str().ok())
-                            .unwrap_or("");
-                        if std::env::var("RUST_3RD_LOG").ok().as_deref() == Some("1") {
-                            info!(
-                                "Cert 0 {}",
-                                if cn.is_empty() {
-                                    x509.subject().to_string()
-                                } else {
-                                    cn.to_string()
-                                }
-                            );
-                        } else {
-                            debug!(
-                                "Cert 0 {}",
-                                if cn.is_empty() {
-                                    x509.subject().to_string()
-                                } else {
-                                    cn.to_string()
-                                }
-                            );
-                        }
+        if let Ok(Some(cert)) = tls_stream.peer_certificate() {
+            // native-tls exposes end-entity; no chain. Try to parse and log subject.
+            if let Ok(der) = cert.to_der() {
+                if let Ok((_rem, x509)) = X509Certificate::from_der(&der) {
+                    let cn = x509
+                        .subject()
+                        .iter_common_name()
+                        .next()
+                        .and_then(|cn| cn.as_str().ok())
+                        .unwrap_or("");
+                    if std::env::var("RUST_3RD_LOG").ok().as_deref() == Some("1") {
+                        info!(
+                            "Cert 0 {}",
+                            if cn.is_empty() {
+                                x509.subject().to_string()
+                            } else {
+                                cn.to_string()
+                            }
+                        );
+                    } else {
+                        debug!(
+                            "Cert 0 {}",
+                            if cn.is_empty() {
+                                x509.subject().to_string()
+                            } else {
+                                cn.to_string()
+                            }
+                        );
                     }
                 }
-    }
+            }
+        }
 
         Ok(Self {
             stream: tls_stream,
@@ -212,7 +212,7 @@ impl SecureConnection {
         // Use persistent connections; omit Keep-Alive 'max' to avoid forced closures
         request.add_header("Connection".to_string(), "keep-alive".to_string());
         // Add Host header for HTTP/1.1 compliance
-    request.add_header("Host".to_string(), format!("{}:{}", self.host, self.port));
+        request.add_header("Host".to_string(), format!("{}:{}", self.host, self.port));
 
         // Send request and get response
         let response = self.send_request(&request)?;
@@ -501,7 +501,7 @@ impl ProxyConnection {
         info!("Connecting through proxy {}:{}", proxy_host, proxy_port);
 
         // Connect to proxy
-    let proxy_addr = format!("{proxy_host}:{proxy_port}")
+        let proxy_addr = format!("{proxy_host}:{proxy_port}")
             .to_socket_addrs()
             .context("Failed to resolve proxy hostname")?
             .next()
@@ -519,8 +519,8 @@ impl ProxyConnection {
 
         // Add proxy authentication if provided
         if let (Some(username), Some(password)) = (proxy_username, proxy_password) {
-            let auth_string = base64::prelude::BASE64_STANDARD
-                .encode(format!("{username}:{password}"));
+            let auth_string =
+                base64::prelude::BASE64_STANDARD.encode(format!("{username}:{password}"));
             request.push_str(&format!("Proxy-Authorization: Basic {auth_string}\r\n"));
         }
 

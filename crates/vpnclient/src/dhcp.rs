@@ -528,7 +528,10 @@ fn parse_dhcp(frame: &[u8]) -> DhcpParse {
     if udp_payload[236..240] != MAGIC_COOKIE {
         return None;
     }
-    let mut lease = Lease { yiaddr, ..Default::default() };
+    let mut lease = Lease {
+        yiaddr,
+        ..Default::default()
+    };
     let mut server_id = [0u8; 4];
     let mut msgtype = 0u8;
     // options

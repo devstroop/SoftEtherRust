@@ -254,7 +254,7 @@ impl Element {
         let name_len = name_len_with_null - 1; // actual bytes present
         let mut raw_name_bytes = vec![0u8; name_len];
         reader.read_exact(&mut raw_name_bytes)?;
-    if raw_name_bytes.contains(&0) {
+        if raw_name_bytes.contains(&0) {
             return Err(Error::InvalidPack);
         }
         let name = String::from_utf8(raw_name_bytes)?;
@@ -296,7 +296,7 @@ impl Element {
         }
         let mut raw_name_bytes = vec![0u8; name_len];
         reader.read_exact(&mut raw_name_bytes)?;
-    if raw_name_bytes.contains(&0) {
+        if raw_name_bytes.contains(&0) {
             return Err(Error::InvalidPack);
         }
         let name = String::from_utf8(raw_name_bytes)?;

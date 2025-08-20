@@ -138,10 +138,7 @@ mod macos {
             sleep(Duration::from_millis(500)).await;
             for n in &cleaned {
                 let v = quick_ipv4_info(n).await;
-                if !v.ip.is_empty()
-                    && !v.ip.starts_with("169.254.")
-                    && !printed_ip
-                {
+                if !v.ip.is_empty() && !v.ip.starts_with("169.254.") && !printed_ip {
                     let bits = mask_to_cidr(&v.subnet_mask);
                     if bits > 0 {
                         info!("IP Address {}/{}", v.ip, bits);

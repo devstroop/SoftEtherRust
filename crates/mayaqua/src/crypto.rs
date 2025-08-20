@@ -78,7 +78,7 @@ impl Sha0Context {
 
         // Append length in bits as 64-bit big-endian
         let length_bytes = msg_bit_length.to_be_bytes();
-    self.buffer[56..(56 + 8)].copy_from_slice(&length_bytes);
+        self.buffer[56..(56 + 8)].copy_from_slice(&length_bytes);
         self.buffer_len = 64;
 
         self.transform();
@@ -122,8 +122,8 @@ impl Sha0Context {
         let mut d = self.state[3];
         let mut e = self.state[4];
 
-    // 80 rounds
-    for (i, &wi) in w.iter().enumerate() {
+        // 80 rounds
+        for (i, &wi) in w.iter().enumerate() {
             let (f, k) = match i {
                 0..=19 => ((b & c) | ((!b) & d), 0x5A827999),
                 20..=39 => (b ^ c ^ d, 0x6ED9EBA1),
@@ -136,7 +136,7 @@ impl Sha0Context {
                 .rotate_left(5)
                 .wrapping_add(f)
                 .wrapping_add(e)
-        .wrapping_add(wi)
+                .wrapping_add(wi)
                 .wrapping_add(k);
 
             e = d;

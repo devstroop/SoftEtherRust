@@ -75,7 +75,7 @@ impl HttpResponse {
             .read_line(&mut line)
             .map_err(|e| Error::Network(format!("Failed to read status line: {e}")))?;
 
-    let status_parts: Vec<&str> = line.split_whitespace().collect();
+        let status_parts: Vec<&str> = line.split_whitespace().collect();
         if status_parts.len() < 2 {
             return Err(Error::Network("Invalid HTTP status line".to_string()));
         }

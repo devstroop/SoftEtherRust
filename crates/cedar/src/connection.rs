@@ -239,7 +239,7 @@ impl Connection {
         self.server_port = port;
 
         // Attempt TCP connection
-    let addr = format!("{hostname}:{port}");
+        let addr = format!("{hostname}:{port}");
         match TcpStream::connect(&addr).await {
             Ok(stream) => {
                 self.tcp_stream = Some(stream);
