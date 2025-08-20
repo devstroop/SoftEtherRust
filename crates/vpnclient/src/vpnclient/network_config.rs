@@ -177,7 +177,7 @@ mod macos {
         let kick_interval = Duration::from_secs(5);
         let mut attempts: u32 = 0;
         let max_attempts: u32 = 6; // ~30s of kicks total
-        // initial kick
+                                   // initial kick
         let _ = invoke_dhcp_by_name(iface).await;
         while Instant::now() < deadline {
             sleep(Duration::from_millis(500)).await;

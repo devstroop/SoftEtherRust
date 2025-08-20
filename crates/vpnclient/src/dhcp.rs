@@ -92,16 +92,16 @@ impl DhcpClient {
         let mut offer: Option<(Lease, [u8; 4], [u8; 4])> = None; // (lease, server_id, yiaddr)
         let mut last_tx = tokio::time::Instant::now();
         // Faster initial retries with exponential backoff (+/- jitter)
-    let initial_ms: u64 = std::env::var("RUST_DHCP_DISCOVER_INITIAL_MS")
+        let initial_ms: u64 = std::env::var("RUST_DHCP_DISCOVER_INITIAL_MS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(800);
-    let max_ms: u64 = std::env::var("RUST_DHCP_DISCOVER_MAX_MS")
+        let max_ms: u64 = std::env::var("RUST_DHCP_DISCOVER_MAX_MS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(8000);
         let mut retry_iv = std::time::Duration::from_millis(initial_ms);
-    let jitter_pct: f64 = std::env::var("RUST_DHCP_JITTER_PCT")
+        let jitter_pct: f64 = std::env::var("RUST_DHCP_JITTER_PCT")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0.15);
