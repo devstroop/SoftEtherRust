@@ -70,7 +70,7 @@ impl VpnClient {
 #[allow(dead_code)]
 pub(super) fn resolve_all_ips(host: &str, port: u16) -> Vec<String> {
     let mut out = Vec::new();
-    let addr = format!("{}:{}", host, port);
+    let addr = format!("{host}:{port}");
     if let Ok(iter) = addr.to_socket_addrs() {
         for sa in iter {
             if let SocketAddr::V4(v4) = sa {

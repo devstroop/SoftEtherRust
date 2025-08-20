@@ -188,7 +188,7 @@ impl Connection {
             client_ver: SOFTETHER_VER,
             client_build: SOFTETHER_BUILD,
             server_str: String::new(),
-            client_str: format!("SoftEtherVPN_Rust/{}.{}", SOFTETHER_VER, SOFTETHER_BUILD),
+            client_str: format!("SoftEtherVPN_Rust/{SOFTETHER_VER}.{SOFTETHER_BUILD}"),
 
             random: [0u8; SHA1_SIZE],
             use_ticket: false,
@@ -239,7 +239,7 @@ impl Connection {
         self.server_port = port;
 
         // Attempt TCP connection
-        let addr = format!("{}:{}", hostname, port);
+    let addr = format!("{hostname}:{port}");
         match TcpStream::connect(&addr).await {
             Ok(stream) => {
                 self.tcp_stream = Some(stream);
@@ -252,11 +252,11 @@ impl Connection {
                     state.last_comm_tick = state.connected_tick;
                 }
 
-                log::info!("Connected to {}:{}", hostname, port);
+                log::info!("Connected to {hostname}:{port}");
                 Ok(())
             }
             Err(e) => {
-                log::error!("Failed to connect to {}:{}: {}", hostname, port, e);
+                log::error!("Failed to connect to {hostname}:{port}: {e}");
                 Err(Error::ConnectFailed)
             }
         }

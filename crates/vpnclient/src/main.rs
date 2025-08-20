@@ -55,7 +55,7 @@ async fn connect(config_path: &str, insecure_flag: bool) -> Result<()> {
 
     // Parse shared ClientConfig only (legacy format no longer supported here)
     let cc: shared_config::ClientConfig = shared_config::io::load_json(config_path)
-        .with_context(|| format!("Failed to load configuration from: {}", config_path))?;
+        .with_context(|| format!("Failed to load configuration from: {config_path}"))?;
     let mut cc = cc;
     // Optional override: --insecure only effective when allowed via feature or env
     let allow_insecure = cfg!(feature = "allow-insecure")

@@ -54,10 +54,7 @@ pub fn secure_password(hashed_password: Sha1Sum, server_random: Sha1Sum) -> Sha1
 }
 
 fn client_string() -> String {
-    format!(
-        "SoftEther VPN Client (Rust) {}.{}",
-        SOFTETHER_VER, SOFTETHER_BUILD
-    )
+    format!("SoftEther VPN Client (Rust) {SOFTETHER_VER}.{SOFTETHER_BUILD}")
 }
 
 #[cfg(test)]

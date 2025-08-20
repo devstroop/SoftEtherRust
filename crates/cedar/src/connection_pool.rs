@@ -16,7 +16,9 @@ struct Inner {
 }
 
 struct Link {
+    #[allow(dead_code)]
     id: u64,
+    #[allow(dead_code)]
     direction: i32,
     #[allow(dead_code)]
     handle: JoinHandle<()>,
@@ -51,15 +53,15 @@ impl ConnectionPool {
             loop {
                 match stream.read(&mut buf) {
                     Ok(0) => {
-                        info!("connection_pool link id={} closed by peer", id);
+                        info!("connection_pool link id={id} closed by peer");
                         break;
                     }
                     Ok(n) => {
-                        debug!("connection_pool link id={} read {} bytes", id, n);
+                        debug!("connection_pool link id={id} read {n} bytes");
                         // NOTE: We do not yet parse packets; this is placeholder accounting.
                     }
                     Err(e) => {
-                        warn!("connection_pool link id={} read error: {}", id, e);
+                        warn!("connection_pool link id={id} read error: {e}");
                         break;
                     }
                 }
@@ -81,5 +83,11 @@ impl ConnectionPool {
             total_links: g.links.len(),
             bytes_read: g.links.iter().map(|l| l.bytes_read).sum(),
         }
+    }
+}
+
+impl Default for ConnectionPool {
+    fn default() -> Self {
+        Self::new()
     }
 }

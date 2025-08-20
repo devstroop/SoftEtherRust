@@ -37,12 +37,12 @@ pub fn redact_pack(pack: &Pack) -> String {
                     let mut s = String::with_capacity(2 * hex_len + 4);
                     for b in &v.data[..hex_len] {
                         use std::fmt::Write;
-                        let _ = write!(&mut s, "{:02x}", b);
+                        let _ = write!(&mut s, "{b:02x}");
                     }
                     if v.data.len() > 8 {
                         s.push_str("...");
                     }
-                    format!("0x{}", s)
+                    format!("0x{s}")
                 } else {
                     v.int_value.to_string()
                 };

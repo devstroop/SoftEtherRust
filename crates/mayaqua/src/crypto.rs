@@ -78,9 +78,7 @@ impl Sha0Context {
 
         // Append length in bits as 64-bit big-endian
         let length_bytes = msg_bit_length.to_be_bytes();
-        for i in 0..8 {
-            self.buffer[56 + i] = length_bytes[i];
-        }
+    self.buffer[56..(56 + 8)].copy_from_slice(&length_bytes);
         self.buffer_len = 64;
 
         self.transform();
@@ -100,12 +98,13 @@ impl Sha0Context {
         let mut w = [0u32; 80];
 
         // Copy data to W[0..15]
-        for i in 0..16 {
-            w[i] = u32::from_be_bytes([
-                self.buffer[i * 4],
-                self.buffer[i * 4 + 1],
-                self.buffer[i * 4 + 2],
-                self.buffer[i * 4 + 3],
+        for (i, wi) in w.iter_mut().take(16).enumerate() {
+            let base = i * 4;
+            *wi = u32::from_be_bytes([
+                self.buffer[base],
+                self.buffer[base + 1],
+                self.buffer[base + 2],
+                self.buffer[base + 3],
             ]);
         }
 
@@ -123,8 +122,8 @@ impl Sha0Context {
         let mut d = self.state[3];
         let mut e = self.state[4];
 
-        // 80 rounds
-        for i in 0..80 {
+    // 80 rounds
+    for (i, &wi) in w.iter().enumerate() {
             let (f, k) = match i {
                 0..=19 => ((b & c) | ((!b) & d), 0x5A827999),
                 20..=39 => (b ^ c ^ d, 0x6ED9EBA1),
@@ -137,7 +136,7 @@ impl Sha0Context {
                 .rotate_left(5)
                 .wrapping_add(f)
                 .wrapping_add(e)
-                .wrapping_add(w[i])
+        .wrapping_add(wi)
                 .wrapping_add(k);
 
             e = d;
@@ -185,15 +184,15 @@ pub fn sha1(data: &[u8]) -> Sha1Sum {
 /// This matches the Go implementation: mayaqua.Sha0([]byte(password + username))
 pub fn softether_password_hash(password: &str, username: &str) -> Sha1Sum {
     let username_upper = username.to_uppercase();
-    let combined = format!("{}{}", password, username_upper);
+    let combined = format!("{password}{username_upper}");
     sha0(combined.as_bytes())
 }
 
 /// RC4 stream cipher (legacy compatibility). Same function for encrypt/decrypt.
 pub fn rc4_apply(key: &[u8], data: &[u8]) -> Vec<u8> {
     let mut s = [0u8; 256];
-    for i in 0..256 {
-        s[i] = i as u8;
+    for (i, v) in s.iter_mut().enumerate() {
+        *v = i as u8;
     }
     let mut j: u8 = 0;
     // KSA
@@ -227,8 +226,8 @@ pub fn rc4_apply_inplace(key: &[u8], buf: &mut [u8]) {
 
 fn rc4_keystream(key: &[u8], len: usize) -> Vec<u8> {
     let mut s = [0u8; 256];
-    for i in 0..256 {
-        s[i] = i as u8;
+    for (i, v) in s.iter_mut().enumerate() {
+        *v = i as u8;
     }
     let mut j: u8 = 0;
     for i in 0..256 {

@@ -16,7 +16,7 @@ pub async fn handle_redirect(sm: &SessionManager, info: ClusterRedirectInfo) {
         warn!("Using ticket for reconnection");
         // Implement reconnection logic using the ticket
         if let Err(e) = SessionManagerAsync::reconnect_with_ticket(sm, ticket).await {
-            warn!("Reconnection failed: {:?}", e);
+            warn!("Reconnection failed: {e:?}");
         } else {
             info!("Reconnection successful");
         }

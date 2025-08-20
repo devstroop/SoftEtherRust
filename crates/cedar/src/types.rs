@@ -42,6 +42,12 @@ impl TrafficStats {
     }
 }
 
+impl Default for TrafficStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ClusterRedirectInfo {
     pub host: String,

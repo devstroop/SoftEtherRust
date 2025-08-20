@@ -58,7 +58,7 @@ impl SessionManagerAsync for SessionManager {
         let mut g = self.inner.lock().unwrap();
 
         // Simulate reconnection logic
-        debug!("Attempting to reconnect with ticket: {:?}", ticket);
+    debug!("Attempting to reconnect with ticket: {ticket:?}");
 
         // Example: Validate the ticket and update state
         if ticket.is_empty() {

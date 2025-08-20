@@ -214,7 +214,7 @@ impl ClientOption {
 
         let mut hasher = Sha1::new();
         hasher.update(self.hostname.as_bytes());
-        hasher.update(&self.port.to_le_bytes());
+    hasher.update(self.port.to_le_bytes());
         hasher.update(self.hubname.as_bytes());
 
         let result = hasher.finalize();

@@ -37,9 +37,9 @@ impl VpnClient {
                 key_file,
             } => {
                 let cert_data = std::fs::read(cert_file)
-                    .with_context(|| format!("Failed to read certificate file: {}", cert_file))?;
+                    .with_context(|| format!("Failed to read certificate file: {cert_file}"))?;
                 let key_data = std::fs::read(key_file)
-                    .with_context(|| format!("Failed to read key file: {}", key_file))?;
+                    .with_context(|| format!("Failed to read key file: {key_file}"))?;
                 ClientAuth::new_certificate(&self.config.username, cert_data, key_data)
                     .context("Failed to create certificate authentication")
             }
@@ -372,7 +372,7 @@ impl VpnClient {
                 let preview = key
                     .iter()
                     .take(8)
-                    .map(|b| format!("{:02x}", b))
+                    .map(|b| format!("{b:02x}"))
                     .collect::<String>();
                 debug!(
                     "Captured session_key for additional connections (first16hex={})",
@@ -380,7 +380,7 @@ impl VpnClient {
                 );
                 info!("[INFO] session_key preview={}… (len=20)", preview);
                 if std::env::var("RUST_PRINT_SESSION_KEY").ok().as_deref() == Some("1") {
-                    let full = key.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+                    let full = key.iter().map(|b| format!("{b:02x}")).collect::<String>();
                     info!("[DEBUG] session_key full={}", full);
                 }
             } else {

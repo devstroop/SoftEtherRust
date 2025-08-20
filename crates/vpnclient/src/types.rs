@@ -50,13 +50,16 @@ pub fn settings_json_with_kind(ns: Option<&NetworkSettings>, include_kind: bool)
 
 /// Convert a DHCP lease into NetworkSettings (IP/mask/gateway/DNS)
 pub fn network_settings_from_lease(lease: &DhcpLease) -> NetworkSettings {
-    let mut ns = NetworkSettings::default();
-    ns.assigned_ipv4 = Some(std::net::Ipv4Addr::new(
+    let ip = std::net::Ipv4Addr::new(
         lease.yiaddr[0],
         lease.yiaddr[1],
         lease.yiaddr[2],
         lease.yiaddr[3],
-    ));
+    );
+    let mut ns = NetworkSettings {
+        assigned_ipv4: Some(ip),
+        ..Default::default()
+    };
     if let Some(m) = lease.subnet {
         ns.subnet_mask = Some(std::net::Ipv4Addr::new(m[0], m[1], m[2], m[3]));
     }

@@ -83,10 +83,17 @@ impl ConnectionManager {
     }
 }
 
+impl Default for ConnectionManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone, Debug)]
 struct ConnectionInfo {
     id: u64,
     direction: i32,
+    #[allow(dead_code)]
     created_at: SystemTime,
     is_active: bool,
 }

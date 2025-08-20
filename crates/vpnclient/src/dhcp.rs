@@ -71,11 +71,7 @@ impl DhcpClient {
         let settle_ms: u64 = std::env::var("RUST_DHCP_SETTLE_MS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or_else(|| {
-                // Try to read from process-wide config if available via static access
-                // Fallback to 200ms when not available
-                200
-            });
+            .unwrap_or(200);
         if settle_ms > 0 {
             tokio::time::sleep(Duration::from_millis(settle_ms)).await;
         }
@@ -486,7 +482,9 @@ fn classful_mask(first_octet: u8) -> [u8; 4] {
     }
 }
 
-fn parse_dhcp(frame: &[u8]) -> Option<(u8, Lease, [u8; 4], [u8; 4], u32)> {
+type DhcpParse = Option<(u8, Lease, [u8; 4], [u8; 4], u32)>;
+
+fn parse_dhcp(frame: &[u8]) -> DhcpParse {
     if frame.len() < 42 {
         return None;
     }
@@ -530,8 +528,7 @@ fn parse_dhcp(frame: &[u8]) -> Option<(u8, Lease, [u8; 4], [u8; 4], u32)> {
     if udp_payload[236..240] != MAGIC_COOKIE {
         return None;
     }
-    let mut lease = Lease::default();
-    lease.yiaddr = yiaddr;
+    let mut lease = Lease { yiaddr, ..Default::default() };
     let mut server_id = [0u8; 4];
     let mut msgtype = 0u8;
     // options

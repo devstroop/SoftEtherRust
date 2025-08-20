@@ -46,7 +46,7 @@ impl SecureConnection {
         }
 
         // Resolve hostname to socket address
-        let addr = format!("{}:{}", host, port)
+    let addr = format!("{host}:{port}")
             .to_socket_addrs()
             .context("Failed to resolve hostname")?
             .next()
@@ -99,8 +99,7 @@ impl SecureConnection {
             }
         }
         // Try to dump server certificate subjects like third-party logs
-        if let Ok(peer) = tls_stream.peer_certificate() {
-            if let Some(cert) = peer {
+    if let Ok(Some(cert)) = tls_stream.peer_certificate() {
                 // native-tls exposes end-entity; no chain. Try to parse and log subject.
                 if let Ok(der) = cert.to_der() {
                     if let Ok((_rem, x509)) = X509Certificate::from_der(&der) {
@@ -131,8 +130,7 @@ impl SecureConnection {
                         }
                     }
                 }
-            }
-        }
+    }
 
         Ok(Self {
             stream: tls_stream,
@@ -185,7 +183,7 @@ impl SecureConnection {
             let mut hexs = String::new();
             for b in pack_data.iter().take(preview_len) {
                 use std::fmt::Write;
-                let _ = write!(&mut hexs, "{:02x}", b);
+                let _ = write!(&mut hexs, "{b:02x}");
             }
             if pack_data.len() > preview_len {
                 hexs.push_str("...");
@@ -214,7 +212,7 @@ impl SecureConnection {
         // Use persistent connections; omit Keep-Alive 'max' to avoid forced closures
         request.add_header("Connection".to_string(), "keep-alive".to_string());
         // Add Host header for HTTP/1.1 compliance
-        request.add_header("Host".to_string(), format!("{}:{}", self.host, self.port));
+    request.add_header("Host".to_string(), format!("{}:{}", self.host, self.port));
 
         // Send request and get response
         let response = self.send_request(&request)?;
@@ -232,7 +230,7 @@ impl SecureConnection {
                 let mut hexs = String::new();
                 for b in response.body.iter().take(preview_len) {
                     use std::fmt::Write;
-                    let _ = write!(&mut hexs, "{:02x}", b);
+                    let _ = write!(&mut hexs, "{b:02x}");
                 }
                 if response.body.len() > preview_len {
                     hexs.push_str("...");
@@ -469,7 +467,7 @@ impl SecureConnection {
 /// Connect to a socket address with timeout
 fn connect_with_timeout(addr: SocketAddr, timeout: Duration) -> Result<TcpStream> {
     let stream = TcpStream::connect_timeout(&addr, timeout)
-        .with_context(|| format!("Failed to connect to {}", addr))?;
+        .with_context(|| format!("Failed to connect to {addr}"))?;
 
     // Set additional socket options
     stream
@@ -503,7 +501,7 @@ impl ProxyConnection {
         info!("Connecting through proxy {}:{}", proxy_host, proxy_port);
 
         // Connect to proxy
-        let proxy_addr = format!("{}:{}", proxy_host, proxy_port)
+    let proxy_addr = format!("{proxy_host}:{proxy_port}")
             .to_socket_addrs()
             .context("Failed to resolve proxy hostname")?
             .next()
@@ -514,17 +512,16 @@ impl ProxyConnection {
 
         // Send CONNECT request
         let connect_request = format!(
-            "CONNECT {}:{} HTTP/1.1\r\nHost: {}:{}\r\n",
-            target_host, target_port, target_host, target_port
+            "CONNECT {target_host}:{target_port} HTTP/1.1\r\nHost: {target_host}:{target_port}\r\n"
         );
 
         let mut request = connect_request;
 
         // Add proxy authentication if provided
         if let (Some(username), Some(password)) = (proxy_username, proxy_password) {
-            let auth_string =
-                base64::prelude::BASE64_STANDARD.encode(format!("{}:{}", username, password));
-            request.push_str(&format!("Proxy-Authorization: Basic {}\r\n", auth_string));
+            let auth_string = base64::prelude::BASE64_STANDARD
+                .encode(format!("{username}:{password}"));
+            request.push_str(&format!("Proxy-Authorization: Basic {auth_string}\r\n"));
         }
 
         request.push_str("\r\n");

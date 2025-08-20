@@ -31,8 +31,10 @@ struct Inner {
     local_addr: SocketAddr,
     peer_addr: Option<SocketAddr>,
     socket: Option<UdpSocket>,
+    #[allow(dead_code)]
     last_activity: Instant,
     keepalive_task: Option<JoinHandle<()>>,
+    #[allow(dead_code)]
     common_key_v1: [u8; UDP_ACCELERATION_COMMON_KEY_SIZE_V1],
     max_payload: usize,
 }
@@ -88,7 +90,7 @@ impl UdpAccelerator {
                     let g = inner.lock().unwrap();
                     (
                         g.state == UdpAccelState::Failed,
-                        g.socket.as_ref().map(|s| s.try_clone().ok()).flatten(),
+                        g.socket.as_ref().and_then(|s| s.try_clone().ok()),
                         g.peer_addr,
                     )
                 };

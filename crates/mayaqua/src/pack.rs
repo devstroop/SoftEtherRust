@@ -140,7 +140,7 @@ impl Value {
                 reader.read_exact(&mut len_bytes)?;
                 let len = u32::from_be_bytes(len_bytes) as usize;
 
-                if len > crate::MAX_VALUE_SIZE as usize {
+                if len > crate::MAX_VALUE_SIZE {
                     return Err(Error::SizeOver);
                 }
 
@@ -153,7 +153,7 @@ impl Value {
                 reader.read_exact(&mut len_bytes)?;
                 let len = u32::from_be_bytes(len_bytes) as usize;
 
-                if len > crate::MAX_VALUE_SIZE as usize {
+                if len > crate::MAX_VALUE_SIZE {
                     return Err(Error::SizeOver);
                 }
 
@@ -166,7 +166,7 @@ impl Value {
                 reader.read_exact(&mut len_bytes)?;
                 let len = u32::from_be_bytes(len_bytes) as usize;
 
-                if len > crate::MAX_VALUE_SIZE as usize {
+                if len > crate::MAX_VALUE_SIZE {
                     return Err(Error::SizeOver);
                 }
 
@@ -254,7 +254,7 @@ impl Element {
         let name_len = name_len_with_null - 1; // actual bytes present
         let mut raw_name_bytes = vec![0u8; name_len];
         reader.read_exact(&mut raw_name_bytes)?;
-        if raw_name_bytes.iter().any(|b| *b == 0) {
+    if raw_name_bytes.contains(&0) {
             return Err(Error::InvalidPack);
         }
         let name = String::from_utf8(raw_name_bytes)?;
@@ -296,7 +296,7 @@ impl Element {
         }
         let mut raw_name_bytes = vec![0u8; name_len];
         reader.read_exact(&mut raw_name_bytes)?;
-        if raw_name_bytes.iter().any(|b| *b == 0) {
+    if raw_name_bytes.contains(&0) {
             return Err(Error::InvalidPack);
         }
         let name = String::from_utf8(raw_name_bytes)?;
@@ -316,7 +316,7 @@ impl Element {
             return Err(Error::SizeOver);
         }
         if std::env::var("RUST_TRACE").is_ok() {
-            eprintln!("[RUST_TRACE][Pack] element(name='{}', raw_next8={:02x?}, type={:?}, count={} bytes={:02x?} {:02x?}", name, lookahead, value_type, value_count, type_bytes, cnt_bytes);
+            eprintln!("[RUST_TRACE][Pack] element(name='{name}', raw_next8={lookahead:02x?}, type={value_type:?}, count={value_count} bytes={type_bytes:02x?} {cnt_bytes:02x?}");
         }
         let mut element = Element::new(name, value_type)?;
         for _ in 0..value_count {
@@ -360,8 +360,7 @@ impl Element {
         }
         if std::env::var("RUST_TRACE").is_ok() {
             eprintln!(
-                "[RUST_TRACE][Pack] element(null-name='{}', type={:?}, count={})",
-                name, value_type, value_count
+                "[RUST_TRACE][Pack] element(null-name='{name}', type={value_type:?}, count={value_count})"
             );
         }
         let mut element = Element::new(name, value_type)?;
@@ -481,12 +480,12 @@ impl Pack {
                 } else if !v.data.is_empty() {
                     let mut hexs = String::new();
                     for b in v.data.iter().take(8) {
-                        let _ = write!(hexs, "{:02x}", b);
+                        let _ = write!(hexs, "{b:02x}");
                     }
                     if v.data.len() > 8 {
                         hexs.push_str("...");
                     }
-                    let _ = write!(out, "0x{}(len={})", hexs, v.data.len());
+                    let _ = write!(out, "0x{hexs}(len={})", v.data.len());
                 } else {
                     let _ = write!(out, "{}", v.int_value);
                 }

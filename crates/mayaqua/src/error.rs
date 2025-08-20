@@ -79,12 +79,12 @@ impl fmt::Display for Error {
             Error::AuthenticationFailed => write!(f, "Authentication failed"),
             Error::CryptoError => write!(f, "Cryptographic error"),
             Error::InvalidCertificate => write!(f, "Invalid certificate"),
-            Error::IoError(msg) => write!(f, "I/O error: {}", msg),
+            Error::IoError(msg) => write!(f, "I/O error: {msg}"),
             Error::InvalidString => write!(f, "Invalid string encoding"),
-            Error::Pack(msg) => write!(f, "Pack error: {}", msg),
-            Error::Network(msg) => write!(f, "Network error: {}", msg),
-            Error::Http(msg) => write!(f, "HTTP error: {}", msg),
-            Error::PlatformError(msg) => write!(f, "Platform error: {}", msg),
+            Error::Pack(msg) => write!(f, "Pack error: {msg}"),
+            Error::Network(msg) => write!(f, "Network error: {msg}"),
+            Error::Http(msg) => write!(f, "HTTP error: {msg}"),
+            Error::PlatformError(msg) => write!(f, "Platform error: {msg}"),
         }
     }
 }

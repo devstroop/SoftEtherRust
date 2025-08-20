@@ -50,7 +50,7 @@ impl HttpRequest {
 
         // Add headers
         for (name, value) in &self.headers {
-            request.push_str(&format!("{}: {}\r\n", name, value));
+            request.push_str(&format!("{name}: {value}\r\n"));
         }
 
         // End headers
@@ -73,16 +73,16 @@ impl HttpResponse {
         // Read status line
         reader
             .read_line(&mut line)
-            .map_err(|e| Error::Network(format!("Failed to read status line: {}", e)))?;
+            .map_err(|e| Error::Network(format!("Failed to read status line: {e}")))?;
 
-        let status_parts: Vec<&str> = line.trim().split_whitespace().collect();
+    let status_parts: Vec<&str> = line.split_whitespace().collect();
         if status_parts.len() < 2 {
             return Err(Error::Network("Invalid HTTP status line".to_string()));
         }
 
         let status_code = status_parts[1]
             .parse::<u16>()
-            .map_err(|e| Error::Network(format!("Invalid status code: {}", e)))?;
+            .map_err(|e| Error::Network(format!("Invalid status code: {e}")))?;
 
         // Read headers
         let mut headers = HashMap::new();
@@ -92,7 +92,7 @@ impl HttpResponse {
             line.clear();
             reader
                 .read_line(&mut line)
-                .map_err(|e| Error::Network(format!("Failed to read header: {}", e)))?;
+                .map_err(|e| Error::Network(format!("Failed to read header: {e}")))?;
 
             let line = line.trim();
             if line.is_empty() {
@@ -106,7 +106,7 @@ impl HttpResponse {
                 if name == "content-length" {
                     content_length = value
                         .parse::<usize>()
-                        .map_err(|e| Error::Network(format!("Invalid content-length: {}", e)))?;
+                        .map_err(|e| Error::Network(format!("Invalid content-length: {e}")))?;
                 }
 
                 headers.insert(name, value);
@@ -118,7 +118,7 @@ impl HttpResponse {
         if content_length > 0 {
             reader
                 .read_exact(&mut body)
-                .map_err(|e| Error::Network(format!("Failed to read body: {}", e)))?;
+                .map_err(|e| Error::Network(format!("Failed to read body: {e}")))?;
         }
 
         Ok(Self {

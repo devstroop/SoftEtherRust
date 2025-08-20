@@ -36,7 +36,7 @@ pub fn write_all_atomic<P: AsRef<Path>>(path: P, data: &[u8]) -> Result<()> {
         f.flush().map_err(|e| Error::IoError(e.to_string()))?;
     }
 
-    fs::rename(&tmp, &path).map_err(|e| Error::IoError(e.to_string()))
+    fs::rename(tmp, path).map_err(|e| Error::IoError(e.to_string()))
 }
 
 /// Set file permissions to user read/write only (best-effort, Unix only)

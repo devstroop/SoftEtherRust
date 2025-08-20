@@ -228,7 +228,7 @@ impl VpnClient {
                         self.emit_event(
                             EventLevel::Warn,
                             200,
-                            format!("connect attempt {} failed: {}", attempt, e),
+                            format!("connect attempt {attempt} failed: {e}"),
                         );
                         sleep(Duration::from_millis(delay_ms)).await;
                         continue;
@@ -245,7 +245,7 @@ impl VpnClient {
                         self.emit_event(
                             EventLevel::Warn,
                             201,
-                            format!("timeout on attempt {}", attempt),
+                            format!("timeout on attempt {attempt}"),
                         );
                         sleep(Duration::from_millis(delay_ms)).await;
                         continue;
@@ -358,7 +358,7 @@ impl VpnClient {
                     adp.name().hash(&mut h);
                     let v = h.finish();
                     mac.copy_from_slice(&[
-                        ((v >> 0) as u8) | 0x02,
+                        (v as u8) | 0x02,
                         ((v >> 8) as u8),
                         ((v >> 16) as u8),
                         ((v >> 24) as u8),
@@ -393,7 +393,7 @@ impl VpnClient {
                     if let Some(lease) = lease {
                         let _ = cancel_tx.send(());
                         // Best-effort: avoid a dangling task if not used
-                        if fallback.is_finished() == false {
+                        if !fallback.is_finished() {
                             self.aux_tasks.push(fallback);
                         }
                         // Reflect DHCP lease in network_settings for consistent summary logs
@@ -726,7 +726,7 @@ impl VpnClient {
                 ConnectionState::Established => 102,
                 ConnectionState::Disconnecting => 103,
             };
-            self.emit_event(EventLevel::Info, code, format!("state: {:?}", s));
+            self.emit_event(EventLevel::Info, code, format!("state: {s:?}"));
         }
     }
 }

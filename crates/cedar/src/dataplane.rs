@@ -131,28 +131,24 @@ impl DataPlane {
                         .collect();
                     if elig.is_empty() {
                         None
-                    } else {
-                        // Prefer a dedicated ClientToServer link in half-connection mode
-                        if g.half_connection {
-                            if let Some(id) = g.links.iter().find_map(|(id, l)| {
-                                if l.direction == LinkDirection::ClientToServer {
-                                    Some(*id)
-                                } else {
-                                    None
-                                }
-                            }) {
-                                Some(id)
+                    } else if g.half_connection {
+                        if let Some(id) = g.links.iter().find_map(|(id, l)| {
+                            if l.direction == LinkDirection::ClientToServer {
+                                Some(*id)
                             } else {
-                                // Fall back to RR over eligible
-                                let idx = g.rr_index % elig.len();
-                                g.rr_index = g.rr_index.wrapping_add(1);
-                                Some(elig[idx])
+                                None
                             }
+                        }) {
+                            Some(id)
                         } else {
                             let idx = g.rr_index % elig.len();
                             g.rr_index = g.rr_index.wrapping_add(1);
                             Some(elig[idx])
                         }
+                    } else {
+                        let idx = g.rr_index % elig.len();
+                        g.rr_index = g.rr_index.wrapping_add(1);
+                        Some(elig[idx])
                     }
                 };
 
@@ -162,10 +158,10 @@ impl DataPlane {
                         g.links.get(&id).map(|l| l.writer_tx.clone())
                     };
                     if let Some(w) = writer {
-                        debug!("dataplane: TX frame len={} via link id={}", frame.len(), id);
+                        debug!("dataplane: TX frame len={} via link id={id}", frame.len());
                         let _ = w.send(frame);
                     } else {
-                        warn!("dataplane: no writer found for link id={}", id);
+                        warn!("dataplane: no writer found for link id={id}");
                     }
                 } else {
                     warn!("dataplane: no active links for TX frame (dropping)");
@@ -210,26 +206,24 @@ impl DataPlane {
                         .collect();
                     if elig.is_empty() {
                         None
-                    } else {
-                        if g.half_connection {
-                            if let Some(id) = g.links.iter().find_map(|(id, l)| {
-                                if l.direction == LinkDirection::ClientToServer {
-                                    Some(*id)
-                                } else {
-                                    None
-                                }
-                            }) {
-                                Some(id)
+                    } else if g.half_connection {
+                        if let Some(id) = g.links.iter().find_map(|(id, l)| {
+                            if l.direction == LinkDirection::ClientToServer {
+                                Some(*id)
                             } else {
-                                let idx = g.rr_index % elig.len();
-                                g.rr_index = g.rr_index.wrapping_add(1);
-                                Some(elig[idx])
+                                None
                             }
+                        }) {
+                            Some(id)
                         } else {
                             let idx = g.rr_index % elig.len();
                             g.rr_index = g.rr_index.wrapping_add(1);
                             Some(elig[idx])
                         }
+                    } else {
+                        let idx = g.rr_index % elig.len();
+                        g.rr_index = g.rr_index.wrapping_add(1);
+                        Some(elig[idx])
                     }
                 };
 
@@ -241,10 +235,7 @@ impl DataPlane {
                     if let Some(w) = writer {
                         let _ = w.send(frame);
                     } else {
-                        warn!(
-                            "dataplane: no writer for selected link id={} (adapter TX)",
-                            id
-                        );
+                        warn!("dataplane: no writer for selected link id={id} (adapter TX)");
                     }
                 } else {
                     warn!("dataplane: no active links for adapter TX frame (dropping)");
@@ -343,7 +334,7 @@ impl DataPlane {
                 let mut frames: Vec<Vec<u8>> = Vec::new();
                 {
                     let mut guard = tls_for_rx.lock().unwrap();
-                    let first = match read_u32_be(&mut *guard) {
+                    let first = match read_u32_be(&mut guard) {
                         Ok(v) => v,
                         Err(e) => {
                             // For transient errors, continue; for others, exit quietly (link closed)
@@ -352,14 +343,14 @@ impl DataPlane {
                             {
                                 continue;
                             } else {
-                                debug!("dataplane: RX exit: {}", e);
+                                debug!("dataplane: RX exit: {e}");
                                 return;
                             }
                         }
                     };
                     if first == u32::MAX {
                         // KEEP_ALIVE: read size and discard payload
-                        let sz = match read_u32_be(&mut *guard) {
+                        let sz = match read_u32_be(&mut guard) {
                             Ok(v) => v,
                             Err(e) => {
                                 if e.kind() == std::io::ErrorKind::WouldBlock
@@ -367,11 +358,11 @@ impl DataPlane {
                                 {
                                     continue;
                                 }
-                                debug!("dataplane: RX keepalive exit: {}", e);
+                                debug!("dataplane: RX keepalive exit: {e}");
                                 return;
                             }
                         };
-                        debug!("dataplane: RX keepalive sz={}", sz);
+                        debug!("dataplane: RX keepalive sz={sz}");
                         if sz > 0 {
                             let mut tmp = vec![0u8; sz as usize];
                             if let Err(e) = guard.read_exact(&mut tmp) {
@@ -380,7 +371,7 @@ impl DataPlane {
                                 {
                                     continue;
                                 }
-                                debug!("dataplane: RX keepalive read exit: {}", e);
+                                debug!("dataplane: RX keepalive read exit: {e}");
                                 return;
                             }
                             if debug_hexdump_budget > 0 {
@@ -397,15 +388,12 @@ impl DataPlane {
                         continue;
                     } else {
                         let count = first;
-                        debug!(
-                            "dataplane: RX batch count={} (link dir={:?})",
-                            count, direction
-                        );
+                        debug!("dataplane: RX batch count={count} (link dir={direction:?})");
                         if count == 0 {
                             continue;
                         }
                         for _ in 0..count {
-                            let len = match read_u32_be(&mut *guard) {
+                            let len = match read_u32_be(&mut guard) {
                                 Ok(v) => v,
                                 Err(e) => {
                                     if e.kind() == std::io::ErrorKind::WouldBlock
@@ -413,13 +401,13 @@ impl DataPlane {
                                     {
                                         continue;
                                     }
-                                    debug!("dataplane: RX frame len exit: {}", e);
+                                    debug!("dataplane: RX frame len exit: {e}");
                                     return;
                                 }
                             };
                             if len == 0 || len > (1 << 20) {
                                 // 1 MiB guard
-                                warn!("dataplane: RX invalid frame length: {}", len);
+                                warn!("dataplane: RX invalid frame length: {len}");
                                 return;
                             }
                             let mut buf = vec![0u8; len as usize];
@@ -429,17 +417,13 @@ impl DataPlane {
                                 {
                                     continue;
                                 }
-                                debug!("dataplane: RX read exit: {}", e);
+                                debug!("dataplane: RX read exit: {e}");
                                 return;
                             }
                             if debug_hexdump_budget > 0 {
                                 let dump_len = buf.len().min(96);
-                                debug!(
-                                    "dataplane: RX frame[0..{}]={}",
-                                    dump_len,
-                                    hex::encode(&buf[..dump_len])
-                                );
-                                debug_hexdump_budget -= 1;
+                                let hex = hex::encode(&buf[..dump_len]);
+                                debug!("dataplane: RX frame[0..{dump_len}]={hex}");
                             }
                             frames.push(buf);
                         }
@@ -459,10 +443,7 @@ impl DataPlane {
                                 if (src_port == 67 || src_port == 68)
                                     || (dst_port == 67 || dst_port == 68)
                                 {
-                                    debug!(
-                                        "dataplane: DHCP packet observed ({} -> {})",
-                                        src_port, dst_port
-                                    );
+                                    debug!("dataplane: DHCP packet observed ({src_port} -> {dst_port})");
                                 }
                             }
                         }
@@ -512,11 +493,11 @@ impl DataPlane {
                         g.total_tx += len as u64;
                     }
                     Ok(Err(e)) => {
-                        debug!("dataplane: TX exit: {}", e);
+                        debug!("dataplane: TX exit: {e}");
                         break;
                     }
                     Err(e) => {
-                        warn!("dataplane: TX join error: {}", e);
+                        warn!("dataplane: TX join error: {e}");
                         break;
                     }
                 }
@@ -547,11 +528,11 @@ impl DataPlane {
                 match res {
                     Ok(Ok(())) => { /* ok */ }
                     Ok(Err(e)) => {
-                        debug!("dataplane: keepalive TX exit: {}", e);
+                        debug!("dataplane: keepalive TX exit: {e}");
                         break;
                     }
                     Err(e) => {
-                        debug!("dataplane: keepalive join exit: {}", e);
+                        debug!("dataplane: keepalive join exit: {e}");
                         break;
                     }
                 }
