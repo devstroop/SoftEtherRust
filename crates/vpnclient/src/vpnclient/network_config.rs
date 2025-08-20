@@ -485,11 +485,45 @@ impl VpnClient {
                     let mut service_name: Option<String> =
                         self.config.client.macos_dns_service_name.clone();
                     if service_name.is_none() {
-                        let list = Command::new("bash").arg("-c").arg("networksetup -listnetworkserviceorder | sed -n 's/.*Device: (\\(.*\\)).*/\\1/p'").output().await?;
-                        let iface = self.config.client.interface_name.clone();
-                        let services = String::from_utf8_lossy(&list.stdout);
-                        if services.contains(&iface) {
-                            service_name = Some("Wi-Fi".to_string());
+                        // Parse: `networksetup -listnetworkserviceorder` to map devices -> services
+                        // We choose the first service bound to a physical device (en*, bridge*, awdl* ignored)
+                        let out = Command::new("networksetup")
+                            .arg("-listnetworkserviceorder")
+                            .output()
+                            .await?;
+                        if out.status.success() {
+                            let s = String::from_utf8_lossy(&out.stdout);
+                            let mut last_service: Option<String> = None;
+                            for line in s.lines() {
+                                let line = line.trim();
+                                // Lines look like: "(1) Wi-Fi" or "(2) USB 10/100/1000 LAN"
+                                if line.starts_with('(') {
+                                    // Extract service name after ") "
+                                    if let Some(pos) = line.find(") ") {
+                                        let name = line[pos + 2..].trim();
+                                        if !name.is_empty() {
+                                            last_service = Some(name.to_string());
+                                        }
+                                    }
+                                }
+                                // Following line often contains: "Hardware Port: Wi-Fi, Device: en0"
+                                if line.contains("Device:") {
+                                    if let Some(dev_pos) = line.find("Device:") {
+                                        let dev = line[dev_pos + 7..].trim();
+                                        let dev = dev.trim_end_matches(')');
+                                        let dev = dev.trim();
+                                        if !dev.is_empty() {
+                                            // Choose first reasonable device-backed service
+                                            if dev.starts_with("en") || dev.starts_with("bridge") {
+                                                if let Some(svc) = last_service.clone() {
+                                                    service_name = Some(svc);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     if let Some(svc) = service_name {

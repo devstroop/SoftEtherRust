@@ -302,6 +302,11 @@ impl VpnClient {
             self.is_connected = true;
             self.set_state(ConnectionState::Established);
             info!("SoftEther tunnel opened");
+                        // Apply DHCP timing from config via environment overrides consumed by dhcp.rs
+                        std::env::set_var("RUST_DHCP_SETTLE_MS", self.config.client.dhcp_settle_ms.to_string());
+                        std::env::set_var("RUST_DHCP_DISCOVER_INITIAL_MS", self.config.client.dhcp_initial_ms.to_string());
+                        std::env::set_var("RUST_DHCP_DISCOVER_MAX_MS", self.config.client.dhcp_max_ms.to_string());
+                        std::env::set_var("RUST_DHCP_JITTER_PCT", format!("{}", self.config.client.dhcp_jitter_pct));
             self.emit_event(EventLevel::Info, 220, "tunnel opened");
             // Establish the first bulk data link via additional_connect before bridging/DHCP
             if let Err(e) = self.open_primary_data_link().await {
@@ -352,16 +357,18 @@ impl VpnClient {
                     let dhcp = DhcpClient::new(dp, mac);
                     info!("Attempting DHCP over tunnel on {}", ifname);
 
-                    // Fallback: after 6s without success, nudge macOS DHCP in parallel
+                    // Fallback: after configured delay without success, nudge macOS DHCP in parallel
                     let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
                     let ifname_kick = ifname.clone();
+                    let kick_after = self.config.client.dhcp_fallback_after_ms;
+                    let kick_timeout = self.config.client.dhcp_kick_timeout_ms;
                     let fallback = tokio::spawn(async move {
-                        let delay = Duration::from_secs(6);
+                        let delay = Duration::from_millis(kick_after);
                         let timed_out = tokio::time::timeout(delay, &mut cancel_rx).await.is_err();
                         if timed_out {
                             crate::vpnclient::network_config::kick_dhcp_until_ip(
                                 &ifname_kick,
-                                Duration::from_secs(20),
+                                Duration::from_millis(kick_timeout),
                             ).await;
                         }
                     });
