@@ -68,6 +68,8 @@ pub struct ClientConfig {
     pub interface_snapshot_period_secs: Option<u64>,
     #[serde(default)]
     pub enable_in_tunnel_dhcpv6: Option<bool>,
+    #[serde(default)]
+    pub dhcp_debug_frames: Option<bool>,
 }
 
 impl Default for ClientConfig {
@@ -93,6 +95,7 @@ impl Default for ClientConfig {
             lease_health_warn_pct: None,
             interface_snapshot_period_secs: None,
             enable_in_tunnel_dhcpv6: None,
+            dhcp_debug_frames: None,
         }
     }
 }

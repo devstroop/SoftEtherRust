@@ -78,6 +78,7 @@ pub struct ClientRuntime {
     pub lease_health_warn_pct: u32,
     pub interface_snapshot_period_secs: u64,
     pub enable_in_tunnel_dhcpv6: bool,
+    pub dhcp_debug_frames: bool,
 }
 
 impl Default for ClientRuntime {
@@ -99,6 +100,7 @@ impl Default for ClientRuntime {
             lease_health_warn_pct: 10,
             interface_snapshot_period_secs: 3600,
             enable_in_tunnel_dhcpv6: false,
+            dhcp_debug_frames: false,
         }
     }
 }
@@ -123,6 +125,7 @@ impl TryFrom<shared_config::ClientConfig> for RuntimeConfig {
     if let Some(p) = c.lease_health_warn_pct { client_defaults.lease_health_warn_pct = p.min(99).max(1); }
     if let Some(p) = c.interface_snapshot_period_secs { client_defaults.interface_snapshot_period_secs = p.clamp(60, 86_400); }
     if let Some(b) = c.enable_in_tunnel_dhcpv6 { client_defaults.enable_in_tunnel_dhcpv6 = b; }
+    if let Some(b) = c.dhcp_debug_frames { client_defaults.dhcp_debug_frames = b; }
         Ok(Self {
             host: c.server.clone(),
             port: c.port,

@@ -51,27 +51,70 @@ impl DhcpClient {
 
     pub fn xid(&self) -> u32 { self.xid }
 
-    pub async fn run_once(&mut self, _iface_name: &str, timeout: Duration) -> Result<Option<Lease>> {
-        let discover = self.build_discover()?;
-        self.send_frame(discover);
-        info!("DHCP DISCOVER sent xid={:#x}", self.xid);
+    pub async fn run_once(&mut self, iface_name: &str, timeout: Duration, event_cb: Option<&(dyn Fn(u32, String) + Send + Sync)>) -> Result<Option<Lease>> {
         let deadline = Instant::now() + timeout;
-        let offer = match self.wait_for(v4::MessageType::Offer, deadline).await? {
-            Some(m) => m,
-            None => {
-                info!("DHCP OFFER wait timed out xid={:#x}", self.xid);
-                return Ok(None);
+        let mut attempt: u32 = 0;
+        let mut next_send = Instant::now();
+        let mut offer: Option<v4::Message> = None;
+        let mut backoff = Duration::from_millis(800);
+        let max_backoff = Duration::from_secs(4);
+        while Instant::now() < deadline {
+            if Instant::now() >= next_send {
+                let discover = self.build_discover()?;
+                self.send_frame(discover.clone());
+                if attempt == 0 {
+                    if let Some(cb)=event_cb { cb(298, format!("dhcp discover sent iface={iface_name} xid={:#x} attempt={}", self.xid, attempt+1)); }
+                    info!("DHCP DISCOVER sent iface={iface_name} xid={:#x} attempt={}", self.xid, attempt+1);
+                } else {
+                    if let Some(cb)=event_cb { cb(295, format!("dhcp discover retransmit iface={iface_name} xid={:#x} attempt={}", self.xid, attempt+1)); }
+                    info!("DHCP DISCOVER retransmit iface={iface_name} xid={:#x} attempt={}", self.xid, attempt+1);
+                }
+                if std::env::var("RUST_DHCP_DEBUG_FRAMES").ok().as_deref()==Some("1") {
+                    let dump_len = discover.len().min(120);
+                    info!("DHCP DISCOVER frame[0..{}]={}", dump_len, hex::encode(&discover[..dump_len]));
+                }
+                attempt += 1;
+                next_send = Instant::now() + backoff;
+                backoff = (backoff * 2).min(max_backoff);
             }
-        };
+            let slice_deadline = next_send.min(deadline);
+            let mut remaining = slice_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() { continue; }
+            if remaining > Duration::from_millis(300) { remaining = Duration::from_millis(300); }
+            match tokio::time::timeout(remaining, self.rx.recv()).await {
+                Ok(Some(frame)) => {
+                    if let Some(dhcp_bytes) = extract_dhcp(&frame) {
+                        use dhcproto::v4::Decoder;
+                        if let Ok(msg) = v4::Message::decode(&mut Decoder::new(dhcp_bytes)) {
+                            let mt = msg.opts().msg_type();
+                            if msg.xid() == self.xid && mt == Some(v4::MessageType::Offer) { offer = Some(msg); break; }
+                            else if let Some(mt) = mt { if let Some(cb)=event_cb { cb(294, format!("dhcp frame observed mismatched iface={iface_name} our_xid={:#x} frame_xid={:#x} mt={:?}", self.xid, msg.xid(), mt)); } }
+                        }
+                    } else if std::env::var("RUST_DHCP_DEBUG_FRAMES").ok().as_deref()==Some("1") {
+                        let dump_len = frame.len().min(120);
+                        debug!("Non-DHCP frame during discovery[0..{}]={}", dump_len, hex::encode(&frame[..dump_len]));
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => { /* slice timeout */ }
+            }
+        }
+        let offer = match offer { Some(m)=>m, None => { if let Some(cb)=event_cb { cb(297, format!("dhcp offer timeout iface={iface_name} xid={:#x} attempts={}", self.xid, attempt)); } info!("DHCP OFFER phase timeout iface={iface_name} xid={:#x} attempts={}", self.xid, attempt); return Ok(None);} };
         let request = self.build_request(&offer)?;
-        self.send_frame(request);
-        info!("DHCP REQUEST sent xid={:#x}", self.xid);
-        if let Some(ack) = self.wait_for(v4::MessageType::Ack, deadline).await? {
+        self.send_frame(request.clone());
+        if let Some(cb)=event_cb { cb(298, format!("dhcp request sent iface={iface_name} xid={:#x}", self.xid)); }
+        info!("DHCP REQUEST sent iface={iface_name} xid={:#x}", self.xid);
+        if std::env::var("RUST_DHCP_DEBUG_FRAMES").ok().as_deref()==Some("1") {
+            let dump_len = request.len().min(120);
+            info!("DHCP REQUEST frame[0..{}]={}", dump_len, hex::encode(&request[..dump_len]));
+        }
+        if let Some(ack) = self.wait_for(v4::MessageType::Ack, deadline, event_cb, iface_name).await? {
             let lease = self.lease_from_ack(&ack)?;
-            info!("DHCP lease ip={} router={:?} dns={:?}", lease.client_ip, lease.router, lease.dns_servers);
+            info!("DHCP lease iface={iface_name} ip={} router={:?} dns={:?}", lease.client_ip, lease.router, lease.dns_servers);
             return Ok(Some(lease));
         }
-        info!("DHCP ACK wait timed out xid={:#x}", self.xid);
+        if let Some(cb)=event_cb { cb(296, format!("dhcp ack timeout iface={iface_name} xid={:#x}", self.xid)); }
+        info!("DHCP ACK wait timed out iface={iface_name} xid={:#x}", self.xid);
         Ok(None)
     }
 
@@ -193,7 +236,7 @@ impl DhcpClient {
 
     pub fn send_frame(&self, frame: Vec<u8>) { if !self.dp.send_frame(frame) { warn!("DHCP frame send failed (no link)"); } }
 
-    pub async fn wait_for(&mut self, ty: v4::MessageType, deadline: Instant) -> Result<Option<v4::Message>> {
+    pub async fn wait_for(&mut self, ty: v4::MessageType, deadline: Instant, event_cb: Option<&(dyn Fn(u32, String) + Send + Sync)>, iface_name: &str) -> Result<Option<v4::Message>> {
     use dhcproto::v4::Decoder;
         while Instant::now() < deadline {
             if let Some(frame) = self.rx.recv().await {
@@ -201,11 +244,15 @@ impl DhcpClient {
                     let mut dec = Decoder::new(dhcp_bytes);
                     match v4::Message::decode(&mut dec) {
                         Ok(msg) => {
-                            if msg.xid() != self.xid { continue; }
+                            if msg.xid() != self.xid { if let Some(mt)=msg.opts().msg_type() { if let Some(cb)=event_cb { cb(294, format!("dhcp frame observed mismatched iface={iface_name} our_xid={:#x} frame_xid={:#x} mt={:?}", self.xid, msg.xid(), mt)); } } continue; }
                 if msg.opts().msg_type() == Some(ty) { return Ok(Some(msg)); }
                         }
                         Err(e) => debug!("DHCP decode error: {e}"),
                     }
+                }
+                if std::env::var("RUST_DHCP_DEBUG_FRAMES").ok().as_deref()==Some("1") {
+                    let dump_len = frame.len().min(120);
+                    debug!("DHCP RX frame[0..{}]={}", dump_len, hex::encode(&frame[..dump_len]));
                 }
             } else { break; }
         }

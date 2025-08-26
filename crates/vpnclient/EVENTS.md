@@ -13,6 +13,11 @@ This document consolidates DHCP metrics and interface snapshot related events em
 | 2220 | Info  | initial interface snapshot | JSON `{ "kind":"interface_snapshot", ... , "initial":true }` |
 | 2221 | Info  | interface change snapshot | JSON `{ "kind":"interface_snapshot", ... , "initial":false }` |
 | 2222 | Warn  | lease health warning | JSON `{ "kind":"lease_health", "remaining_pct": <int>, ... }` |
+| 298  | Info  | DHCP discover/request sent | text |
+| 295  | Info  | DHCP discover retransmit | text |
+| 297  | Warn  | DHCP offer phase timeout | text |
+| 296  | Warn  | DHCP ack phase timeout | text |
+| 294  | Info  | DHCP mismatched frame observed | text |
 | 300  | Info  | DHCP renew attempt cycle | text |
 | 301  | Info  | DHCP renew success | text |
 | 302  | Warn  | Renew phase exhausted (rebind next) | text |

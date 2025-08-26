@@ -460,7 +460,14 @@ impl VpnClient {
             let iface_for_dhcp = self.actual_interface_name.as_ref().unwrap_or(&self.config.client.interface_name).clone();
             // Reuse cached xid if present
             if let Some(xid)=self.dhcp_xid { dhcp = crate::dhcp::DhcpClient::new_with_xid(dp_clone_for_dhcp, mac, xid); }
-            match dhcp.run_once(&iface_for_dhcp, Duration::from_secs(30)).await {
+            let debug_frames = if self.config.client.dhcp_debug_frames { Some(()) } else { None };
+            if debug_frames.is_some() { std::env::set_var("RUST_DHCP_DEBUG_FRAMES","1"); }
+            let event_tx_clone = self.event_tx.clone();
+            let iface_clone_for_cb = iface_for_dhcp.clone();
+            let cb = move |code:u32, msg:String| {
+                if let Some(tx)=&event_tx_clone { let _=tx.send(ClientEvent{ level: EventLevel::Info, code: code as i32, message: msg}); }
+            };
+            match dhcp.run_once(&iface_for_dhcp, Duration::from_secs(30), Some(&cb)).await {
                         Ok(Some(lease)) => {
                             self.network_settings = Some(crate::types::network_settings_from_lease(&lease));
                             self.emit_settings_snapshot();
@@ -883,6 +890,7 @@ mod tests {
             lease_health_warn_pct: None,
             interface_snapshot_period_secs: None,
             enable_in_tunnel_dhcpv6: None,
+            dhcp_debug_frames: None,
         };
         let client = VpnClient::from_shared_config(shared)?;
         assert!(!client.is_connected());
@@ -1005,12 +1013,12 @@ impl VpnClient {
                         metrics.renew_attempts.fetch_add(1, Ordering::Relaxed);
                         let mut client = crate::dhcp::DhcpClient::new_with_xid(dp_root.clone(), mac_use, xid);
                         if let Ok(Some(frame)) = client.build_renew_unicast(&current_lease) { client.send_frame(frame); }
-                        if let Ok(Some(ack)) = client.wait_for(dhcproto::v4::MessageType::Ack, Instant::now()+Duration::from_secs(5)).await {
+                        if let Ok(Some(ack)) = client.wait_for(dhcproto::v4::MessageType::Ack, Instant::now()+Duration::from_secs(5), None, &iface).await {
                             if let Ok(newl) = client.lease_from_ack(&ack) { current_lease = newl; renewed = true; }
                         }
                         if !renewed {
                             if let Ok(frame) = client.build_renew_broadcast(&current_lease) { client.send_frame(frame); }
-                            if let Ok(Some(ack)) = client.wait_for(dhcproto::v4::MessageType::Ack, Instant::now()+Duration::from_secs(5)).await {
+                            if let Ok(Some(ack)) = client.wait_for(dhcproto::v4::MessageType::Ack, Instant::now()+Duration::from_secs(5), None, &iface).await {
                                 if let Ok(newl) = client.lease_from_ack(&ack) { current_lease = newl; renewed = true; }
                             }
                         }
@@ -1040,7 +1048,7 @@ impl VpnClient {
                     let mut rebinder = crate::dhcp::DhcpClient::new_with_xid(dp_root.clone(), mac_use, xid);
                     if let Ok(frame) = rebinder.build_rebind(&current_lease) { rebinder.send_frame(frame); }
                     let mut rebind_ok=false;
-                    if let Ok(Some(ack)) = rebinder.wait_for(dhcproto::v4::MessageType::Ack, Instant::now()+Duration::from_secs(8)).await {
+                    if let Ok(Some(ack)) = rebinder.wait_for(dhcproto::v4::MessageType::Ack, Instant::now()+Duration::from_secs(8), None, &iface).await {
                         if let Ok(newl) = rebinder.lease_from_ack(&ack) { current_lease = newl; rebind_ok=true; }
                     }
                     if rebind_ok {
@@ -1059,7 +1067,7 @@ impl VpnClient {
                     if let Some(tx)=&event_tx { let _= tx.send(ClientEvent{ level: EventLevel::Warn, code:305, message: "dhcp rebind failed; rediscover".into()}); }
                     metrics.rediscover_attempts.fetch_add(1, Ordering::Relaxed);
                     let mut discover_client = crate::dhcp::DhcpClient::new_with_xid(dp_root.clone(), mac_use, xid);
-                    match discover_client.run_once(&iface, Duration::from_secs(20)).await {
+                    match discover_client.run_once(&iface, Duration::from_secs(20), None).await {
                         Ok(Some(newl)) => { metrics.rediscover_success.fetch_add(1, Ordering::Relaxed); if let Some(tx)=&event_tx { let _= tx.send(ClientEvent{ level: EventLevel::Info, code:306, message: "dhcp rediscover success".into()}); } current_lease=newl; if let Some(p)=&path { persist_lease(p, &current_lease, Some(&iface), Some(xid)); } acquired_at_atomic.store(current_unix_secs(), Ordering::Relaxed); if let Some(lt)=current_lease.lease_time { cur_lt=lt; let sig = (current_lease.client_ip, current_lease.subnet_mask, current_lease.router, current_lease.dns_servers.clone()); if last_sig.as_ref().map(|s| s != &sig).unwrap_or(true) { if let Some(tx)=&event_tx { if let Some(json)=interface_snapshot_json(&current_lease, &iface, Some(xid), cache_reused, interface_auto, false, None, false, false, None) { let _=tx.send(ClientEvent{ level: EventLevel::Info, code:2221, message: json}); } } last_sig=Some(sig); } continue; } else { break; } }
                         _ => { metrics.failures.fetch_add(1, Ordering::Relaxed); if let Some(tx)=&event_tx { let _= tx.send(ClientEvent{ level: EventLevel::Error, code:307, message: "dhcp rediscover failed".into()}); } break; }
                     }
