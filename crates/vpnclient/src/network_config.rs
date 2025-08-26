@@ -260,6 +260,11 @@ impl VpnClient {
         info!("MTU set to 1500");
         info!("[INFO] connected");
 
+        // Emit a server-provided interface snapshot if DHCP not in use
+        if !(self.config.client.enable_in_tunnel_dhcp && self.dhcp_xid.is_some()) {
+            self.emit_server_interface_snapshot();
+        }
+
         if !ns.dns_servers.is_empty() {
             #[cfg(target_os = "linux")]
             {

@@ -6,6 +6,8 @@ use vpnclient::shared_config as shared_config;
 use tracing::{error, info};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use vpnclient::{VpnClient, DEFAULT_CONFIG_FILE};
+use tokio::sync::mpsc;
+use vpnclient::types::{ClientEvent, EventLevel, ClientState};
 
 #[derive(Parser)]
 #[command(name = "vpnclient")]
@@ -84,6 +86,24 @@ async fn connect(cli: &Cli) -> Result<()> {
     if let Some(redact)=cc.interface_snapshot_redact.as_mut() { if cli.redact_interface { *redact = true; } } else if cli.redact_interface { cc.interface_snapshot_redact = Some(true); }
     if let Some(verbose)=cc.interface_snapshot_verbose.as_mut() { if cli.verbose_interface { *verbose = true; } } else if cli.verbose_interface { cc.interface_snapshot_verbose = Some(true); }
     let mut vpn_client = VpnClient::from_shared_config(cc)?;
+    // Wire up event channel so interface_snapshot and metrics events are surfaced
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ClientEvent>();
+    vpn_client.set_event_channel(event_tx);
+    tokio::spawn(async move {
+        while let Some(ev) = event_rx.recv().await {
+            match ev.level {
+                EventLevel::Info => info!(code=ev.code, "{}", ev.message),
+                EventLevel::Warn => tracing::warn!(code=ev.code, "{}", ev.message),
+                EventLevel::Error => tracing::error!(code=ev.code, "{}", ev.message),
+            }
+        }
+    });
+    // Optional: state channel for external visibility (logs here too)
+    let (state_tx, mut state_rx) = mpsc::unbounded_channel::<ClientState>();
+    vpn_client.set_state_channel(state_tx);
+    tokio::spawn(async move {
+        while let Some(st) = state_rx.recv().await { info!(code=9999, "state_change {:?}", st); }
+    });
     // Run like the classic vpnclient: connect and keep running until interrupted
     match vpn_client.run_until_interrupted().await {
         Ok(()) => {

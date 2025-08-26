@@ -64,6 +64,10 @@ pub struct ClientConfig {
     pub interface_snapshot_verbose: Option<bool>,
     #[serde(default)]
     pub lease_health_warn_pct: Option<u32>,
+    #[serde(default)]
+    pub interface_snapshot_period_secs: Option<u64>,
+    #[serde(default)]
+    pub enable_in_tunnel_dhcpv6: Option<bool>,
 }
 
 impl Default for ClientConfig {
@@ -87,6 +91,8 @@ impl Default for ClientConfig {
             interface_snapshot_redact: None,
             interface_snapshot_verbose: None,
             lease_health_warn_pct: None,
+            interface_snapshot_period_secs: None,
+            enable_in_tunnel_dhcpv6: None,
         }
     }
 }
