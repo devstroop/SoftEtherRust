@@ -70,6 +70,12 @@ pub struct ClientConfig {
     pub enable_in_tunnel_dhcpv6: Option<bool>,
     #[serde(default)]
     pub dhcp_debug_frames: Option<bool>,
+    /// Optional fixed MAC address to use for in-tunnel DHCP (format: 6 hex bytes with or without colons)
+    #[serde(default)]
+    pub mac_address: Option<String>,
+    /// When true (default), derive a deterministic MAC from username+hub if mac_address not set.
+    #[serde(default)]
+    pub deterministic_mac: Option<bool>,
 }
 
 impl Default for ClientConfig {
@@ -96,6 +102,8 @@ impl Default for ClientConfig {
             interface_snapshot_period_secs: None,
             enable_in_tunnel_dhcpv6: None,
             dhcp_debug_frames: None,
+            mac_address: None,
+            deterministic_mac: None,
         }
     }
 }

@@ -32,6 +32,7 @@ impl From<i32> for LinkDirection {
 #[derive(Clone)]
 pub struct DataPlane {
     inner: Arc<Mutex<Inner>>,
+    event_cb: Option<Arc<dyn Fn(u32, String) + Send + Sync>>,
 }
 
 struct Inner {
@@ -174,8 +175,10 @@ impl DataPlane {
             g.tx_task = Some(tx_task);
         }
 
-        Some(Self { inner })
+        Some(Self { inner, event_cb: None })
     }
+
+    pub fn set_event_callback(&mut self, cb: Arc<dyn Fn(u32, String) + Send + Sync>) { self.event_cb=Some(cb); }
 
     /// Set an optional external RX sink (e.g., virtual adapter) to receive frames coming from links.
     /// The provided sender will be cloned internally and used by all link RX workers.
@@ -269,6 +272,7 @@ impl DataPlane {
                 })
                 .collect();
             if elig.is_empty() {
+                if let Some(cb)=&self.event_cb { cb(293, "dataplane tx failure: no eligible links".into()); }
                 return false;
             }
             if g.half_connection {
@@ -296,7 +300,17 @@ impl DataPlane {
             frame.len(),
             id
         );
-        writer.send(frame).is_ok()
+        let ok = writer.send(frame).is_ok();
+        if !ok {
+            if let Some(cb)=&self.event_cb { cb(293, format!("dataplane tx failure: enqueue error link_id={}", id)); }
+            // Remove defunct link (Option A minimal recovery)
+            let removed = {
+                let mut g = self.inner.lock().unwrap();
+                g.links.remove(&id).is_some()
+            };
+            if removed { if let Some(cb)=&self.event_cb { cb(291, format!("dataplane link removed id={} reason=enqueue_error", id)); } }
+        }
+        ok
     }
 
     /// Register a bonded TLS stream with direction and spawn RX/TX workers.
@@ -543,7 +557,7 @@ impl DataPlane {
         let mut g = self.inner.lock().unwrap();
         let id = g.next_id;
         g.next_id += 1;
-        g.links.insert(
+    g.links.insert(
             id,
             Link {
                 id,
@@ -557,6 +571,7 @@ impl DataPlane {
                 tx_bytes: 0,
             },
         );
+    if let Some(cb)=&self.event_cb { cb(292, format!("dataplane link registered id={id} direction={direction:?}")); }
         id
     }
 

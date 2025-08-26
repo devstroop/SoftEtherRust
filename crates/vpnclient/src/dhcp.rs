@@ -61,13 +61,17 @@ impl DhcpClient {
         while Instant::now() < deadline {
             if Instant::now() >= next_send {
                 let discover = self.build_discover()?;
-                self.send_frame(discover.clone());
+                if !self.dp.send_frame(discover.clone()) {
+                    // No eligible link; retry quickly without counting attempt or advancing backoff
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
                 if attempt == 0 {
-                    if let Some(cb)=event_cb { cb(298, format!("dhcp discover sent iface={iface_name} xid={:#x} attempt={}", self.xid, attempt+1)); }
-                    info!("DHCP DISCOVER sent iface={iface_name} xid={:#x} attempt={}", self.xid, attempt+1);
+                    if let Some(cb)=event_cb { cb(298, format!("dhcp discover sent iface={iface_name} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} xid={:#x} attempt={}", self.mac[0],self.mac[1],self.mac[2],self.mac[3],self.mac[4],self.mac[5], self.xid, attempt+1)); }
+                    info!("DHCP DISCOVER sent iface={iface_name} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} xid={:#x} attempt={}", self.mac[0],self.mac[1],self.mac[2],self.mac[3],self.mac[4],self.mac[5], self.xid, attempt+1);
                 } else {
-                    if let Some(cb)=event_cb { cb(295, format!("dhcp discover retransmit iface={iface_name} xid={:#x} attempt={}", self.xid, attempt+1)); }
-                    info!("DHCP DISCOVER retransmit iface={iface_name} xid={:#x} attempt={}", self.xid, attempt+1);
+                    if let Some(cb)=event_cb { cb(295, format!("dhcp discover retransmit iface={iface_name} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} xid={:#x} attempt={}", self.mac[0],self.mac[1],self.mac[2],self.mac[3],self.mac[4],self.mac[5], self.xid, attempt+1)); }
+                    info!("DHCP DISCOVER retransmit iface={iface_name} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} xid={:#x} attempt={}", self.mac[0],self.mac[1],self.mac[2],self.mac[3],self.mac[4],self.mac[5], self.xid, attempt+1);
                 }
                 if std::env::var("RUST_DHCP_DEBUG_FRAMES").ok().as_deref()==Some("1") {
                     let dump_len = discover.len().min(120);
@@ -99,7 +103,7 @@ impl DhcpClient {
                 Err(_) => { /* slice timeout */ }
             }
         }
-        let offer = match offer { Some(m)=>m, None => { if let Some(cb)=event_cb { cb(297, format!("dhcp offer timeout iface={iface_name} xid={:#x} attempts={}", self.xid, attempt)); } info!("DHCP OFFER phase timeout iface={iface_name} xid={:#x} attempts={}", self.xid, attempt); return Ok(None);} };
+    let offer = match offer { Some(m)=>m, None => { if let Some(cb)=event_cb { cb(297, format!("dhcp offer timeout iface={iface_name} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} xid={:#x} attempts={}", self.mac[0],self.mac[1],self.mac[2],self.mac[3],self.mac[4],self.mac[5], self.xid, attempt)); } info!("DHCP OFFER phase timeout iface={iface_name} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} xid={:#x} attempts={}", self.mac[0],self.mac[1],self.mac[2],self.mac[3],self.mac[4],self.mac[5], self.xid, attempt); return Ok(None);} };
         let request = self.build_request(&offer)?;
         self.send_frame(request.clone());
         if let Some(cb)=event_cb { cb(298, format!("dhcp request sent iface={iface_name} xid={:#x}", self.xid)); }

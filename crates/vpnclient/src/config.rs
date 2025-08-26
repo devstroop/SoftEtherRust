@@ -79,6 +79,8 @@ pub struct ClientRuntime {
     pub interface_snapshot_period_secs: u64,
     pub enable_in_tunnel_dhcpv6: bool,
     pub dhcp_debug_frames: bool,
+    pub mac_address: Option<[u8;6]>,
+    pub deterministic_mac: bool,
 }
 
 impl Default for ClientRuntime {
@@ -101,6 +103,8 @@ impl Default for ClientRuntime {
             interface_snapshot_period_secs: 3600,
             enable_in_tunnel_dhcpv6: false,
             dhcp_debug_frames: false,
+            mac_address: None,
+            deterministic_mac: true,
         }
     }
 }
@@ -126,6 +130,23 @@ impl TryFrom<shared_config::ClientConfig> for RuntimeConfig {
     if let Some(p) = c.interface_snapshot_period_secs { client_defaults.interface_snapshot_period_secs = p.clamp(60, 86_400); }
     if let Some(b) = c.enable_in_tunnel_dhcpv6 { client_defaults.enable_in_tunnel_dhcpv6 = b; }
     if let Some(b) = c.dhcp_debug_frames { client_defaults.dhcp_debug_frames = b; }
+    // MAC configuration
+    let mut mac_bytes: Option<[u8;6]> = None;
+    if let Some(spec)=c.mac_address.as_ref() {
+        // Accept formats: aa:bb:cc:dd:ee:ff or aabbccddeeff
+        let cleaned: String = spec.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        if cleaned.len()==12 { if let Ok(raw)=hex::decode(&cleaned) { if raw.len()==6 { mac_bytes=Some(raw.clone().try_into().unwrap()); } } }
+    }
+    let deterministic = c.deterministic_mac.unwrap_or(true);
+    if mac_bytes.is_none() && deterministic {
+        use sha2::{Digest, Sha256};
+        let mut h=Sha256::new();
+        h.update(c.username.as_bytes()); h.update(b"|"); h.update(c.hub.as_bytes()); h.update(b"|"); h.update(c.server.as_bytes());
+        let out=h.finalize();
+        let mut mac=[0u8;6]; mac.copy_from_slice(&out[..6]);
+        mac[0] = (mac[0] & 0b1111_1110) | 0b0000_0010; // locally administered unicast
+        mac_bytes=Some(mac);
+    }
         Ok(Self {
             host: c.server.clone(),
             port: c.port,
@@ -142,7 +163,7 @@ impl TryFrom<shared_config::ClientConfig> for RuntimeConfig {
                 proxy: None,
                 client_id: None,
             },
-            client: ClientRuntime { enable_in_tunnel_dhcp: c.enable_in_tunnel_dhcp.unwrap_or(true), lease_cache_path: c.lease_cache_path.clone(), interface_auto: c.interface_auto.unwrap_or(false), dhcp_metrics_interval_secs: client_defaults.dhcp_metrics_interval_secs, ..client_defaults },
+            client: ClientRuntime { enable_in_tunnel_dhcp: c.enable_in_tunnel_dhcp.unwrap_or(true), lease_cache_path: c.lease_cache_path.clone(), interface_auto: c.interface_auto.unwrap_or(false), dhcp_metrics_interval_secs: client_defaults.dhcp_metrics_interval_secs, mac_address: mac_bytes, deterministic_mac: deterministic, ..client_defaults },
         })
     }
 }

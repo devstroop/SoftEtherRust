@@ -13,6 +13,9 @@ This document consolidates DHCP metrics and interface snapshot related events em
 | 2220 | Info  | initial interface snapshot | JSON `{ "kind":"interface_snapshot", ... , "initial":true }` |
 | 2221 | Info  | interface change snapshot | JSON `{ "kind":"interface_snapshot", ... , "initial":false }` |
 | 2222 | Warn  | lease health warning | JSON `{ "kind":"lease_health", "remaining_pct": <int>, ... }` |
+| 291  | Warn  | dataplane link removed | text |
+| 292  | Info  | dataplane link registered | text |
+| 293  | Warn  | dataplane tx failure | text |
 | 298  | Info  | DHCP discover/request sent | text |
 | 295  | Info  | DHCP discover retransmit | text |
 | 297  | Warn  | DHCP offer phase timeout | text |
@@ -126,6 +129,11 @@ CLI overrides:
 - Change snapshots only emitted on material change (IP, mask, router, DNS list).
 - DNS list truncated (4 entries normal, 8 in verbose mode).
 - Periodic metrics controlled by interval setting; final metrics always emitted on disconnect (if DHCP enabled).
+
+Dataplane lifecycle / failure visibility (Option A minimal recovery):
+- 292 emitted when a link is registered.
+- 293 emitted on TX failure (no eligible links or enqueue error).
+- 291 emitted when a defunct link is removed after enqueue error.
 
 ## Parsing Guidance
 
