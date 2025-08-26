@@ -68,6 +68,8 @@ Config fields (add under the top‑level JSON, or where your loader maps into `C
   "lease_cache_path": "/var/tmp/sevpn_lease.json", // optional path to persist lease
   "interface_auto": true, // force OS auto-assigned TUN name ignoring interface_name
   "dhcp_metrics_interval_secs": 300     // periodic metrics emission interval (min 10s)
+  ,"interface_snapshot_redact": false    // redact IP/DNS in interface snapshot events
+  ,"interface_snapshot_verbose": false  // include extended details (more DNS entries) in snapshots
 }
 ```
 

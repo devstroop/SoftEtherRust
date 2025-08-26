@@ -26,7 +26,8 @@ impl VpnClient {
                 if decoded.len() != 20 {
                     anyhow::bail!("Invalid password hash length");
                 }
-                let mut auth = ClientAuth::new_password(&self.config.username, "__PLACEHOLDER__")?;
+                // Initialize with empty password then inject hashed form
+                let mut auth = ClientAuth::new_password(&self.config.username, "")?;
                 auth.plain_password.clear();
                 auth.hashed_password.copy_from_slice(&decoded);
                 auth.auth_type = AuthType::Password;

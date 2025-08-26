@@ -73,6 +73,9 @@ pub struct ClientRuntime {
     pub lease_cache_path: Option<String>,
     pub dhcp_renewal_jitter_pct: u32,
     pub dhcp_metrics_interval_secs: u64,
+    pub interface_snapshot_redact: bool,
+    pub interface_snapshot_verbose: bool,
+    pub lease_health_warn_pct: u32,
 }
 
 impl Default for ClientRuntime {
@@ -89,6 +92,9 @@ impl Default for ClientRuntime {
             lease_cache_path: None,
             dhcp_renewal_jitter_pct: 10,
             dhcp_metrics_interval_secs: 300,
+            interface_snapshot_redact: false,
+            interface_snapshot_verbose: false,
+            lease_health_warn_pct: 10,
         }
     }
 }
@@ -108,6 +114,9 @@ impl TryFrom<shared_config::ClientConfig> for RuntimeConfig {
         };
         let mut client_defaults = ClientRuntime::default();
     if let Some(iv) = c.dhcp_metrics_interval_secs { client_defaults.dhcp_metrics_interval_secs = iv.clamp(10, 86_400); }
+    if let Some(b) = c.interface_snapshot_redact { client_defaults.interface_snapshot_redact = b; }
+    if let Some(b) = c.interface_snapshot_verbose { client_defaults.interface_snapshot_verbose = b; }
+    if let Some(p) = c.lease_health_warn_pct { client_defaults.lease_health_warn_pct = p.min(99).max(1); }
         Ok(Self {
             host: c.server.clone(),
             port: c.port,

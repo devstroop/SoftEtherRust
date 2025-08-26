@@ -169,7 +169,7 @@ impl DhcpClient {
         ip.extend_from_slice(&0u16.to_be_bytes()); // id
         ip.extend_from_slice(&0u16.to_be_bytes()); // flags/frag
         ip.push(64); ip.push(17); // ttl, proto
-        ip.extend_from_slice(&0u16.to_be_bytes()); // checksum placeholder
+    ip.extend_from_slice(&0u16.to_be_bytes()); // checksum (filled after header assembled)
         ip.extend_from_slice(&src_ip.octets());
         ip.extend_from_slice(&dst_ip.octets());
         let csum = ipv4_checksum(&ip);

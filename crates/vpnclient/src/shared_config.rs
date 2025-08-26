@@ -58,6 +58,12 @@ pub struct ClientConfig {
     pub interface_auto: Option<bool>,
     #[serde(default)]
     pub dhcp_metrics_interval_secs: Option<u64>,
+    #[serde(default)]
+    pub interface_snapshot_redact: Option<bool>,
+    #[serde(default)]
+    pub interface_snapshot_verbose: Option<bool>,
+    #[serde(default)]
+    pub lease_health_warn_pct: Option<u32>,
 }
 
 impl Default for ClientConfig {
@@ -78,6 +84,9 @@ impl Default for ClientConfig {
             lease_cache_path: None,
             interface_auto: None,
             dhcp_metrics_interval_secs: None,
+            interface_snapshot_redact: None,
+            interface_snapshot_verbose: None,
+            lease_health_warn_pct: None,
         }
     }
 }
@@ -100,7 +109,8 @@ impl ClientConfig {
         }
         // Prefer SHA-0(password + UPPER(username)) variant when provided
         if let Some(ref b64) = self.password_hash {
-            let mut auth = cedar::ClientAuth::new_password(&self.username, "__PLACEHOLDER__")?;
+            // Construct with empty password then replace hashed bytes
+            let mut auth = cedar::ClientAuth::new_password(&self.username, "")?;
             auth.plain_password.clear();
             if let Ok(bytes) = base64::prelude::BASE64_STANDARD.decode(b64) {
                 if bytes.len() == 20 {

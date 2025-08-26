@@ -24,6 +24,14 @@ struct Cli {
     /// Guarded by feature flag or env (SOFTETHER_VPNCLIENT_ALLOW_INSECURE=1).
     #[arg(long, default_value_t = false)]
     insecure: bool,
+
+    /// Redact interface snapshot (mask IP/DNS)
+    #[arg(long, default_value_t = false)]
+    redact_interface: bool,
+
+    /// Verbose interface snapshot (more DNS entries, verbose=true flag)
+    #[arg(long, default_value_t = false)]
+    verbose_interface: bool,
 }
 
 #[tokio::main]
@@ -46,11 +54,12 @@ async fn main() -> Result<()> {
     // Third-party style log gating can be enabled via RUST_LOG
 
     // Single entrypoint: connect using the provided config
-    connect(&cli.config, cli.insecure).await
+    connect(&cli).await
 }
 
 /// Connect to VPN server
-async fn connect(config_path: &str, insecure_flag: bool) -> Result<()> {
+async fn connect(cli: &Cli) -> Result<()> {
+    let config_path = &cli.config;
     info!("Loading configuration from: {}", config_path);
 
     // Parse shared ClientConfig only (legacy format no longer supported here)
@@ -63,7 +72,7 @@ async fn connect(config_path: &str, insecure_flag: bool) -> Result<()> {
             .ok()
             .as_deref()
             == Some("1");
-    if insecure_flag {
+    if cli.insecure {
         if allow_insecure {
             info!("--insecure enabled for this run (overrides config)");
             cc.skip_tls_verify = true;
@@ -71,6 +80,9 @@ async fn connect(config_path: &str, insecure_flag: bool) -> Result<()> {
             info!("--insecure ignored: enable feature 'allow-insecure' or set env SOFTETHER_VPNCLIENT_ALLOW_INSECURE=1");
         }
     }
+    // Interface snapshot overrides
+    if let Some(redact)=cc.interface_snapshot_redact.as_mut() { if cli.redact_interface { *redact = true; } } else if cli.redact_interface { cc.interface_snapshot_redact = Some(true); }
+    if let Some(verbose)=cc.interface_snapshot_verbose.as_mut() { if cli.verbose_interface { *verbose = true; } } else if cli.verbose_interface { cc.interface_snapshot_verbose = Some(true); }
     let mut vpn_client = VpnClient::from_shared_config(cc)?;
     // Run like the classic vpnclient: connect and keep running until interrupted
     match vpn_client.run_until_interrupted().await {
