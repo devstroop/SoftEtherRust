@@ -1,11 +1,9 @@
 [workspace]
 members = [
-    "crates/mayaqua",
+    "libs/mayaqua",
+    "libs/cedar",
+    "libs/tun-rs",
     "crates/vpnclient",
-    "crates/cedar",
-    "crates/config",
-    "crates/pencore",
-    "crates/adapter",
     # FFI crates
     "crates/ffi"
 ]

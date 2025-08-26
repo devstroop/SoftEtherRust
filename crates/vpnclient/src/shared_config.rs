@@ -1,10 +1,25 @@
-//! Client configuration crate: JSON I/O and mapping to cedar types.
+//! Shared client configuration (migrated from former `config` crate)
+//! Provides JSON I/O helpers and mapping to cedar types.
 
 use base64::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub mod io;
+pub mod io {
+    use super::{ConfigError, Result};
+    use serde::{de::DeserializeOwned, Serialize};
+    use std::path::Path;
+
+    pub fn load_json<T: DeserializeOwned, P: AsRef<Path>>(path: P) -> Result<T> {
+        let data = mayaqua::fs::read_all(path).map_err(|e| ConfigError::Io(e.to_string()))?;
+        serde_json::from_slice(&data).map_err(|e| ConfigError::Json(e.to_string()))
+    }
+
+    pub fn save_json<T: Serialize, P: AsRef<Path>>(path: P, value: &T) -> Result<()> {
+        let data = serde_json::to_vec_pretty(value).map_err(|e| ConfigError::Json(e.to_string()))?;
+        mayaqua::fs::write_all_atomic(path, &data).map_err(|e| ConfigError::Io(e.to_string()))
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -83,5 +98,16 @@ impl ClientConfig {
             return Ok(auth);
         }
         Ok(cedar::ClientAuth::new_anonymous())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn default_values() {
+        let c = ClientConfig::default();
+        assert_eq!(c.port, 443);
+        assert_eq!(c.hub, "DEFAULT");
     }
 }

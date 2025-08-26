@@ -3,22 +3,29 @@
 //! A complete VPN client implementation in Rust that connects to SoftEther VPN servers
 //! and establishes secure tunnels using virtual network adapters.
 
-// Re-export adapter crate only when the optional feature is enabled
-#[cfg(feature = "adapter")]
-pub use adapter;
 mod config;
+pub mod shared_config; // formerly standalone config crate (shared JSON config API)
 pub mod dhcp;
 pub mod network;
-pub mod tunnel;
+pub mod network_config;
+mod auth;
+mod connection;
+mod links;
+mod policy;
 pub mod types;
-pub mod vpnclient; // internal-only legacy config used by vpnclient implementation
-                   // Re-export legacy config type for CLI fallback parsing
-pub use config::VpnConfig as LegacyVpnConfig;
+pub mod vpnclient; 
+mod pencore;
 
+
+// internal runtime configuration (private); public config is shared_config::ClientConfig
+pub use pencore::Pencore;
 pub use network::*;
-pub use tunnel::*;
 pub use types::*;
 pub use vpnclient::*;
+
+// Re-export shared configuration types (stable JSON-facing schema)
+pub use shared_config::{ClientConfig, ConfigError};
+pub use shared_config as shared_io; // io module available under shared_config::io
 
 use mayaqua::Result;
 

@@ -1,10 +1,5 @@
 //! Main VPN client implementation
-mod adapter_bridge;
-mod auth;
-mod connection;
-mod links;
-mod network_config;
-mod policy;
+// Deprecated VpnConfig removed; unified RuntimeConfig in use
 
 use anyhow::Result;
 use cedar::constants::{MAX_RETRY_INTERVAL_MS, MIN_RETRY_INTERVAL_MS};
@@ -13,7 +8,7 @@ use cedar::{ConnectionManager, ConnectionPool, DataPlane, EngineConfig, SessionM
 use rand::RngCore;
 use tracing::{debug, error, info, warn}; // for fill_bytes in iOS DHCP path
 #[cfg(unix)]
-fn local_hostname() -> String {
+pub(crate) fn local_hostname() -> String {
     use std::ffi::CStr;
     let mut buf = [0u8; 256];
     unsafe {
@@ -26,7 +21,7 @@ fn local_hostname() -> String {
     "unknown".to_string()
 }
 #[cfg(not(unix))]
-fn local_hostname() -> String {
+pub(crate) fn local_hostname() -> String {
     "unknown".to_string()
 }
 use cedar::{Session, SessionConfig};
@@ -37,72 +32,53 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
-use crate::config::{AuthConfig, VpnConfig};
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-use crate::dhcp::DhcpClient;
+use crate::config::RuntimeConfig;
 // use crate::dhcp::Lease as DhcpLease;
 use crate::network::SecureConnection;
-#[cfg(feature = "adapter")]
-use adapter::VirtualAdapter;
-use config as shared_config;
+use crate::shared_config as shared_config;
 // use mayaqua::get_tick64; // moved to connection module
-use mayaqua::crypto::softether_password_hash; // SHA-0(password + UPPER(username))
+// softether_password_hash now handled in RuntimeConfig conversion
                                               // use std::net::Ipv4Addr; // only used in network module
 
 /// SoftEther VPN Client
 pub struct VpnClient {
-    config: VpnConfig,
-    connection: Option<SecureConnection>,
-    session: Option<Session>,
-    session_manager: SessionManager,
+    pub(crate) config: RuntimeConfig,
+    pub(crate) connection: Option<SecureConnection>,
+    pub(crate) session: Option<Session>,
+    pub(crate) session_manager: SessionManager,
     #[allow(dead_code)]
-    connection_manager: ConnectionManager,
+    pub(crate) connection_manager: ConnectionManager,
     #[allow(dead_code)]
-    connection_pool: ConnectionPool,
-    dataplane: Option<DataPlane>,
-    is_connected: bool,
+    pub(crate) connection_pool: ConnectionPool,
+    pub(crate) dataplane: Option<DataPlane>,
+    pub(crate) is_connected: bool,
     pub redirect_ticket: Option<[u8; 20]>,
-    network_settings: Option<NetworkSettings>,
-    #[cfg(feature = "adapter")]
-    adapter: Option<VirtualAdapter>,
-    // Server policy constraints (best-effort parsed from welcome/auth)
-    server_policy_max_connections: Option<u32>,
-    // Server-negotiated max_connection reported in welcome (often echo of requested <= policy)
-    server_negotiated_max_connections: Option<u32>,
-    // Background tasks for auxiliary links (scaffold)
-    aux_tasks: Vec<JoinHandle<()>>,
-    // Server-provided session key (20 bytes) used for additional connections bonding
-    server_session_key: Option<[u8; 20]>,
-    // Directions recorded for additional links (0: both or RX/TX per server; 1: client->server, 2: server->client per SoftEther)
-    aux_directions: std::sync::Arc<std::sync::Mutex<Vec<i32>>>,
-    // Round-robin endpoint list (hosts) to spread additional links across farm IPs
-    endpoints_rr: Vec<String>,
-    // TLS SNI host to use for certificate verification when connecting to an IP after redirect
-    sni_host: Option<String>,
-    // Connection state tracking and keep-alive
+    pub(crate) network_settings: Option<NetworkSettings>,
+    // Newly integrated raw TUN device (replaces old adapter abstraction)
+    pub(crate) tun: Option<tun_rs::SyncDevice>,
+    pub(crate) server_policy_max_connections: Option<u32>,
+    pub(crate) server_negotiated_max_connections: Option<u32>,
+    pub(crate) aux_tasks: Vec<JoinHandle<()>>,
+    pub(crate) server_session_key: Option<[u8; 20]>,
+    pub(crate) aux_directions: std::sync::Arc<std::sync::Mutex<Vec<i32>>>,
+    pub(crate) endpoints_rr: Vec<String>,
+    pub(crate) sni_host: Option<String>,
     state: ConnectionState,
-    last_noop_sent: u64,
-    // Server-reported timeout (ms) for HTTP keep-alive / control channel guidance
+    pub(crate) last_noop_sent: u64,
     #[allow(dead_code)]
-    server_timeout_ms: Option<u32>,
-    // True once adapter<->dataplane bridging is fully set up
-    bridge_ready: bool,
-    // Prevent duplicate DHCP/monitor spawning across code paths
-    dhcp_spawned: bool,
-    // Optional state notification channel for embedders/FFI
-    state_tx: Option<mpsc::UnboundedSender<ClientState>>,
-    // Optional event channel for embedders/FFI
-    event_tx: Option<mpsc::UnboundedSender<ClientEvent>>,
+    pub(crate) server_timeout_ms: Option<u32>,
+    pub(crate) dhcp_spawned: bool,
+    pub(crate) state_tx: Option<mpsc::UnboundedSender<ClientState>>,
+    pub(crate) event_tx: Option<mpsc::UnboundedSender<ClientEvent>>,
 }
 
-use crate::types::{mask_to_prefix, settings_json_with_kind};
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-use crate::types::network_settings_from_lease;
+use crate::types::settings_json_with_kind;
 use crate::types::{ClientEvent, ClientState, EventLevel, NetworkSettings, SessionStats};
+use tun_rs::DeviceBuilder;
 
 impl VpnClient {
     /// Best-effort mapping of common SoftEther error codes to names for logs
-    fn softether_err_name(code: i64) -> &'static str {
+    pub(crate) fn softether_err_name(code: i64) -> &'static str {
         match code {
             0 => "ERR_NO_ERROR",
             1 => "ERR_INTERNAL_ERROR",
@@ -117,42 +93,16 @@ impl VpnClient {
     }
     /// Build a VpnClient from the shared config::ClientConfig (preferred public API)
     pub fn from_shared_config(cc: shared_config::ClientConfig) -> Result<Self> {
-        use base64::Engine as _;
-        // Map shared -> internal config (prefer SHA-0 of password+UPPER(username))
-        let auth = if let Some(b64) = cc.password_hash.clone() {
-            // Direct SHA-0 hash provided (20 bytes, base64)
-            AuthConfig::Password {
-                hashed_password: b64,
-            }
-        } else if let Some(pass) = cc.password.clone() {
-            // Derive SHA-0(password + UPPER(username)) locally
-            let hp = softether_password_hash(&pass, &cc.username);
-            let b64 = base64::prelude::BASE64_STANDARD.encode(hp);
-            AuthConfig::Password {
-                hashed_password: b64,
-            }
-        } else {
-            AuthConfig::Anonymous
-        };
-        let mut v = VpnConfig::new_anonymous(cc.server, cc.port, cc.hub);
-        v.username = cc.username;
-        v.auth = auth;
-        v.connection.max_connections = cc.max_connections;
-        v.connection.use_compression = cc.use_compress;
-        v.connection.use_encryption = cc.use_encrypt;
-        // respect TLS verification toggle
-        v.connection.skip_tls_verify = cc.skip_tls_verify;
-        // udp_port not wired in legacy config yet; reserved for future use
-        Self::new(v)
+        let runtime = RuntimeConfig::try_from(cc)?; // performs validation & hashing
+        Self::new_runtime(runtime)
     }
     /// Create a new VPN client with the given configuration
-    pub fn new(config: VpnConfig) -> Result<Self> {
-        config.validate()?;
+    #[allow(deprecated)]
+    pub fn new_runtime(runtime: RuntimeConfig) -> Result<Self> {
         // Prepare RR endpoints list before moving config
-        let endpoints_rr = vec![config.host.clone()];
-
+        let endpoints_rr = vec![runtime.host.clone()];
         Ok(Self {
-            config,
+            config: runtime,
             connection: None,
             session: None,
             session_manager: SessionManager::new(EngineConfig::default()),
@@ -162,8 +112,7 @@ impl VpnClient {
             is_connected: false,
             redirect_ticket: None,
             network_settings: None,
-            #[cfg(feature = "adapter")]
-            adapter: None,
+            tun: None,
             server_policy_max_connections: None,
             server_negotiated_max_connections: None,
             aux_tasks: Vec::new(),
@@ -174,12 +123,12 @@ impl VpnClient {
             state: ConnectionState::Idle,
             last_noop_sent: 0,
             server_timeout_ms: None,
-            bridge_ready: false,
             dhcp_spawned: false,
             state_tx: None,
             event_tx: None,
         })
     }
+    
 
     /// Connect to the VPN server
     pub async fn connect(&mut self) -> Result<()> {
@@ -305,6 +254,21 @@ impl VpnClient {
             self.is_connected = true;
             self.set_state(ConnectionState::Established);
             info!("SoftEther tunnel opened");
+            // Create a TUN device if not already created
+            if self.tun.is_none() {
+                match DeviceBuilder::new()
+                    .name(self.config.client.interface_name.clone())
+                    .mtu(1500)
+                    .build_sync() {
+                        Ok(dev) => {
+                            info!("Created TUN interface: {}", self.config.client.interface_name);
+                            self.tun = Some(dev);
+                        }
+                        Err(e) => {
+                            warn!("Failed to create TUN interface: {}", e);
+                        }
+                    }
+            }
             // Apply DHCP timing from config via environment overrides consumed by dhcp.rs
             std::env::set_var(
                 "RUST_DHCP_SETTLE_MS",
@@ -329,152 +293,8 @@ impl VpnClient {
                 return Err(e);
             }
             // Create adapter and start bridging so DHCP can flow
-            if let Err(e) = self.start_adapter_and_bridge().await {
-                warn!("Failed to start adapter bridging: {}", e);
-            }
-            // Try DHCP over dataplane on macOS when no assigned IP from server
-            #[cfg(target_os = "macos")]
-            if self.bridge_ready
-                && self
-                    .network_settings
-                    .as_ref()
-                    .and_then(|n| n.assigned_ipv4)
-                    .is_none()
-            {
-                #[cfg(feature = "adapter")]
-                if let (Some(dp), Some(adp)) = (self.dataplane.clone(), self.adapter.as_ref()) {
-                    let ifname = adp.name().to_string();
-                    // Ensure the dataplane has at least one registered link before attempting DHCP
-                    {
-                        let start = std::time::Instant::now();
-                        while dp.summary().total_links == 0
-                            && start.elapsed() < Duration::from_secs(3)
-                        {
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                        }
-                    }
-                    // Attempt in-tunnel DHCP first; only kick system DHCP later if needed
-                    let mut mac = [0u8; 6];
-                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                    use std::hash::Hash;
-                    use std::hash::Hasher;
-                    adp.name().hash(&mut h);
-                    let v = h.finish();
-                    mac.copy_from_slice(&[
-                        (v as u8) | 0x02,
-                        ((v >> 8) as u8),
-                        ((v >> 16) as u8),
-                        ((v >> 24) as u8),
-                        ((v >> 32) as u8),
-                        ((v >> 40) as u8),
-                    ]);
-                    mac[0] = (mac[0] & 0b1111_1110) | 0b0000_0010; // locally administered, unicast
-                    let dhcp = DhcpClient::new(dp, mac);
-                    info!("Attempting DHCP over tunnel on {}", ifname);
-
-                    // Fallback: after configured delay without success, nudge macOS DHCP in parallel
-                    let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
-                    let ifname_kick = ifname.clone();
-                    let kick_after = self.config.client.dhcp_fallback_after_ms;
-                    let kick_timeout = self.config.client.dhcp_kick_timeout_ms;
-                    let fallback = tokio::spawn(async move {
-                        let delay = Duration::from_millis(kick_after);
-                        let timed_out = tokio::time::timeout(delay, &mut cancel_rx).await.is_err();
-                        if timed_out {
-                            crate::vpnclient::network_config::kick_dhcp_until_ip(
-                                &ifname_kick,
-                                Duration::from_millis(kick_timeout),
-                            )
-                            .await;
-                        }
-                    });
-                    let lease = dhcp
-                        .run_once(&ifname, Duration::from_secs(30))
-                        .await
-                        .ok()
-                        .flatten();
-                    if let Some(lease) = lease {
-                        let _ = cancel_tx.send(());
-                        // Best-effort: avoid a dangling task if not used
-                        if !fallback.is_finished() {
-                            self.aux_tasks.push(fallback);
-                        }
-                        // Reflect DHCP lease in network_settings for consistent summary logs
-                        self.network_settings = Some(network_settings_from_lease(&lease));
-                        // Notify embedders that settings are available now (JSON event 1001)
-                        self.emit_settings_snapshot();
-
-                        self.log_adapter_summary();
-                        // Now that we have a lease, start a brief monitor to surface final IP/DNS/Connected
-                        // Avoid spawning the generic macOS interface monitor here to prevent
-                        // duplicate "IP Address/DNS/Connected" messages sourced from system DNS.
-                        // Optionally apply DNS on macOS (best-effort), similar to apply_network_settings
-                        #[cfg(target_os = "macos")]
-                        if self.config.connection.apply_dns {
-                            use tokio::process::Command;
-                            if let Some(ref ns2) = self.network_settings {
-                                if !ns2.dns_servers.is_empty() {
-                                    let mut service_name: Option<String> =
-                                        self.config.client.macos_dns_service_name.clone();
-                                    if service_name.is_none() {
-                                        // Try to detect a reasonable default service name
-                                        let list = Command::new("bash")
-                                                .arg("-c")
-                                                .arg("networksetup -listnetworkserviceorder | sed -n 's/.*Device: (\\(.*\\)).*/\\1/p'")
-                                                .output()
-                                                .await
-                                                .ok();
-                                        if let Some(out) = list {
-                                            let services = String::from_utf8_lossy(&out.stdout);
-                                            if services.contains(&ifname) {
-                                                service_name = Some("Wi-Fi".to_string());
-                                            }
-                                        }
-                                    }
-                                    if let Some(svc) = service_name {
-                                        let args = ns2
-                                            .dns_servers
-                                            .iter()
-                                            .map(|d| d.to_string())
-                                            .collect::<Vec<_>>()
-                                            .join(" ");
-                                        let cmd = format!(
-                                            "networksetup -setdnsservers '{}' {}",
-                                            svc.replace("'", "'\\''"),
-                                            args
-                                        );
-                                        if let Ok(out) =
-                                            Command::new("bash").arg("-c").arg(&cmd).output().await
-                                        {
-                                            if out.status.success() {
-                                                info!("Applied DNS servers to service '{}'", svc);
-                                            } else {
-                                                warn!(
-                                                    "Failed to apply macOS DNS: {}",
-                                                    String::from_utf8_lossy(&out.stderr)
-                                                );
-                                            }
-                                        }
-                                    } else {
-                                        info!(
-                                                "(macOS) DNS servers suggested: {} (manual apply with: networksetup -setdnsservers <ServiceName> <servers> )",
-                                                ns2.dns_servers.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ")
-                                            );
-                                    }
-                                }
-                            }
-                        }
-                        self.spawn_additional_links();
-                        self.start_connections_summary_logger();
-                        info!("VPN connection established successfully");
-                        return Ok(());
-                    }
-                    // No lease yet; defer to apply_network_settings() to kick system DHCP/monitor if needed
-                }
-            }
-
-            // On iOS, attempt DHCP over dataplane when server did not provide IP settings
-            #[cfg(target_os = "ios")]
+            // Bridging via old adapter removed; future: integrate direct tun-rs dataplane if needed
+            // If server did not push IP settings, attempt an in-tunnel DHCP negotiation (all platforms supporting rand/tun)
             if self
                 .network_settings
                 .as_ref()
@@ -482,35 +302,31 @@ impl VpnClient {
                 .is_none()
             {
                 if let Some(dp) = self.dataplane.clone() {
-                    // Wait briefly for at least one TX-capable link to register
+                    // wait briefly for at least one TX-capable link
                     let start = std::time::Instant::now();
-                    while dp.summary().total_links == 0 && start.elapsed() < Duration::from_secs(3)
-                    {
+                    while dp.summary().total_links == 0 && start.elapsed() < Duration::from_secs(3) {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
-                    // Generate a locally-administered, unicast MAC; stable enough for a single run
                     let mut mac = [0u8; 6];
-                    rand::rng().fill_bytes(&mut mac);
-                    mac[0] = (mac[0] & 0b1111_1110) | 0b0000_0010;
-                    let dhcp = DhcpClient::new(dp, mac);
-                    info!("Attempting DHCP over tunnel (iOS)");
-                    let lease = dhcp
-                        .run_once("utun", Duration::from_secs(30))
-                        .await
-                        .ok()
-                        .flatten();
-                    if let Some(lease) = lease {
-                        self.network_settings = Some(network_settings_from_lease(&lease));
-                        // Notify embedders that settings are available now (JSON event 1001)
-                        self.emit_settings_snapshot();
-                        // No platform adapter apply on iOS; extension will consume settings via FFI JSON/event
-                        self.spawn_additional_links();
-                        self.start_connections_summary_logger();
-                        info!("VPN connection established successfully");
-                        return Ok(());
+                    #[allow(unused_mut)]
+                    let mut rng = rand::rng();
+                    use rand::RngCore;
+                    rng.fill_bytes(&mut mac);
+                    mac[0] = (mac[0] & 0b1111_1110) | 0b0000_0010; // locally administered unicast
+                    let mut dhcp = crate::dhcp::DhcpClient::new(dp, mac);
+                    info!("Attempting DHCP over tunnel");
+                    match dhcp.run_once(&self.config.client.interface_name, Duration::from_secs(30)).await {
+                        Ok(Some(lease)) => {
+                            self.network_settings = Some(crate::types::network_settings_from_lease(&lease));
+                            self.emit_settings_snapshot();
+                            info!("DHCP lease acquired: {}", lease.client_ip);
+                        }
+                        Ok(None) => warn!("No DHCP offer/ack within timeout"),
+                        Err(e) => warn!("DHCP negotiation failed: {e}"),
                     }
                 }
             }
+
             // Attempt to apply network settings (best-effort); if DHCP is used, monitor will print upon success
             if let Err(e) = self.apply_network_settings().await {
                 warn!("Failed to apply network settings: {}", e);
@@ -580,20 +396,40 @@ impl VpnClient {
             connection.close()?;
         }
 
+        // Tear down TUN interface (best-effort)
+        if let Some(_tun) = self.tun.take() {
+            #[cfg(target_os = "linux")]
+            {
+                use tokio::process::Command;
+                let _ = Command::new("ip")
+                    .arg("link")
+                    .arg("set")
+                    .arg(self.config.client.interface_name.clone())
+                    .arg("down")
+                    .output()
+                    .await;
+            }
+            #[cfg(target_os = "macos")]
+            {
+                use tokio::process::Command;
+                let _ = Command::new("ifconfig")
+                    .arg(self.config.client.interface_name.clone())
+                    .arg("down")
+                    .output()
+                    .await;
+            }
+        }
+
         // Abort auxiliary tasks
         for handle in self.aux_tasks.drain(..) {
             handle.abort();
         }
 
         // Tear down virtual adapter (utun)
-        #[cfg(feature = "adapter")]
-        if let Some(mut adp) = self.adapter.take() {
-            let _ = adp.destroy().await;
-        }
+    // No adapter teardown needed after removing adapter integration
 
         self.is_connected = false;
         // Reset connection-scoped flags
-        self.bridge_ready = false;
         self.dhcp_spawned = false;
         self.set_state(ConnectionState::Idle);
         info!("VPN disconnected");
@@ -705,7 +541,7 @@ impl From<ConnectionState> for ClientState {
 }
 
 impl VpnClient {
-    fn emit_settings_snapshot(&self) {
+    pub(crate) fn emit_settings_snapshot(&self) {
         if let Some(tx) = &self.event_tx {
             let s = settings_json_with_kind(self.get_network_settings().as_ref(), true);
             let _ = tx.send(ClientEvent {
@@ -743,38 +579,7 @@ impl VpnClient {
 
     /// Log a concise adapter and network summary once configured
     fn log_adapter_summary(&self) {
-        #[cfg(feature = "adapter")]
-        if let Some(ref adp) = self.adapter {
-            if let Some(ref ns) = self.network_settings {
-                if let Some(ip) = ns.assigned_ipv4 {
-                    let bits = ns.subnet_mask.map(mask_to_prefix).unwrap_or(32);
-                    let gw = ns
-                        .gateway
-                        .map(|g| g.to_string())
-                        .unwrap_or_else(|| "".to_string());
-                    let dns_join = if ns.dns_servers.is_empty() {
-                        "".to_string()
-                    } else {
-                        ns.dns_servers
-                            .iter()
-                            .map(|d| d.to_string())
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    };
-                    info!(
-                        "[INFO] adapter name={} ip={}/{} gateway={} dns=[{}]",
-                        adp.name(),
-                        ip,
-                        bits,
-                        gw,
-                        dns_join
-                    );
-                    return;
-                }
-            }
-            // Fallback: adapter exists but we don't have IP yet
-            info!("[INFO] adapter name={} (awaiting IP/DNS)", adp.name());
-        }
+    // Adapter summary removed; retain network settings logs via existing events
     }
 
     // policy helpers moved to vpnclient/policy.rs
@@ -785,14 +590,22 @@ impl VpnClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::VpnConfig;
-
     #[test]
     fn test_vpn_client_creation() -> Result<()> {
-        let config =
-            VpnConfig::new_anonymous("test.example.com".to_string(), 443, "TEST".to_string());
-
-        let client = VpnClient::new(config)?;
+        let shared = crate::shared_config::ClientConfig {
+            server: "test.example.com".into(),
+            port: 443,
+            hub: "TEST".into(),
+            username: "anonymous".into(),
+            password: None,
+            password_hash: None,
+            skip_tls_verify: false,
+            use_compress: false,
+            use_encrypt: true,
+            max_connections: 1,
+            udp_port: None,
+        };
+        let client = VpnClient::from_shared_config(shared)?;
         assert!(!client.is_connected());
         assert!(client.get_stats().is_none());
 

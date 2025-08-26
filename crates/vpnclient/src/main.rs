@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use config as shared_config;
+use vpnclient::shared_config as shared_config;
 use tracing::{error, info};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use vpnclient::{VpnClient, DEFAULT_CONFIG_FILE};

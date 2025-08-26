@@ -7,44 +7,17 @@ use std::ptr;
 use std::sync::{Arc, Mutex};
 
 use base64::Engine; // for STANDARD.decode()
-use serde::Deserialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::mpsc;
 
-use config::ClientConfig as SharedConfig;
+use vpnclient::ClientConfig as SharedConfig;
 use vpnclient::settings_json_with_kind;
 use vpnclient::ClientState;
 use vpnclient::VpnClient;
 use vpnclient::{ClientEvent, EventLevel};
 
-#[derive(Deserialize)]
-struct FfiConfig {
-    // mirror of config::ClientConfig; keep minimal for now
-    server: String,
-    port: u16,
-    hub: String,
-    username: String,
-    #[serde(default)]
-    password: Option<String>,
-    #[serde(default)]
-    password_hash: Option<String>,
-    #[serde(default)]
-    skip_tls_verify: bool,
-    #[serde(default = "default_true")]
-    use_compress: bool,
-    #[serde(default = "default_true")]
-    use_encrypt: bool,
-    #[serde(default = "default_max_conn")]
-    max_connections: u32,
-}
-
-fn default_true() -> bool {
-    true
-}
-fn default_max_conn() -> u32 {
-    1
-}
+// FfiConfig removed: directly deserialize JSON into SharedConfig (vpnclient::ClientConfig)
 
 #[derive(Clone, Copy)]
 struct RxCb {
@@ -167,21 +140,7 @@ pub struct softether_client_t {
     _private: [u8; 0],
 }
 
-fn make_shared_config(c: FfiConfig) -> SharedConfig {
-    SharedConfig {
-        server: c.server,
-        port: c.port,
-        hub: c.hub,
-        username: c.username,
-        password: c.password,
-        password_hash: c.password_hash,
-        skip_tls_verify: c.skip_tls_verify,
-        use_compress: c.use_compress,
-        use_encrypt: c.use_encrypt,
-        max_connections: c.max_connections,
-        udp_port: None,
-    }
-}
+// make_shared_config no longer needed
 
 #[no_mangle]
 pub extern "C" fn softether_client_create(json_config: *const c_char) -> *mut softether_client_t {
@@ -193,7 +152,7 @@ pub extern "C" fn softether_client_create(json_config: *const c_char) -> *mut so
         Ok(s) => s,
         Err(_) => return ptr::null_mut(),
     };
-    let parsed: FfiConfig = match serde_json::from_str(json) {
+    let parsed: SharedConfig = match serde_json::from_str(json) {
         Ok(v) => v,
         Err(_) => return ptr::null_mut(),
     };
@@ -205,8 +164,7 @@ pub extern "C" fn softether_client_create(json_config: *const c_char) -> *mut so
     };
 
     // Build vpnclient from shared config
-    let cc = make_shared_config(parsed);
-    let client = match vpnclient::VpnClient::from_shared_config(cc) {
+    let client = match vpnclient::VpnClient::from_shared_config(parsed) {
         Ok(c) => c,
         Err(_) => return ptr::null_mut(),
     };

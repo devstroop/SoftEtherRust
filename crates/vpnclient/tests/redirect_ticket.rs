@@ -5,8 +5,7 @@
 
 use base64::prelude::*;
 use cedar::AuthType;
-use client::config::{AuthConfig, VpnConfig};
-use client::vpnclient::VpnClient;
+use vpnclient::{VpnClient, ClientConfig};
 use mayaqua::Pack;
 
 #[test]
@@ -23,12 +22,20 @@ fn simulate_redirect_and_ticket_capture() {
         .unwrap();
 
     // Build client with password auth (hash content arbitrary for test)
-    let mut cfg = VpnConfig::new_anonymous("origin.example.com".into(), 443, "HUB".into());
-    cfg.auth = AuthConfig::Password {
-        hashed_password: BASE64_STANDARD.encode([0x22u8; 20]),
+    let cfg = ClientConfig {
+        server: "origin.example.com".into(),
+        port: 443,
+        hub: "HUB".into(),
+        username: "user".into(),
+        password: None,
+        password_hash: Some(BASE64_STANDARD.encode([0x22u8; 20])),
+        skip_tls_verify: false,
+        use_compress: false,
+        use_encrypt: true,
+        max_connections: 1,
+        udp_port: None,
     };
-
-    let mut client = VpnClient::new(cfg).expect("create vpn client");
+    let mut client = VpnClient::from_shared_config(cfg).expect("create vpn client");
 
     // Simulate redirect capture (mirrors logic in perform_authentication branch)
     if let Ok(ticket) = redirect_pack

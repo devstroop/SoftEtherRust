@@ -314,39 +314,6 @@ impl VpnClient {
         let ns = match &self.network_settings {
             Some(n) => n.clone(),
             None => {
-                #[cfg(feature = "adapter")]
-                {
-                    if self.adapter.is_none() {
-                        let name = self.config.client.interface_name.clone();
-                        self.adapter = Some(adapter::VirtualAdapter::new(name, None));
-                        if let Some(adp) = &mut self.adapter {
-                            adp.create().await?;
-                        }
-                    }
-                }
-                #[cfg(all(target_os = "macos", feature = "adapter"))]
-                {
-                    if self.bridge_ready && !self.dhcp_spawned {
-                        if let Some(adp) = &self.adapter {
-                            let ifname = adp.name().to_string();
-                            let ifname2 = ifname.clone();
-                            let h1 = tokio::spawn(async move {
-                                super::network_config::macos::kick_dhcp_until_ip(
-                                    &ifname,
-                                    std::time::Duration::from_secs(25),
-                                )
-                                .await;
-                            });
-                            let h2 = tokio::spawn(async move {
-                                super::network_config::macos::monitor_darwin_interfaces(&[ifname2])
-                                    .await;
-                            });
-                            self.aux_tasks.push(h1);
-                            self.aux_tasks.push(h2);
-                            self.dhcp_spawned = true;
-                        }
-                    }
-                }
                 return Ok(());
             }
         };
@@ -356,41 +323,11 @@ impl VpnClient {
             .iter()
             .any(|(k, v)| k.to_ascii_lowercase().contains("norouting") && *v != 0);
 
-        #[cfg(feature = "adapter")]
-        if self.adapter.is_none() {
-            let name = self.config.client.interface_name.clone();
-            self.adapter = Some(adapter::VirtualAdapter::new(name, None));
-            if let Some(adp) = &mut self.adapter {
-                adp.create().await?;
-            }
-        }
-        #[cfg(feature = "adapter")]
-        let adapter = self.adapter.as_ref().unwrap();
+    // Adapter creation removed (using tun-rs directly in future work)
 
         let ip = match ns.assigned_ipv4 {
             Some(i) => i,
             None => {
-                #[cfg(all(target_os = "macos", feature = "adapter"))]
-                {
-                    if self.bridge_ready && !self.dhcp_spawned {
-                        let ifname = adapter.name().to_string();
-                        let ifname2 = ifname.clone();
-                        let h1 = tokio::spawn(async move {
-                            super::network_config::macos::kick_dhcp_until_ip(
-                                &ifname,
-                                std::time::Duration::from_secs(25),
-                            )
-                            .await;
-                        });
-                        let h2 = tokio::spawn(async move {
-                            super::network_config::macos::monitor_darwin_interfaces(&[ifname2])
-                                .await;
-                        });
-                        self.aux_tasks.push(h1);
-                        self.aux_tasks.push(h2);
-                        self.dhcp_spawned = true;
-                    }
-                }
                 return Ok(());
             }
         };
@@ -406,26 +343,72 @@ impl VpnClient {
             info!("[INFO] network_settings_applying");
         }
 
-        #[cfg(feature = "adapter")]
-        adapter
-            .set_ip_address(&ip.to_string(), &mask.to_string())
-            .await?;
+        // Configure IP on the created TUN interface (best-effort, platform specific)
+        #[cfg(target_os = "linux")]
+        if let Some(_tun) = self.tun.as_ref() {
+            use tokio::process::Command;
+            let ifname = &self.config.client.interface_name;
+            // ip addr add <ip>/<cidr> dev <ifname>
+            let _ = Command::new("ip")
+                .arg("addr")
+                .arg("add")
+                .arg(format!("{}/{}", ip, mask_to_prefix(mask)))
+                .arg("dev")
+                .arg(ifname)
+                .output()
+                .await;
+            let _ = Command::new("ip")
+                .arg("link")
+                .arg("set")
+                .arg(ifname)
+                .arg("up")
+                .output()
+                .await;
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(_tun) = self.tun.as_ref() {
+            use tokio::process::Command;
+            let ifname = &self.config.client.interface_name;
+            // ifconfig <ifname> inet <ip> <mask> up
+            let _ = Command::new("ifconfig")
+                .arg(ifname)
+                .arg("inet")
+                .arg(ip.to_string())
+                .arg(mask.to_string())
+                .arg("up")
+                .output()
+                .await;
+        }
 
         let cidr = mask_to_prefix(mask);
-        #[cfg(feature = "adapter")]
-        info!("Interface {}: {}/{}", adapter.name(), ip, cidr);
+    info!("Assigned interface IP {}/{}", ip, cidr);
 
         if !no_routing {
             if let Some(gw) = ns.gateway {
-                #[cfg(feature = "adapter")]
-                let _ = adapter
-                    .add_route("0.0.0.0/0", &gw.to_string())
-                    .await
-                    .map_err(|e| {
-                        warn!("Failed to add default route: {}", e);
-                        e
-                    });
                 info!("Add IPv4 default route");
+                #[cfg(target_os = "linux")]
+                if let Some(_tun) = self.tun.as_ref() {
+                    use tokio::process::Command;
+                    let _ = Command::new("ip")
+                        .arg("route")
+                        .arg("add")
+                        .arg("default")
+                        .arg("via")
+                        .arg(gw.to_string())
+                        .output()
+                        .await;
+                }
+                #[cfg(target_os = "macos")]
+                if let Some(_tun) = self.tun.as_ref() {
+                    use tokio::process::Command;
+                    // On macOS adding a default route may require sudo; attempt silently
+                    let _ = Command::new("route")
+                        .arg("add")
+                        .arg("default")
+                        .arg(gw.to_string())
+                        .output()
+                        .await;
+                }
             }
         }
 
@@ -435,9 +418,8 @@ impl VpnClient {
         #[cfg(target_os = "macos")]
         {
             use tokio::process::Command;
-            #[cfg(feature = "adapter")]
             let _ = Command::new("ifconfig")
-                .arg(adapter.name())
+                .arg(self.config.client.interface_name.clone())
                 .arg("mtu")
                 .arg("1500")
                 .output()
@@ -446,12 +428,11 @@ impl VpnClient {
         #[cfg(target_os = "linux")]
         {
             use tokio::process::Command;
-            #[cfg(feature = "adapter")]
             let _ = Command::new("ip")
                 .arg("link")
                 .arg("set")
                 .arg("dev")
-                .arg(adapter.name())
+                .arg(self.config.client.interface_name.clone())
                 .arg("mtu")
                 .arg("1500")
                 .output()
@@ -554,17 +535,7 @@ impl VpnClient {
             }
         }
 
-        #[cfg(target_os = "macos")]
-        {
-            #[cfg(feature = "adapter")]
-            {
-                let ifname = adapter.name().to_string();
-                let h = tokio::spawn(async move {
-                    super::network_config::macos::monitor_darwin_interfaces(&[ifname]).await;
-                });
-                self.aux_tasks.push(h);
-            }
-        }
+    // macOS interface monitoring skipped (adapter removed)
 
         Ok(())
     }

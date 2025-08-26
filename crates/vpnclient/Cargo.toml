@@ -11,11 +11,10 @@ name = "vpnclient"
 path = "src/main.rs"
 
 [dependencies]
-mayaqua = { path = "../mayaqua" }
-cedar = { path = "../cedar" }
-pencore = { path = "../pencore" }
-adapter = { path = "../adapter", optional = true }
-config = { path = "../config" }
+mayaqua = { path = "../../libs/mayaqua" }
+cedar = { path = "../../libs/cedar" }
+tun-rs = { path = "../../libs/tun-rs" }
+dhcproto = { path = "../../libs/dhcproto" }
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }
@@ -41,20 +40,19 @@ base64 = "0.22"
 hex = "0.4"
 rand = { workspace = true }
 chrono = { version = "0.4", features = ["clock"] }
+thiserror = "1.0"
 
 # Error handling
 anyhow = "1.0"
-thiserror = "1.0"
 tempfile = "3.8"
 
 [features]
-default = ["adapter"]
+default = []
 trace = []
 adapter-tests = []
 test-redirect = []
 dev-proto = []
 allow-insecure = []
-adapter = ["dep:adapter"]
 
 # Platform-specific network adapter
 [target.'cfg(target_os = "macos")'.dependencies]
