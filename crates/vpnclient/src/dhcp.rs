@@ -54,17 +54,24 @@ impl DhcpClient {
     pub async fn run_once(&mut self, _iface_name: &str, timeout: Duration) -> Result<Option<Lease>> {
         let discover = self.build_discover()?;
         self.send_frame(discover);
-        debug!("DHCP DISCOVER sent xid={:#x}", self.xid);
+        info!("DHCP DISCOVER sent xid={:#x}", self.xid);
         let deadline = Instant::now() + timeout;
-        let offer = match self.wait_for(v4::MessageType::Offer, deadline).await? { Some(m) => m, None => return Ok(None) };
+        let offer = match self.wait_for(v4::MessageType::Offer, deadline).await? {
+            Some(m) => m,
+            None => {
+                info!("DHCP OFFER wait timed out xid={:#x}", self.xid);
+                return Ok(None);
+            }
+        };
         let request = self.build_request(&offer)?;
         self.send_frame(request);
-        debug!("DHCP REQUEST sent xid={:#x}", self.xid);
+        info!("DHCP REQUEST sent xid={:#x}", self.xid);
         if let Some(ack) = self.wait_for(v4::MessageType::Ack, deadline).await? {
             let lease = self.lease_from_ack(&ack)?;
             info!("DHCP lease ip={} router={:?} dns={:?}", lease.client_ip, lease.router, lease.dns_servers);
             return Ok(Some(lease));
         }
+        info!("DHCP ACK wait timed out xid={:#x}", self.xid);
         Ok(None)
     }
 

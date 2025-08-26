@@ -80,7 +80,7 @@ pub struct VpnClient {
     lease_acquired_at: Option<u64>,
     lease_acquired_at_atomic: Arc<AtomicU64>,
     lease_health_warned: bool,
-    dhcpv6_lease: Option<crate::dhcpv6::LeaseV6>,
+    dhcpv6_lease: std::sync::Arc<std::sync::Mutex<Option<crate::dhcpv6::LeaseV6>>>,
 }
 
 use crate::types::settings_json_with_kind;
@@ -98,12 +98,19 @@ pub struct DhcpMetrics {
     rediscover_attempts: AtomicU64,
     rediscover_success: AtomicU64,
     failures: AtomicU64,
+    v6_renew_attempts: AtomicU64,
+    v6_renew_success: AtomicU64,
+    v6_rebind_attempts: AtomicU64,
+    v6_rebind_success: AtomicU64,
+    v6_rediscover_attempts: AtomicU64,
+    v6_rediscover_success: AtomicU64,
+    v6_failures: AtomicU64,
 }
 
 impl DhcpMetrics {
-    fn new() -> Self { Self { renew_attempts: 0.into(), renew_success: 0.into(), rebind_attempts: 0.into(), rebind_success: 0.into(), rediscover_attempts: 0.into(), rediscover_success: 0.into(), failures: 0.into() } }
+    fn new() -> Self { Self { renew_attempts: 0.into(), renew_success: 0.into(), rebind_attempts: 0.into(), rebind_success: 0.into(), rediscover_attempts: 0.into(), rediscover_success: 0.into(), failures: 0.into(), v6_renew_attempts: 0.into(), v6_renew_success: 0.into(), v6_rebind_attempts: 0.into(), v6_rebind_success: 0.into(), v6_rediscover_attempts: 0.into(), v6_rediscover_success: 0.into(), v6_failures: 0.into() } }
     #[allow(dead_code)]
-    pub fn snapshot(&self) -> (u64,u64,u64,u64,u64,u64,u64) { (
+    pub fn snapshot(&self) -> (u64,u64,u64,u64,u64,u64,u64,u64,u64,u64,u64,u64,u64,u64) { (
         self.renew_attempts.load(Ordering::Relaxed),
         self.renew_success.load(Ordering::Relaxed),
         self.rebind_attempts.load(Ordering::Relaxed),
@@ -111,6 +118,13 @@ impl DhcpMetrics {
         self.rediscover_attempts.load(Ordering::Relaxed),
         self.rediscover_success.load(Ordering::Relaxed),
         self.failures.load(Ordering::Relaxed),
+        self.v6_renew_attempts.load(Ordering::Relaxed),
+        self.v6_renew_success.load(Ordering::Relaxed),
+        self.v6_rebind_attempts.load(Ordering::Relaxed),
+        self.v6_rebind_success.load(Ordering::Relaxed),
+        self.v6_rediscover_attempts.load(Ordering::Relaxed),
+        self.v6_rediscover_success.load(Ordering::Relaxed),
+        self.v6_failures.load(Ordering::Relaxed),
     ) }
 }
 
@@ -174,7 +188,7 @@ impl VpnClient {
             lease_acquired_at: None,
             lease_acquired_at_atomic: Arc::new(AtomicU64::new(0)),
             lease_health_warned: false,
-            dhcpv6_lease: None,
+            dhcpv6_lease: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
     }
     
@@ -382,9 +396,9 @@ impl VpnClient {
                             _ = shutdown_rx.recv() => { break; }
                         }
                         if let Some(tx)=&tx {
-                            let (r_a,r_s,rb_a,rb_s,rd_a,rd_s,f)= metrics.snapshot();
-                            #[derive(serde::Serialize)] struct Metrics<'a>{kind:&'a str, renew_attempts:u64, renew_success:u64, rebind_attempts:u64, rebind_success:u64, rediscover_attempts:u64, rediscover_success:u64, failures:u64}
-                            if let Ok(json)=serde_json::to_string(&Metrics{kind:"dhcp_metrics", renew_attempts:r_a, renew_success:r_s, rebind_attempts:rb_a, rebind_success:rb_s, rediscover_attempts:rd_a, rediscover_success:rd_s, failures:f}) {
+                            let (r_a,r_s,rb_a,rb_s,rd_a,rd_s,f,v6_r_a,v6_r_s,v6_rb_a,v6_rb_s,v6_rd_a,v6_rd_s,v6_f)= metrics.snapshot();
+                            #[derive(serde::Serialize)] struct Metrics<'a>{kind:&'a str, renew_attempts:u64, renew_success:u64, rebind_attempts:u64, rebind_success:u64, rediscover_attempts:u64, rediscover_success:u64, failures:u64, v6_renew_attempts:u64, v6_renew_success:u64, v6_rebind_attempts:u64, v6_rebind_success:u64, v6_rediscover_attempts:u64, v6_rediscover_success:u64, v6_failures:u64}
+                            if let Ok(json)=serde_json::to_string(&Metrics{kind:"dhcp_metrics", renew_attempts:r_a, renew_success:r_s, rebind_attempts:rb_a, rebind_success:rb_s, rediscover_attempts:rd_a, rediscover_success:rd_s, failures:f, v6_renew_attempts:v6_r_a, v6_renew_success:v6_r_s, v6_rebind_attempts:v6_rb_a, v6_rebind_success:v6_rb_s, v6_rediscover_attempts:v6_rd_a, v6_rediscover_success:v6_rd_s, v6_failures:v6_f}) {
                                 let _=tx.send(ClientEvent{ level: EventLevel::Info, code:2211, message: json});
                             }
                         }
@@ -403,33 +417,32 @@ impl VpnClient {
             // Create adapter and start bridging so DHCP can flow
             // Bridging via old adapter removed; using tun-rs device directly.
             // If server did not push IP settings, attempt an in-tunnel DHCP negotiation (all platforms supporting rand/tun)
-            if self.config.client.enable_in_tunnel_dhcp && self
-                .network_settings
-                .as_ref()
-                .and_then(|n| n.assigned_ipv4)
-                .is_none()
-            {
-                // Attempt fast-path: load cached lease if present (reuse xid & iface if available)
-                if self.network_settings.is_none() {
+            if self.config.client.enable_in_tunnel_dhcp && self.network_settings.as_ref().and_then(|n| n.assigned_ipv4).is_none() {
+                // Attempt fast-path: load cached lease if present (reuse xid & iface if available) even if network_settings already Some but lacks IPv4
+                if self.network_settings.as_ref().and_then(|n| n.assigned_ipv4).is_none() {
                     if let Some(path) = &self.config.client.lease_cache_path {
                         if let Ok(data) = std::fs::read(path) {
                             if let Ok(lease) = serde_json::from_slice::<CachedLease>(&data) {
-                                // Basic staleness check: ensure not expired yet
                                 if lease.expires_at > current_unix_secs() {
-                                    self.network_settings = Some(crate::types::network_settings_from_lease(&lease.lease));
-                                    if let Some(ifc)= &lease.iface { self.actual_interface_name.get_or_insert(ifc.clone()); }
-                                    if let Some(x)= lease.xid { self.dhcp_xid = Some(x); }
-                                    if let Some(acq)= lease.acquired_at { self.lease_acquired_at = Some(acq); self.lease_acquired_at_atomic.store(acq, Ordering::Relaxed); }
-                                    info!("Loaded cached DHCP lease fast-path: {} (reusing xid {:?} iface {:?})", lease.lease.client_ip, self.dhcp_xid, self.actual_interface_name);
-                                    self.cached_lease_reused = true;
-                                    if let Some(lt)=lease.lease.lease_time { self.spawn_dhcp_renew_task(lease.lease.clone(), lt, self.actual_interface_name.clone().unwrap_or_else(|| self.config.client.interface_name.clone()), self.dhcp_xid); self.spawn_lease_health_monitor(lt.as_secs()); }
+                                    // Only apply if cached lease has a valid IPv4 (sanity: lease.lease.client_ip defaults to 0.0.0.0 if invalid)
+                                    if lease.lease.client_ip.octets() != [0,0,0,0] {
+                                        self.network_settings = Some(crate::types::network_settings_from_lease(&lease.lease));
+                                        if let Some(ifc)= &lease.iface { self.actual_interface_name.get_or_insert(ifc.clone()); }
+                                        if let Some(x)= lease.xid { self.dhcp_xid = Some(x); }
+                                        if let Some(acq)= lease.acquired_at { self.lease_acquired_at = Some(acq); self.lease_acquired_at_atomic.store(acq, Ordering::Relaxed); }
+                                        info!("Loaded cached DHCP lease fast-path: {} (reusing xid {:?} iface {:?})", lease.lease.client_ip, self.dhcp_xid, self.actual_interface_name);
+                                        self.cached_lease_reused = true;
+                                        if let Some(lt)=lease.lease.lease_time { self.spawn_dhcp_renew_task(lease.lease.clone(), lt, self.actual_interface_name.clone().unwrap_or_else(|| self.config.client.interface_name.clone()), self.dhcp_xid); self.spawn_lease_health_monitor(lt.as_secs()); }
+                                    }
                                 }
                             }
                         }
                     }
                 }
-                if self.network_settings.is_none() {
+                // If still no IPv4, perform active DHCP acquisition
+                if self.network_settings.as_ref().and_then(|n| n.assigned_ipv4).is_none() {
                 if let Some(dp) = self.dataplane.clone() {
+                    self.emit_event(EventLevel::Info, 299, "dhcp acquisition attempt");
                     // wait briefly for at least one TX-capable link
                     let start = std::time::Instant::now();
                     while dp.summary().total_links == 0 && start.elapsed() < Duration::from_secs(3) {
@@ -499,6 +512,8 @@ impl VpnClient {
                     let interface_auto = self.config.client.interface_auto;
                     let verbose = self.config.client.interface_snapshot_verbose;
                     let lease_cache_path = self.config.client.lease_cache_path.clone();
+                    let shared_v6 = self.dhcpv6_lease.clone();
+                    let metrics_clone = self.dhcp_metrics.clone();
                     self.aux_tasks.push(tokio::spawn(async move {
                         use rand::RngCore;
                         let mut mac=[0u8;6]; rand::rng().fill_bytes(&mut mac); mac[0]=(mac[0]&0b1111_1110)|0b0000_0010;
@@ -507,6 +522,7 @@ impl VpnClient {
                             Ok(Some(mut lease)) => {
                                 lease.acquired_at=Some(current_unix_secs());
                                 if let Some(p)=&lease_cache_path { let _=persist_v6_into_cache(p, &lease); }
+                                if let Ok(mut g)=shared_v6.lock() { *g=Some(lease.clone()); }
                                 if let Some(tx)=&event_tx { let json = serde_json::json!({
                                     "kind":"interface_snapshot","name":iface_name,
                                     "ipv4":serde_json::Value::Null,
@@ -522,7 +538,7 @@ impl VpnClient {
                                     "ipv6":lease.addr.map(|a|a.to_string()),
                                     "dns6": if lease.dns_servers.is_empty(){ None } else { Some(lease.dns_servers.iter().map(|d|d.to_string()).collect::<Vec<_>>()) }
                                 }); let _=tx.send(ClientEvent{ level: EventLevel::Info, code:2221, message: json.to_string()}); }
-                                if let Some(pref)=lease.preferred_lifetime { if pref.as_secs()>0 { spawn_dhcpv6_renew_loop(client, lease, event_tx.clone(), lease_cache_path.clone(), iface_name.clone(), interface_auto, verbose); } }
+                                if let Some(pref)=lease.preferred_lifetime { if pref.as_secs()>0 { spawn_dhcpv6_renew_loop(client, lease, shared_v6.clone(), event_tx.clone(), lease_cache_path.clone(), iface_name.clone(), interface_auto, verbose, metrics_clone.clone()); } }
                             }
                             Ok(None) => { if let Some(tx)=&event_tx { let _=tx.send(ClientEvent{ level: EventLevel::Warn, code:310, message:"dhcpv6 timeout".into()}); } }
                             Err(e) => { if let Some(tx)=&event_tx { let _=tx.send(ClientEvent{ level: EventLevel::Warn, code:310, message: format!("dhcpv6 error: {e}" )}); } }
@@ -549,11 +565,18 @@ impl VpnClient {
                 let iface_name = self.actual_interface_name.clone().unwrap_or(self.config.client.interface_name.clone());
                 let redact = self.config.client.interface_snapshot_redact;
                 let verbose = self.config.client.interface_snapshot_verbose;
+                let v6_shared = self.dhcpv6_lease.clone();
                 self.aux_tasks.push(tokio::spawn(async move {
                     loop {
                         tokio::time::sleep(Duration::from_secs(period)).await;
                         // Load from lease cache if exists
-                        if let Some(p)=&lease_path { if let Ok(data)=std::fs::read(p) { if let Ok(cl)=serde_json::from_slice::<CachedLease>(&data) { if let Some(json)=interface_snapshot_json(&cl.lease, &iface_name, cl.xid, cl.iface.is_some(), false, false, cl.acquired_at, redact, verbose, cl.v6.as_ref()) { if let Some(tx)=&event_tx { let _=tx.send(ClientEvent{ level: EventLevel::Info, code:2221, message: json}); } } } } }
+                        if let Some(p)=&lease_path { if let Ok(data)=std::fs::read(p) { if let Ok(cl)=serde_json::from_slice::<CachedLease>(&data) { 
+                            let mut sent=false;
+                            if let Some(json)=interface_snapshot_json(&cl.lease, &iface_name, cl.xid, cl.iface.is_some(), false, false, cl.acquired_at, redact, verbose, cl.v6.as_ref()) { if let Some(tx)=&event_tx { let _=tx.send(ClientEvent{ level: EventLevel::Info, code:2221, message: json}); sent=true; } }
+                            if !sent { // no v4 lease time; send IPv6-only snapshot if v6 live
+                                if let Ok(g)=v6_shared.lock() { if let Some(v6l)=g.as_ref() { if let Some(tx)=&event_tx { let ipv6=v6l.addr.map(|a|a.to_string()); let dns6= if v6l.dns_servers.is_empty(){ None } else { Some(v6l.dns_servers.iter().take(if verbose {8}else{4}).map(|d|d.to_string()).collect::<Vec<_>>()) }; let snap=serde_json::json!({"kind":"interface_snapshot","name":iface_name,"ipv4":serde_json::Value::Null,"router":serde_json::Value::Null,"dns":[],"lease_seconds_total":0,"lease_seconds_remaining":0,"renew_elapsed_secs":0,"t1_epoch":0,"t2_epoch":0,"expiry_epoch":0,"mtu":1500,"xid":serde_json::Value::Null,"cache_reused":false,"interface_auto":false,"initial":false,"verbose":verbose,"ipv6":ipv6,"dns6":dns6}); let _=tx.send(ClientEvent{ level: EventLevel::Info, code:2221, message: snap.to_string()}); } } }
+                            }
+                        } } }
                     }
                 }));
             }
@@ -614,10 +637,10 @@ impl VpnClient {
         }
 
         // Emit final DHCP metrics snapshot (code 222) including last interface snapshot if available
-        if self.config.client.enable_in_tunnel_dhcp {
+    if self.config.client.enable_in_tunnel_dhcp {
             if let Some(tx)=&self.event_tx {
-                let (r_a,r_s,rb_a,rb_s,rd_a,rd_s,f)= self.dhcp_metrics.snapshot();
-                #[derive(serde::Serialize)] struct Final<'a>{kind:&'a str,final_snapshot:bool,renew_attempts:u64,renew_success:u64,rebind_attempts:u64,rebind_success:u64,rediscover_attempts:u64,rediscover_success:u64,failures:u64,interface:Option<serde_json::Value>}
+        let (r_a,r_s,rb_a,rb_s,rd_a,rd_s,f,v6_r_a,v6_r_s,v6_rb_a,v6_rb_s,v6_rd_a,v6_rd_s,v6_f)= self.dhcp_metrics.snapshot();
+        #[derive(serde::Serialize)] struct Final<'a>{kind:&'a str,final_snapshot:bool,renew_attempts:u64,renew_success:u64,rebind_attempts:u64,rebind_success:u64,rediscover_attempts:u64,rediscover_success:u64,failures:u64,v6_renew_attempts:u64,v6_renew_success:u64,v6_rebind_attempts:u64,v6_rebind_success:u64,v6_rediscover_attempts:u64,v6_rediscover_success:u64,v6_failures:u64,interface:Option<serde_json::Value>}
                 let mut interface_json=None;
                 if let Some(ns)=&self.network_settings { // reconstruct minimal lease-like snapshot if we have network settings
                     // We no longer retain original lease struct here; only include IP summary
@@ -627,7 +650,7 @@ impl VpnClient {
                     let dns = if !ns.dns_servers.is_empty() { Some(ns.dns_servers.iter().map(|d| d.to_string()).collect()) } else { None };
                     if let Ok(v)=serde_json::to_value(MiniIface{name,ipv4,dns}) { interface_json=Some(v); }
                 }
-                if let Ok(json)=serde_json::to_string(&Final{kind:"dhcp_metrics",final_snapshot:true,renew_attempts:r_a,renew_success:r_s,rebind_attempts:rb_a,rebind_success:rb_s,rediscover_attempts:rd_a,rediscover_success:rd_s,failures:f,interface:interface_json}) {
+        if let Ok(json)=serde_json::to_string(&Final{kind:"dhcp_metrics",final_snapshot:true,renew_attempts:r_a,renew_success:r_s,rebind_attempts:rb_a,rebind_success:rb_s,rediscover_attempts:rd_a,rediscover_success:rd_s,failures:f,v6_renew_attempts:v6_r_a,v6_renew_success:v6_r_s,v6_rebind_attempts:v6_rb_a,v6_rebind_success:v6_rb_s,v6_rediscover_attempts:v6_rd_a,v6_rediscover_success:v6_rd_s,v6_failures:v6_f,interface:interface_json}) {
                     let _=tx.send(ClientEvent{ level: EventLevel::Info, code:222, message: json});
                 }
             }
@@ -887,7 +910,7 @@ fn persist_v6_into_cache(path: &str, v6: &crate::dhcpv6::LeaseV6) -> anyhow::Res
     Ok(())
 }
 
-fn spawn_dhcpv6_renew_loop(mut client: crate::dhcpv6::DhcpV6Client, mut lease: crate::dhcpv6::LeaseV6, event_tx: Option<tokio::sync::mpsc::UnboundedSender<ClientEvent>>, cache_path: Option<String>, iface: String, interface_auto: bool, verbose: bool) {
+fn spawn_dhcpv6_renew_loop(mut client: crate::dhcpv6::DhcpV6Client, mut lease: crate::dhcpv6::LeaseV6, shared: std::sync::Arc<std::sync::Mutex<Option<crate::dhcpv6::LeaseV6>>>, event_tx: Option<tokio::sync::mpsc::UnboundedSender<ClientEvent>>, cache_path: Option<String>, iface: String, interface_auto: bool, verbose: bool, metrics: Arc<DhcpMetrics>) {
     let handle = tokio::spawn(async move {
         loop {
             let now = current_unix_secs();
@@ -903,10 +926,13 @@ fn spawn_dhcpv6_renew_loop(mut client: crate::dhcpv6::DhcpV6Client, mut lease: c
             tokio::time::sleep(Duration::from_secs(sleep_secs.max(1))).await;
             // RENEW phase
             if let Some(tx)=&event_tx { let _=tx.send(ClientEvent{ level: EventLevel::Info, code:320, message:"dhcpv6 renew attempt".into()}); }
+            metrics.v6_renew_attempts.fetch_add(1, Ordering::Relaxed);
             if let Ok(frame)=client.build_renew(&lease) { client.send_frame(frame); }
             if let Ok(Some(reply))=client.wait_for(dhcproto::v6::MessageType::Reply, Instant::now()+Duration::from_secs(5)).await {
                 lease = client.lease_from_reply(&reply); lease.acquired_at=Some(current_unix_secs());
                 if let Some(p)=&cache_path { let _=persist_v6_into_cache(p, &lease); }
+                let _=shared.lock().map(|mut g| *g=Some(lease.clone()));
+                metrics.v6_renew_success.fetch_add(1, Ordering::Relaxed);
                 if let Some(tx)=&event_tx { let js=serde_json::json!({"kind":"interface_snapshot","name":iface,"ipv4":serde_json::Value::Null,"router":serde_json::Value::Null,"dns":[],"lease_seconds_total":0,"lease_seconds_remaining":0,"renew_elapsed_secs":0,"t1_epoch":0,"t2_epoch":0,"expiry_epoch":0,"mtu":1500,"xid":serde_json::Value::Null,"cache_reused":false,"interface_auto":interface_auto,"initial":false,"verbose":verbose,"ipv6":lease.addr.map(|a|a.to_string()),"dns6": if lease.dns_servers.is_empty(){ None } else { Some(lease.dns_servers.iter().map(|d|d.to_string()).collect::<Vec<_>>()) }}); let _=tx.send(ClientEvent{ level: EventLevel::Info, code:321, message: js.to_string()}); }
                 continue;
             } else { if let Some(tx)=&event_tx { let _=tx.send(ClientEvent{ level: EventLevel::Warn, code:322, message:"dhcpv6 renew failed".into()}); } }
@@ -915,16 +941,29 @@ fn spawn_dhcpv6_renew_loop(mut client: crate::dhcpv6::DhcpV6Client, mut lease: c
             let sleep_to_t2 = t2_deadline.saturating_sub(now2);
             if sleep_to_t2>0 { tokio::time::sleep(Duration::from_secs(sleep_to_t2)).await; }
             if let Some(tx)=&event_tx { let _=tx.send(ClientEvent{ level: EventLevel::Info, code:323, message:"dhcpv6 rebind attempt".into()}); }
+            metrics.v6_rebind_attempts.fetch_add(1, Ordering::Relaxed);
             if let Ok(frame)=client.build_rebind(&lease) { client.send_frame(frame); }
             if let Ok(Some(reply))=client.wait_for(dhcproto::v6::MessageType::Reply, Instant::now()+Duration::from_secs(6)).await {
                 lease = client.lease_from_reply(&reply); lease.acquired_at=Some(current_unix_secs());
                 if let Some(p)=&cache_path { let _=persist_v6_into_cache(p, &lease); }
+                let _=shared.lock().map(|mut g| *g=Some(lease.clone()));
+                metrics.v6_rebind_success.fetch_add(1, Ordering::Relaxed);
                 if let Some(tx)=&event_tx { let js=serde_json::json!({"kind":"interface_snapshot","name":iface,"ipv4":serde_json::Value::Null,"router":serde_json::Value::Null,"dns":[],"lease_seconds_total":0,"lease_seconds_remaining":0,"renew_elapsed_secs":0,"t1_epoch":0,"t2_epoch":0,"expiry_epoch":0,"mtu":1500,"xid":serde_json::Value::Null,"cache_reused":false,"interface_auto":interface_auto,"initial":false,"verbose":verbose,"ipv6":lease.addr.map(|a|a.to_string()),"dns6": if lease.dns_servers.is_empty(){ None } else { Some(lease.dns_servers.iter().map(|d|d.to_string()).collect::<Vec<_>>()) }}); let _=tx.send(ClientEvent{ level: EventLevel::Info, code:324, message: js.to_string()}); }
                 continue;
             } else { if let Some(tx)=&event_tx { let _=tx.send(ClientEvent{ level: EventLevel::Warn, code:325, message:"dhcpv6 rebind failed".into()}); } }
             // If still failed and past valid lifetime, exit
-            if current_unix_secs() > valid_deadline { if let Some(tx)=&event_tx { let _=tx.send(ClientEvent{ level: EventLevel::Warn, code:311, message:"dhcpv6 lease expired".into()}); } break; }
-            // Backoff small before retrying renew cycle
+            let now_end=current_unix_secs();
+            if now_end > valid_deadline { if let Some(tx)=&event_tx { let _=tx.send(ClientEvent{ level: EventLevel::Warn, code:311, message:"dhcpv6 lease expired".into()}); } break; }
+            // Rediscover (SOLICIT) fallback before expiry
+            if let Some(tx)=&event_tx { let _=tx.send(ClientEvent{ level: EventLevel::Warn, code:326, message:"dhcpv6 rediscover attempt".into()}); }
+            metrics.v6_rediscover_attempts.fetch_add(1, Ordering::Relaxed);
+            // Recreate client with new xid for fresh SOLICIT
+            let mac_duid = client.duid.clone();
+            let iaid = client.iaid;
+            let dp_clone = client.dataplane();
+            let mut new_client = crate::dhcpv6::DhcpV6Client::new_with_ids(dp_clone, [0,0,0,0,0,0], mac_duid.clone(), iaid);
+            if let Ok(Some(new_lease)) = new_client.run_once(Duration::from_secs(15)).await { lease=new_lease; if let Some(p)=&cache_path { let _=persist_v6_into_cache(p, &lease); } let _=shared.lock().map(|mut g| *g=Some(lease.clone())); metrics.v6_rediscover_success.fetch_add(1, Ordering::Relaxed); if let Some(tx)=&event_tx { let js=serde_json::json!({"kind":"interface_snapshot","name":iface,"ipv4":serde_json::Value::Null,"router":serde_json::Value::Null,"dns":[],"lease_seconds_total":0,"lease_seconds_remaining":0,"renew_elapsed_secs":0,"t1_epoch":0,"t2_epoch":0,"expiry_epoch":0,"mtu":1500,"xid":serde_json::Value::Null,"cache_reused":false,"interface_auto":interface_auto,"initial":false,"verbose":verbose,"ipv6":lease.addr.map(|a|a.to_string()),"dns6": if lease.dns_servers.is_empty(){ None } else { Some(lease.dns_servers.iter().map(|d|d.to_string()).collect::<Vec<_>>()) }}); let _=tx.send(ClientEvent{ level: EventLevel::Info, code:327, message: js.to_string()}); }
+                client = new_client; continue; } else { metrics.v6_failures.fetch_add(1, Ordering::Relaxed); if let Some(tx)=&event_tx { let _=tx.send(ClientEvent{ level: EventLevel::Error, code:328, message:"dhcpv6 rediscover failed".into()}); } }
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     });
@@ -1063,7 +1102,9 @@ impl VpnClient {
             if let Some(path)=&self.config.client.lease_cache_path {
                 if let Ok(data)=std::fs::read(path) { if let Ok(cl)=serde_json::from_slice::<CachedLease>(&data) { if cl.acquired_at.is_some() { acquired_at = cl.acquired_at; } } }
             }
-            if let Some(json)=interface_snapshot_json(lease, iface, self.dhcp_xid, self.cached_lease_reused, self.config.client.interface_auto, initial, acquired_at, self.config.client.interface_snapshot_redact, self.config.client.interface_snapshot_verbose, self.dhcpv6_lease.as_ref()) {
+            let v6_guard = self.dhcpv6_lease.lock().ok();
+            let v6_ref = v6_guard.as_ref().and_then(|g| g.as_ref());
+            if let Some(json)=interface_snapshot_json(lease, iface, self.dhcp_xid, self.cached_lease_reused, self.config.client.interface_auto, initial, acquired_at, self.config.client.interface_snapshot_redact, self.config.client.interface_snapshot_verbose, v6_ref) {
                 let code = if initial { 2220 } else { 2221 };
                 let _=tx.send(ClientEvent{ level: EventLevel::Info, code, message: json.clone() });
                 if initial { self.initial_interface_snapshot_emitted = true; }
@@ -1095,6 +1136,10 @@ impl VpnClient {
 impl VpnClient {
     /// Expose a public snapshot of DHCP metrics for callers (API level)
     pub fn dhcp_metrics_snapshot(&self) -> Option<(u64,u64,u64,u64,u64,u64,u64)> {
+        if self.config.client.enable_in_tunnel_dhcp { let (a,b,c,d,e,f,g,_,_,_,_,_,_,_)= self.dhcp_metrics.snapshot(); Some((a,b,c,d,e,f,g)) } else { None }
+    }
+    /// Extended snapshot including IPv6 metrics.
+    pub fn dhcp_metrics_snapshot_v6(&self) -> Option<(u64,u64,u64,u64,u64,u64,u64,u64,u64,u64,u64,u64,u64,u64)> {
         if self.config.client.enable_in_tunnel_dhcp { Some(self.dhcp_metrics.snapshot()) } else { None }
     }
 
@@ -1137,7 +1182,12 @@ impl VpnClient {
         #[derive(serde::Serialize)] struct Snap<'a>{kind:&'a str,name:&'a str,ipv4:Option<String>,router:Option<String>,dns:Vec<String>,lease_seconds_total:u64,lease_seconds_remaining:u64,renew_elapsed_secs:u64,t1_epoch:u64,t2_epoch:u64,expiry_epoch:u64,mtu:Option<u32>,xid:Option<u32>,cache_reused:bool,interface_auto:bool,initial:bool,verbose:bool,ipv6:Option<String>,dns6:Option<Vec<String>>}
         let now = current_unix_secs();
         let dns: Vec<String> = if redact { vec!["***".into()] } else { vec![] };
-        let snap = Snap{kind:"interface_snapshot", name:iface, ipv4:None, router:None, dns, lease_seconds_total:0, lease_seconds_remaining:0, renew_elapsed_secs:0, t1_epoch:now, t2_epoch:now, expiry_epoch:now, mtu:Some(1500), xid:self.dhcp_xid, cache_reused:false, interface_auto:self.config.client.interface_auto, initial:true, verbose, ipv6:None, dns6:None};
+        // Try to incorporate IPv6 info if a v6 lease is already present (e.g. acquired before v4 or only v6 enabled)
+        let (ipv6,dns6) = {
+            let guard = self.dhcpv6_lease.lock().ok();
+            if let Some(g)=guard.as_ref() { if let Some(v6l)=g.as_ref() { let ipv6=v6l.addr.map(|a| if redact {"***".into()} else {a.to_string()}); let dns6 = if v6l.dns_servers.is_empty(){ None } else { Some(if redact { vec!["***".into()] } else { v6l.dns_servers.iter().take(if verbose {8}else{4}).map(|d|d.to_string()).collect() }) }; (ipv6,dns6) } else { (None,None) } } else { (None,None) }
+        };
+        let snap = Snap{kind:"interface_snapshot", name:iface, ipv4:None, router:None, dns, lease_seconds_total:0, lease_seconds_remaining:0, renew_elapsed_secs:0, t1_epoch:now, t2_epoch:now, expiry_epoch:now, mtu:Some(1500), xid:self.dhcp_xid, cache_reused:false, interface_auto:self.config.client.interface_auto, initial:true, verbose, ipv6, dns6};
         if let Ok(js)=serde_json::to_string(&snap){
             info!("Emitting placeholder interface snapshot (no IP info yet)");
             self.emit_event(EventLevel::Info,2220,js);

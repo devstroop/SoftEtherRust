@@ -51,6 +51,8 @@ impl DhcpV6Client {
         Self { dp, rx, duid, iaid, xid }
     }
 
+    pub fn dataplane(&self) -> DataPlane { self.dp.clone() }
+
     fn build_solicit(&self) -> Result<Vec<u8>> {
         use dhcproto::v6::{Message, DhcpOption, ORO};
         let mut msg = Message::new(MT::Solicit);
