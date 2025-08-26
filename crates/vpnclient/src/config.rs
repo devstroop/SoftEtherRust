@@ -107,7 +107,7 @@ impl TryFrom<shared_config::ClientConfig> for RuntimeConfig {
             AuthConfig::Anonymous
         };
         let mut client_defaults = ClientRuntime::default();
-        if let Some(iv) = c.dhcp_metrics_interval_secs { client_defaults.dhcp_metrics_interval_secs = iv.max(10); }
+    if let Some(iv) = c.dhcp_metrics_interval_secs { client_defaults.dhcp_metrics_interval_secs = iv.clamp(10, 86_400); }
         Ok(Self {
             host: c.server.clone(),
             port: c.port,

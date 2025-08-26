@@ -74,6 +74,7 @@ pub struct VpnClient {
     pub(crate) dhcp_xid: Option<u32>,
     pub(crate) dhcp_metrics: Arc<DhcpMetrics>,
     pub(crate) actual_interface_name: Option<String>,
+    metrics_shutdown_tx: Option<mpsc::UnboundedSender<()>>,
 }
 
 use crate::types::settings_json_with_kind;
@@ -161,6 +162,7 @@ impl VpnClient {
             dhcp_xid: None,
             dhcp_metrics: Arc::new(DhcpMetrics::new()),
             actual_interface_name: None,
+            metrics_shutdown_tx: None,
         })
     }
     
@@ -358,17 +360,15 @@ impl VpnClient {
             if self.config.client.enable_in_tunnel_dhcp {
                 let tx = self.event_tx.clone();
                 let metrics = self.dhcp_metrics.clone();
-                let interval = self.config.client.dhcp_metrics_interval_secs.max(10); // minimum 10s safety
-                // shutdown signal via oneshot
+                let interval = self.config.client.dhcp_metrics_interval_secs.max(10);
                 let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-                // store handle so we can push a shutdown signal during disconnect
+                self.metrics_shutdown_tx = Some(shutdown_tx);
                 self.aux_tasks.push(tokio::spawn(async move {
                     loop {
                         tokio::select! {
                             _ = tokio::time::sleep(Duration::from_secs(interval)) => {},
                             _ = shutdown_rx.recv() => { break; }
                         }
-                        if shutdown_rx.is_closed() { break; }
                         if let Some(tx)=&tx {
                             let (r_a,r_s,rb_a,rb_s,rd_a,rd_s,f)= metrics.snapshot();
                             #[derive(serde::Serialize)] struct Metrics<'a>{kind:&'a str, renew_attempts:u64, renew_success:u64, rebind_attempts:u64, rebind_success:u64, rediscover_attempts:u64, rediscover_success:u64, failures:u64}
@@ -378,8 +378,6 @@ impl VpnClient {
                         }
                     }
                 }));
-                // retain sender for disconnect guard
-                self.aux_tasks.push(tokio::spawn(async move { let _ = shutdown_tx; /* placeholder keeps channel alive until disconnect aborts */ }));
             }
             // Establish the first bulk data link via additional_connect before bridging/DHCP
             if let Err(e) = self.open_primary_data_link().await {
@@ -501,6 +499,9 @@ impl VpnClient {
 
         info!("Disconnecting from VPN server");
         self.set_state(ConnectionState::Disconnecting);
+
+    // Signal periodic metrics task (if running) to terminate early for clean shutdown
+    if let Some(tx)=self.metrics_shutdown_tx.take() { let _=tx.send(()); }
 
         // Stop dataplane first so its worker threads stop reading/writing
         if let Some(dp) = self.dataplane.take() {
@@ -746,7 +747,7 @@ struct CachedLease { lease: DhcpLease, expires_at: u64, #[serde(default)] iface:
 
 fn current_unix_secs() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() }
 
-fn persist_lease(path: &str, lease: &DhcpLease, iface: Option<&str>, xid: Option<u32>) { if let Some(d)=lease.lease_time { let cached=CachedLease{ lease: lease.clone(), expires_at: current_unix_secs()+d.as_secs(), iface: iface.map(|s|s.to_string()), xid }; if let Ok(data)=serde_json::to_vec(&cached){ let _=std::fs::write(path,data);} } }
+fn persist_lease(path: &str, lease: &DhcpLease, iface: Option<&str>, xid: Option<u32>) { if let Some(d)=lease.lease_time { let cached=CachedLease{ lease: lease.clone(), expires_at: current_unix_secs()+d.as_secs(), iface: iface.map(|s|s.to_string()), xid }; if let Ok(data)=serde_json::to_vec(&cached){ if std::fs::write(path,&data).is_ok() { #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; if let Ok(meta)=std::fs::metadata(path){ let mut p=meta.permissions(); p.set_mode(0o600); let _=std::fs::set_permissions(path,p); } } } } } }
 
 impl VpnClient {
     fn spawn_dhcp_renew_task(&mut self, lease: DhcpLease, _lease_time: std::time::Duration, iface: String, xid_initial: Option<u32>) {
