@@ -50,6 +50,14 @@ pub struct ClientConfig {
     pub use_encrypt: bool,
     pub max_connections: u32,
     pub udp_port: Option<u16>,
+    #[serde(default)]
+    pub enable_in_tunnel_dhcp: Option<bool>,
+    #[serde(default)]
+    pub lease_cache_path: Option<String>,
+    #[serde(default)]
+    pub interface_auto: Option<bool>,
+    #[serde(default)]
+    pub dhcp_metrics_interval_secs: Option<u64>,
 }
 
 impl Default for ClientConfig {
@@ -66,6 +74,10 @@ impl Default for ClientConfig {
             use_encrypt: true,
             max_connections: 1,
             udp_port: None,
+            enable_in_tunnel_dhcp: None,
+            lease_cache_path: None,
+            interface_auto: None,
+            dhcp_metrics_interval_secs: None,
         }
     }
 }

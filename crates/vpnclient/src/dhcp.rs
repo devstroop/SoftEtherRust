@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 use cedar::DataPlane;
 
 /// DHCP lease information
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Lease {
     pub client_ip: Ipv4Addr,
     pub server_ip: Option<Ipv4Addr>,
@@ -43,6 +43,14 @@ impl DhcpClient {
         Self { dp, mac, xid, rx }
     }
 
+    pub fn new_with_xid(dp: DataPlane, mac: [u8;6], xid: u32) -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        dp.set_rx_tap(tx);
+        Self { dp, mac, xid, rx }
+    }
+
+    pub fn xid(&self) -> u32 { self.xid }
+
     pub async fn run_once(&mut self, _iface_name: &str, timeout: Duration) -> Result<Option<Lease>> {
         let discover = self.build_discover()?;
         self.send_frame(discover);
@@ -61,10 +69,10 @@ impl DhcpClient {
     }
 
     fn build_discover(&self) -> Result<Vec<u8>> {
-    let mut msg = v4::Message::new_with_id(self.xid, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, &self.mac);
-    msg.set_opcode(v4::Opcode::BootRequest);
-    msg.set_htype(v4::HType::Eth);
-    msg.set_flags(v4::Flags::default().set_broadcast());
+        let mut msg = v4::Message::new_with_id(self.xid, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, &self.mac);
+        msg.set_opcode(v4::Opcode::BootRequest);
+        msg.set_htype(v4::HType::Eth);
+        msg.set_flags(v4::Flags::default().set_broadcast());
         msg.opts_mut().insert(v4::DhcpOption::MessageType(v4::MessageType::Discover));
         msg.opts_mut().insert(v4::DhcpOption::ParameterRequestList(vec![
             v4::OptionCode::SubnetMask,
@@ -72,14 +80,14 @@ impl DhcpClient {
             v4::OptionCode::DomainNameServer,
             v4::OptionCode::AddressLeaseTime,
         ]));
-        self.wrap_dhcp(&msg)
+        self.wrap_dhcp(&msg, Ipv4Addr::UNSPECIFIED, Ipv4Addr::new(255,255,255,255), true)
     }
 
     fn build_request(&self, offer: &v4::Message) -> Result<Vec<u8>> {
-    let mut msg = v4::Message::new_with_id(self.xid, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, &self.mac);
-    msg.set_opcode(v4::Opcode::BootRequest);
-    msg.set_htype(v4::HType::Eth);
-    msg.set_flags(v4::Flags::default().set_broadcast());
+        let mut msg = v4::Message::new_with_id(self.xid, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, &self.mac);
+        msg.set_opcode(v4::Opcode::BootRequest);
+        msg.set_htype(v4::HType::Eth);
+        msg.set_flags(v4::Flags::default().set_broadcast());
         msg.opts_mut().insert(v4::DhcpOption::MessageType(v4::MessageType::Request));
         if offer.yiaddr() != Ipv4Addr::UNSPECIFIED {
             msg.opts_mut().insert(v4::DhcpOption::RequestedIpAddress(offer.yiaddr()));
@@ -87,13 +95,64 @@ impl DhcpClient {
         if let Some(v4::DhcpOption::ServerIdentifier(sid)) = offer.opts().get(v4::OptionCode::ServerIdentifier) {
             msg.opts_mut().insert(v4::DhcpOption::ServerIdentifier(*sid));
         }
-        self.wrap_dhcp(&msg)
+        self.wrap_dhcp(&msg, Ipv4Addr::UNSPECIFIED, Ipv4Addr::new(255,255,255,255), true)
     }
 
-    fn wrap_dhcp(&self, msg: &v4::Message) -> Result<Vec<u8>> {
+    /// Build a broadcast RENEW/REBIND style REQUEST (broadcast IP/Ethernet)
+    pub fn build_renew_broadcast(&self, lease: &Lease) -> Result<Vec<u8>> {
+        let mut msg = v4::Message::new_with_id(self.xid, lease.client_ip, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, &self.mac);
+        msg.set_opcode(v4::Opcode::BootRequest);
+        msg.set_htype(v4::HType::Eth);
+        msg.set_flags(v4::Flags::default().set_broadcast());
+        msg.opts_mut().insert(v4::DhcpOption::MessageType(v4::MessageType::Request));
+        if let Some(sid) = lease.server_ip { msg.opts_mut().insert(v4::DhcpOption::ServerIdentifier(sid)); }
+        msg.opts_mut().insert(v4::DhcpOption::ParameterRequestList(vec![
+            v4::OptionCode::SubnetMask,
+            v4::OptionCode::Router,
+            v4::OptionCode::DomainNameServer,
+            v4::OptionCode::AddressLeaseTime,
+        ]));
+        self.wrap_dhcp(&msg, lease.client_ip, Ipv4Addr::new(255,255,255,255), true)
+    }
+
+    /// Build an attempted unicast RENEW to the original server (no broadcast flag, dst = server)
+    pub fn build_renew_unicast(&self, lease: &Lease) -> Result<Option<Vec<u8>>> {
+        let server = match lease.server_ip { Some(s) => s, None => return Ok(None) };
+        let mut msg = v4::Message::new_with_id(self.xid, lease.client_ip, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, &self.mac);
+        msg.set_opcode(v4::Opcode::BootRequest);
+        msg.set_htype(v4::HType::Eth);
+        msg.set_flags(v4::Flags::default());
+        msg.opts_mut().insert(v4::DhcpOption::MessageType(v4::MessageType::Request));
+        msg.opts_mut().insert(v4::DhcpOption::ServerIdentifier(server));
+        msg.opts_mut().insert(v4::DhcpOption::ParameterRequestList(vec![
+            v4::OptionCode::SubnetMask,
+            v4::OptionCode::Router,
+            v4::OptionCode::DomainNameServer,
+            v4::OptionCode::AddressLeaseTime,
+        ]));
+        Ok(Some(self.wrap_dhcp(&msg, lease.client_ip, server, false)?))
+    }
+
+    /// Build a REBIND (broadcast REQUEST without server identifier)
+    pub fn build_rebind(&self, lease: &Lease) -> Result<Vec<u8>> {
+        let mut msg = v4::Message::new_with_id(self.xid, lease.client_ip, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, &self.mac);
+        msg.set_opcode(v4::Opcode::BootRequest);
+        msg.set_htype(v4::HType::Eth);
+        msg.set_flags(v4::Flags::default().set_broadcast());
+        msg.opts_mut().insert(v4::DhcpOption::MessageType(v4::MessageType::Request));
+        msg.opts_mut().insert(v4::DhcpOption::ParameterRequestList(vec![
+            v4::OptionCode::SubnetMask,
+            v4::OptionCode::Router,
+            v4::OptionCode::DomainNameServer,
+            v4::OptionCode::AddressLeaseTime,
+        ]));
+        self.wrap_dhcp(&msg, lease.client_ip, Ipv4Addr::new(255,255,255,255), true)
+    }
+
+    fn wrap_dhcp(&self, msg: &v4::Message, src_ip: Ipv4Addr, dst_ip: Ipv4Addr, broadcast_eth: bool) -> Result<Vec<u8>> {
         let mut dhcp_buf = Vec::new();
-    let mut enc = v4::Encoder::new(&mut dhcp_buf);
-    msg.encode(&mut enc).context("encode dhcp")?;
+        let mut enc = v4::Encoder::new(&mut dhcp_buf);
+        msg.encode(&mut enc).context("encode dhcp")?;
         // UDP header
         let udp_len = 8 + dhcp_buf.len();
         let mut udp = Vec::with_capacity(8 + dhcp_buf.len());
@@ -111,23 +170,23 @@ impl DhcpClient {
         ip.extend_from_slice(&0u16.to_be_bytes()); // flags/frag
         ip.push(64); ip.push(17); // ttl, proto
         ip.extend_from_slice(&0u16.to_be_bytes()); // checksum placeholder
-        ip.extend_from_slice(&[0,0,0,0]); // src
-        ip.extend_from_slice(&[255,255,255,255]); // dst broadcast
+        ip.extend_from_slice(&src_ip.octets());
+        ip.extend_from_slice(&dst_ip.octets());
         let csum = ipv4_checksum(&ip);
         ip[10]=(csum>>8) as u8; ip[11]=(csum & 0xff) as u8;
         ip.extend_from_slice(&udp);
         // Ethernet
         let mut eth = Vec::with_capacity(14 + ip.len());
-        eth.extend_from_slice(&[0xff;6]);
+        if broadcast_eth { eth.extend_from_slice(&[0xff;6]); } else { eth.extend_from_slice(&[0u8;6]); }
         eth.extend_from_slice(&self.mac);
         eth.extend_from_slice(&0x0800u16.to_be_bytes());
         eth.extend_from_slice(&ip);
         Ok(eth)
     }
 
-    fn send_frame(&self, frame: Vec<u8>) { if !self.dp.send_frame(frame) { warn!("DHCP frame send failed (no link)"); } }
+    pub fn send_frame(&self, frame: Vec<u8>) { if !self.dp.send_frame(frame) { warn!("DHCP frame send failed (no link)"); } }
 
-    async fn wait_for(&mut self, ty: v4::MessageType, deadline: Instant) -> Result<Option<v4::Message>> {
+    pub async fn wait_for(&mut self, ty: v4::MessageType, deadline: Instant) -> Result<Option<v4::Message>> {
     use dhcproto::v4::Decoder;
         while Instant::now() < deadline {
             if let Some(frame) = self.rx.recv().await {
@@ -146,7 +205,7 @@ impl DhcpClient {
         Ok(None)
     }
 
-    fn lease_from_ack(&self, ack: &v4::Message) -> Result<Lease> {
+    pub fn lease_from_ack(&self, ack: &v4::Message) -> Result<Lease> {
     use dhcproto::v4::{DhcpOption, OptionCode as OC};
         let mut lease = Lease { client_ip: ack.yiaddr(), ..Default::default() };
     if let Some(DhcpOption::ServerIdentifier(ip)) = ack.opts().get(OC::ServerIdentifier) { lease.server_ip = Some(*ip); }

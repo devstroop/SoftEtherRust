@@ -26,7 +26,7 @@ pub(crate) fn local_hostname() -> String {
 }
 use cedar::{Session, SessionConfig};
 // use mayaqua::Pack; // not needed here post-refactor
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::signal;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -70,11 +70,42 @@ pub struct VpnClient {
     pub(crate) dhcp_spawned: bool,
     pub(crate) state_tx: Option<mpsc::UnboundedSender<ClientState>>,
     pub(crate) event_tx: Option<mpsc::UnboundedSender<ClientEvent>>,
+    pub(crate) dhcp_mac: Option<[u8;6]>,
+    pub(crate) dhcp_xid: Option<u32>,
+    pub(crate) dhcp_metrics: Arc<DhcpMetrics>,
+    pub(crate) actual_interface_name: Option<String>,
 }
 
 use crate::types::settings_json_with_kind;
 use crate::types::{ClientEvent, ClientState, EventLevel, NetworkSettings, SessionStats};
 use tun_rs::DeviceBuilder;
+use crate::dhcp::Lease as DhcpLease;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+pub struct DhcpMetrics {
+    renew_attempts: AtomicU64,
+    renew_success: AtomicU64,
+    rebind_attempts: AtomicU64,
+    rebind_success: AtomicU64,
+    rediscover_attempts: AtomicU64,
+    rediscover_success: AtomicU64,
+    failures: AtomicU64,
+}
+
+impl DhcpMetrics {
+    fn new() -> Self { Self { renew_attempts: 0.into(), renew_success: 0.into(), rebind_attempts: 0.into(), rebind_success: 0.into(), rediscover_attempts: 0.into(), rediscover_success: 0.into(), failures: 0.into() } }
+    #[allow(dead_code)]
+    pub fn snapshot(&self) -> (u64,u64,u64,u64,u64,u64,u64) { (
+        self.renew_attempts.load(Ordering::Relaxed),
+        self.renew_success.load(Ordering::Relaxed),
+        self.rebind_attempts.load(Ordering::Relaxed),
+        self.rebind_success.load(Ordering::Relaxed),
+        self.rediscover_attempts.load(Ordering::Relaxed),
+        self.rediscover_success.load(Ordering::Relaxed),
+        self.failures.load(Ordering::Relaxed),
+    ) }
+}
 
 impl VpnClient {
     /// Best-effort mapping of common SoftEther error codes to names for logs
@@ -126,6 +157,10 @@ impl VpnClient {
             dhcp_spawned: false,
             state_tx: None,
             event_tx: None,
+            dhcp_mac: None,
+            dhcp_xid: None,
+            dhcp_metrics: Arc::new(DhcpMetrics::new()),
+            actual_interface_name: None,
         })
     }
     
@@ -256,18 +291,50 @@ impl VpnClient {
             info!("SoftEther tunnel opened");
             // Create a TUN device if not already created
             if self.tun.is_none() {
-                match DeviceBuilder::new()
-                    .name(self.config.client.interface_name.clone())
-                    .mtu(1500)
-                    .build_sync() {
-                        Ok(dev) => {
-                            info!("Created TUN interface: {}", self.config.client.interface_name);
-                            self.tun = Some(dev);
+                #[cfg(target_os = "macos")]
+                {
+                    if self.config.client.interface_auto {
+                        match DeviceBuilder::new().mtu(1500).build_sync() {
+                            Ok(dev)=>{ if let Ok(n)=dev.name(){ self.actual_interface_name=Some(n.clone()); info!("Created TUN interface: {} (auto-assigned, forced)", n); self.emit_event(EventLevel::Info,221,format!("interface: {}", n)); } self.tun=Some(dev);} 
+                            Err(e)=>warn!("Failed to create TUN interface (auto-assigned, forced): {}", e)
                         }
-                        Err(e) => {
-                            warn!("Failed to create TUN interface: {}", e);
+                    } else {
+                        let requested = self.config.client.interface_name.clone();
+                        let mut created=false; let mut tried=Vec::new();
+                        if requested.starts_with("utun") {
+                            let base_index = requested[4..].parse::<u32>().unwrap_or(0);
+                            for idx in base_index..=base_index+32 {
+                                let cand=format!("utun{}", idx); tried.push(cand.clone());
+                                match DeviceBuilder::new().name(cand.clone()).mtu(1500).build_sync(){
+                                    Ok(dev)=>{ if let Ok(actual)=dev.name(){ self.actual_interface_name=Some(actual.clone()); info!("Created TUN interface: {} (after probing)", actual); self.emit_event(EventLevel::Info,221,format!("interface: {}", actual)); } self.tun=Some(dev); created=true; break; }
+                                    Err(e)=>{ if let Some(raw)=e.raw_os_error(){ if raw!=16 { warn!("Failed to create TUN interface {}: {}", cand, e); break; }} }
+                                }
+                            }
+                            if !created { info!("All probed utun names busy (tried: {:?}); falling back to auto-assignment", tried); }
+                        } else { info!("Interface name '{}' not macOS-style; using system auto-assignment", requested); }
+                        if !created && self.tun.is_none(){
+                            match DeviceBuilder::new().mtu(1500).build_sync(){
+                                Ok(dev)=>{ if let Ok(actual)=dev.name(){ self.actual_interface_name=Some(actual.clone()); info!("Created TUN interface: {} (auto-assigned)", actual); self.emit_event(EventLevel::Info,221,format!("interface: {}", actual)); } else { info!("Created TUN interface (auto-assigned)"); } self.tun=Some(dev); }
+                                Err(e)=>warn!("Failed to create TUN interface (auto-assigned): {}", e)
+                            }
                         }
                     }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    if self.config.client.interface_auto {
+                        match DeviceBuilder::new().mtu(1500).build_sync(){
+                            Ok(dev)=>{ if let Ok(n)=dev.name(){ self.actual_interface_name=Some(n.clone()); info!("Created TUN interface: {} (auto-assigned, forced)", n); self.emit_event(EventLevel::Info,221,format!("interface: {}", n)); } self.tun=Some(dev);} 
+                            Err(e)=>warn!("Failed to create TUN interface (auto-assigned, forced): {}", e)
+                        }
+                    } else {
+                        let ifname=self.config.client.interface_name.clone();
+                        match DeviceBuilder::new().name(ifname.clone()).mtu(1500).build_sync(){
+                            Ok(dev)=>{ if let Ok(n)=dev.name(){ self.actual_interface_name=Some(n.clone()); } info!("Created TUN interface: {}", ifname); self.emit_event(EventLevel::Info,221,format!("interface: {}", ifname)); self.tun=Some(dev);} 
+                            Err(e)=>warn!("Failed to create TUN interface: {}", e)
+                        }
+                    }
+                }
             }
             // Apply DHCP timing from config via environment overrides consumed by dhcp.rs
             std::env::set_var(
@@ -287,6 +354,33 @@ impl VpnClient {
                 format!("{}", self.config.client.dhcp_jitter_pct),
             );
             self.emit_event(EventLevel::Info, 220, "tunnel opened");
+            // Start periodic DHCP metrics emission (configurable interval) if DHCP enabled
+            if self.config.client.enable_in_tunnel_dhcp {
+                let tx = self.event_tx.clone();
+                let metrics = self.dhcp_metrics.clone();
+                let interval = self.config.client.dhcp_metrics_interval_secs.max(10); // minimum 10s safety
+                // shutdown signal via oneshot
+                let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+                // store handle so we can push a shutdown signal during disconnect
+                self.aux_tasks.push(tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(interval)) => {},
+                            _ = shutdown_rx.recv() => { break; }
+                        }
+                        if shutdown_rx.is_closed() { break; }
+                        if let Some(tx)=&tx {
+                            let (r_a,r_s,rb_a,rb_s,rd_a,rd_s,f)= metrics.snapshot();
+                            #[derive(serde::Serialize)] struct Metrics<'a>{kind:&'a str, renew_attempts:u64, renew_success:u64, rebind_attempts:u64, rebind_success:u64, rediscover_attempts:u64, rediscover_success:u64, failures:u64}
+                            if let Ok(json)=serde_json::to_string(&Metrics{kind:"dhcp_metrics", renew_attempts:r_a, renew_success:r_s, rebind_attempts:rb_a, rebind_success:rb_s, rediscover_attempts:rd_a, rediscover_success:rd_s, failures:f}) {
+                                let _=tx.send(ClientEvent{ level: EventLevel::Info, code:2211, message: json});
+                            }
+                        }
+                    }
+                }));
+                // retain sender for disconnect guard
+                self.aux_tasks.push(tokio::spawn(async move { let _ = shutdown_tx; /* placeholder keeps channel alive until disconnect aborts */ }));
+            }
             // Establish the first bulk data link via additional_connect before bridging/DHCP
             if let Err(e) = self.open_primary_data_link().await {
                 error!("Failed to establish primary data link: {}", e);
@@ -295,12 +389,29 @@ impl VpnClient {
             // Create adapter and start bridging so DHCP can flow
             // Bridging via old adapter removed; future: integrate direct tun-rs dataplane if needed
             // If server did not push IP settings, attempt an in-tunnel DHCP negotiation (all platforms supporting rand/tun)
-            if self
+            if self.config.client.enable_in_tunnel_dhcp && self
                 .network_settings
                 .as_ref()
                 .and_then(|n| n.assigned_ipv4)
                 .is_none()
             {
+                // Attempt fast-path: load cached lease if present (reuse xid & iface if available)
+                if self.network_settings.is_none() {
+                    if let Some(path) = &self.config.client.lease_cache_path {
+                        if let Ok(data) = std::fs::read(path) {
+                            if let Ok(lease) = serde_json::from_slice::<CachedLease>(&data) {
+                                // Basic staleness check: ensure not expired yet
+                                if lease.expires_at > current_unix_secs() {
+                                    self.network_settings = Some(crate::types::network_settings_from_lease(&lease.lease));
+                                    if let Some(ifc)= &lease.iface { self.actual_interface_name.get_or_insert(ifc.clone()); }
+                                    if let Some(x)= lease.xid { self.dhcp_xid = Some(x); }
+                                    info!("Loaded cached DHCP lease fast-path: {} (reusing xid {:?} iface {:?})", lease.lease.client_ip, self.dhcp_xid, self.actual_interface_name);
+                                }
+                            }
+                        }
+                    }
+                }
+                if self.network_settings.is_none() {
                 if let Some(dp) = self.dataplane.clone() {
                     // wait briefly for at least one TX-capable link
                     let start = std::time::Instant::now();
@@ -313,17 +424,27 @@ impl VpnClient {
                     use rand::RngCore;
                     rng.fill_bytes(&mut mac);
                     mac[0] = (mac[0] & 0b1111_1110) | 0b0000_0010; // locally administered unicast
-                    let mut dhcp = crate::dhcp::DhcpClient::new(dp, mac);
+            let dp_clone_for_dhcp = dp.clone();
+            let mut dhcp = crate::dhcp::DhcpClient::new(dp_clone_for_dhcp.clone(), mac);
                     info!("Attempting DHCP over tunnel");
-                    match dhcp.run_once(&self.config.client.interface_name, Duration::from_secs(30)).await {
+            let iface_for_dhcp = self.actual_interface_name.as_ref().unwrap_or(&self.config.client.interface_name).clone();
+            // Reuse cached xid if present
+            if let Some(xid)=self.dhcp_xid { dhcp = crate::dhcp::DhcpClient::new_with_xid(dp_clone_for_dhcp, mac, xid); }
+            match dhcp.run_once(&iface_for_dhcp, Duration::from_secs(30)).await {
                         Ok(Some(lease)) => {
                             self.network_settings = Some(crate::types::network_settings_from_lease(&lease));
                             self.emit_settings_snapshot();
                             info!("DHCP lease acquired: {}", lease.client_ip);
+                self.dhcp_mac = Some(mac);
+                            self.dhcp_xid = Some(dhcp.xid());
+                if let Some(path) = &self.config.client.lease_cache_path { persist_lease(path, &lease, self.actual_interface_name.as_deref().or(Some(&self.config.client.interface_name)), self.dhcp_xid); }
+                            // Spawn renewal task if lease time known
+                if let Some(lt) = lease.lease_time { let xid=self.dhcp_xid; self.spawn_dhcp_renew_task(lease, lt, iface_for_dhcp, xid); }
                         }
                         Ok(None) => warn!("No DHCP offer/ack within timeout"),
                         Err(e) => warn!("DHCP negotiation failed: {e}"),
                     }
+                }
                 }
             }
 
@@ -604,6 +725,10 @@ mod tests {
             use_encrypt: true,
             max_connections: 1,
             udp_port: None,
+            enable_in_tunnel_dhcp: Some(true),
+            lease_cache_path: None,
+            interface_auto: None,
+            dhcp_metrics_interval_secs: None,
         };
         let client = VpnClient::from_shared_config(shared)?;
         assert!(!client.is_connected());
@@ -613,4 +738,97 @@ mod tests {
     }
 
     // removed tests that referenced legacy create_auth_pack
+}
+
+// DHCP lease caching & renewal helpers
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedLease { lease: DhcpLease, expires_at: u64, #[serde(default)] iface: Option<String>, #[serde(default)] xid: Option<u32> }
+
+fn current_unix_secs() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() }
+
+fn persist_lease(path: &str, lease: &DhcpLease, iface: Option<&str>, xid: Option<u32>) { if let Some(d)=lease.lease_time { let cached=CachedLease{ lease: lease.clone(), expires_at: current_unix_secs()+d.as_secs(), iface: iface.map(|s|s.to_string()), xid }; if let Ok(data)=serde_json::to_vec(&cached){ let _=std::fs::write(path,data);} } }
+
+impl VpnClient {
+    fn spawn_dhcp_renew_task(&mut self, lease: DhcpLease, _lease_time: std::time::Duration, iface: String, xid_initial: Option<u32>) {
+        let path = self.config.client.lease_cache_path.clone();
+        let dp = self.dataplane.clone();
+        let jitter_pct = self.config.client.dhcp_renewal_jitter_pct.min(50);
+        let mac = self.dhcp_mac;
+        let event_tx = self.event_tx.clone();
+        let stored_xid = xid_initial.or(self.dhcp_xid);
+        let metrics = self.dhcp_metrics.clone();
+        let handle = tokio::spawn(async move {
+            if let (Some(dp_root), Some(mut cur_lt)) = (dp, lease.lease_time) {
+                let mut current_lease = lease;
+                let mac_use = mac.unwrap_or_else(|| { let mut m=[0u8;6]; use rand::RngCore; let mut r=rand::rng(); r.fill_bytes(&mut m); m[0]=(m[0]&0b1111_1110)|0b0000_0010; m });
+                let xid = stored_xid.unwrap_or_else(|| { use rand::RngCore; let mut xb=[0u8;4]; rand::rng().fill_bytes(&mut xb); u32::from_be_bytes(xb) });
+                loop {
+                    let base = cur_lt / 2;
+                    let jitter_bound = (base.as_millis() as u64 * jitter_pct as u64 / 100).max(1);
+                    let jitter_ms: u64 = rand::random_range(0..=jitter_bound);
+                    let wait = base + std::time::Duration::from_millis(jitter_ms);
+                    tokio::time::sleep(wait).await;
+                    let mut renewed = false;
+                    for cycle in 0..3 { // renew cycles with backoff
+                        let backoff = if cycle==0 {Duration::from_secs(0)} else { Duration::from_secs(2u64.pow(cycle as u32)) };
+                        if backoff.as_secs()>0 { tokio::time::sleep(backoff).await; }
+                        if let Some(tx)=&event_tx { let _= tx.send(ClientEvent{ level: EventLevel::Info, code:300, message: format!("dhcp renew attempt (T1) cycle={}",cycle)}); }
+                        metrics.renew_attempts.fetch_add(1, Ordering::Relaxed);
+                        let mut client = crate::dhcp::DhcpClient::new_with_xid(dp_root.clone(), mac_use, xid);
+                        if let Ok(Some(frame)) = client.build_renew_unicast(&current_lease) { client.send_frame(frame); }
+                        if let Ok(Some(ack)) = client.wait_for(dhcproto::v4::MessageType::Ack, Instant::now()+Duration::from_secs(5)).await {
+                            if let Ok(newl) = client.lease_from_ack(&ack) { current_lease = newl; renewed = true; }
+                        }
+                        if !renewed {
+                            if let Ok(frame) = client.build_renew_broadcast(&current_lease) { client.send_frame(frame); }
+                            if let Ok(Some(ack)) = client.wait_for(dhcproto::v4::MessageType::Ack, Instant::now()+Duration::from_secs(5)).await {
+                                if let Ok(newl) = client.lease_from_ack(&ack) { current_lease = newl; renewed = true; }
+                            }
+                        }
+                        if renewed { break; }
+                    }
+                    if renewed {
+                        metrics.renew_success.fetch_add(1, Ordering::Relaxed);
+                        if let Some(tx)=&event_tx { let _= tx.send(ClientEvent{ level: EventLevel::Info, code:301, message: "dhcp renew success".into()}); }
+                        if let Some(p)=&path { persist_lease(p, &current_lease, Some(&iface), Some(xid)); }
+                        if let Some(lt)=current_lease.lease_time { cur_lt = lt; continue; } else { break; }
+                    }
+                    if let Some(tx)=&event_tx { let _= tx.send(ClientEvent{ level: EventLevel::Warn, code:302, message: "dhcp renew failed; rebind phase".into()}); }
+                    // Rebind at 87.5%
+                    let rebind_point = (cur_lt.as_secs_f64()*0.875) as u64;
+                    let elapsed = (cur_lt/2 + std::time::Duration::from_millis(jitter_ms)).as_secs();
+                    if rebind_point > elapsed { tokio::time::sleep(Duration::from_secs(rebind_point - elapsed)).await; }
+                    metrics.rebind_attempts.fetch_add(1, Ordering::Relaxed);
+                    if let Some(tx)=&event_tx { let _= tx.send(ClientEvent{ level: EventLevel::Info, code:303, message: "dhcp rebind attempt".into()}); }
+                    let mut rebinder = crate::dhcp::DhcpClient::new_with_xid(dp_root.clone(), mac_use, xid);
+                    if let Ok(frame) = rebinder.build_rebind(&current_lease) { rebinder.send_frame(frame); }
+                    let mut rebind_ok=false;
+                    if let Ok(Some(ack)) = rebinder.wait_for(dhcproto::v4::MessageType::Ack, Instant::now()+Duration::from_secs(8)).await {
+                        if let Ok(newl) = rebinder.lease_from_ack(&ack) { current_lease = newl; rebind_ok=true; }
+                    }
+                    if rebind_ok {
+                        metrics.rebind_success.fetch_add(1, Ordering::Relaxed);
+                        if let Some(tx)=&event_tx { let _= tx.send(ClientEvent{ level: EventLevel::Info, code:304, message: "dhcp rebind success".into()}); }
+                        if let Some(p)=&path { persist_lease(p, &current_lease, Some(&iface), Some(xid)); }
+                        if let Some(lt)=current_lease.lease_time { cur_lt = lt; continue; } else { break; }
+                    }
+                    if let Some(tx)=&event_tx { let _= tx.send(ClientEvent{ level: EventLevel::Warn, code:305, message: "dhcp rebind failed; rediscover".into()}); }
+                    metrics.rediscover_attempts.fetch_add(1, Ordering::Relaxed);
+                    let mut discover_client = crate::dhcp::DhcpClient::new_with_xid(dp_root.clone(), mac_use, xid);
+                    match discover_client.run_once(&iface, Duration::from_secs(20)).await {
+                        Ok(Some(newl)) => { metrics.rediscover_success.fetch_add(1, Ordering::Relaxed); if let Some(tx)=&event_tx { let _= tx.send(ClientEvent{ level: EventLevel::Info, code:306, message: "dhcp rediscover success".into()}); } current_lease=newl; if let Some(p)=&path { persist_lease(p, &current_lease, Some(&iface), Some(xid)); } if let Some(lt)=current_lease.lease_time { cur_lt=lt; continue; } else { break; } }
+                        _ => { metrics.failures.fetch_add(1, Ordering::Relaxed); if let Some(tx)=&event_tx { let _= tx.send(ClientEvent{ level: EventLevel::Error, code:307, message: "dhcp rediscover failed".into()}); } break; }
+                    }
+                }
+            }
+        });
+        self.aux_tasks.push(handle);
+    }
+}
+
+impl VpnClient {
+    /// Expose a public snapshot of DHCP metrics for callers (API level)
+    pub fn dhcp_metrics_snapshot(&self) -> Option<(u64,u64,u64,u64,u64,u64,u64)> {
+        if self.config.client.enable_in_tunnel_dhcp { Some(self.dhcp_metrics.snapshot()) } else { None }
+    }
 }

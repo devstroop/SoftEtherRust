@@ -63,22 +63,32 @@ impl Default for ConnectionConfig {
 #[derive(Debug, Clone)]
 pub struct ClientRuntime {
     pub interface_name: String,
+    pub interface_auto: bool,
     pub macos_dns_service_name: Option<String>,
     pub dhcp_settle_ms: u32,
     pub dhcp_initial_ms: u32,
     pub dhcp_max_ms: u32,
     pub dhcp_jitter_pct: u32,
+    pub enable_in_tunnel_dhcp: bool,
+    pub lease_cache_path: Option<String>,
+    pub dhcp_renewal_jitter_pct: u32,
+    pub dhcp_metrics_interval_secs: u64,
 }
 
 impl Default for ClientRuntime {
     fn default() -> Self {
         Self {
             interface_name: "sevpn0".to_string(),
+            interface_auto: false,
             macos_dns_service_name: None,
             dhcp_settle_ms: 3000,
             dhcp_initial_ms: 1000,
             dhcp_max_ms: 8000,
             dhcp_jitter_pct: 20,
+            enable_in_tunnel_dhcp: true,
+            lease_cache_path: None,
+            dhcp_renewal_jitter_pct: 10,
+            dhcp_metrics_interval_secs: 300,
         }
     }
 }
@@ -96,6 +106,8 @@ impl TryFrom<shared_config::ClientConfig> for RuntimeConfig {
         } else {
             AuthConfig::Anonymous
         };
+        let mut client_defaults = ClientRuntime::default();
+        if let Some(iv) = c.dhcp_metrics_interval_secs { client_defaults.dhcp_metrics_interval_secs = iv.max(10); }
         Ok(Self {
             host: c.server.clone(),
             port: c.port,
@@ -112,7 +124,7 @@ impl TryFrom<shared_config::ClientConfig> for RuntimeConfig {
                 proxy: None,
                 client_id: None,
             },
-            client: ClientRuntime::default(),
+            client: ClientRuntime { enable_in_tunnel_dhcp: c.enable_in_tunnel_dhcp.unwrap_or(true), lease_cache_path: c.lease_cache_path.clone(), interface_auto: c.interface_auto.unwrap_or(false), dhcp_metrics_interval_secs: client_defaults.dhcp_metrics_interval_secs, ..client_defaults },
         })
     }
 }
