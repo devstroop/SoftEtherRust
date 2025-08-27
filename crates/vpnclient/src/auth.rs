@@ -283,7 +283,7 @@ impl VpnClient {
         }
 
         // network settings
-        let ns = self.parse_network_settings(&welcome_pack);
+    let ns = self.parse_network_settings(&welcome_pack);
         if let Some(ref ns_inner) = ns {
             if let Some(ip) = ns_inner.assigned_ipv4 {
                 if std::env::var("RUST_3RD_LOG").ok().as_deref() == Some("1") {
@@ -317,6 +317,21 @@ impl VpnClient {
         }
         self.network_settings = ns;
         self.emit_settings_snapshot();
+        // Emit a compact policy summary for diagnostics (e.g., NoRouting, NoBroadcast)
+        if let Some(ns) = &self.network_settings {
+            if !ns.policies.is_empty() {
+                let mut flags: Vec<String> = Vec::new();
+                for (k, v) in &ns.policies {
+                    let kk = k.to_ascii_lowercase();
+                    if kk.contains("norouting") || kk.contains("nobroadcast") || kk.contains("nodhcp") {
+                        flags.push(format!("{}={}", k, v));
+                    }
+                }
+                if !flags.is_empty() {
+                    self.emit_event(super::types::EventLevel::Info, 1201, format!("policy: {}", flags.join(" ")));
+                }
+            }
+        }
         if let Some(ref ns_inner) = self.network_settings {
             self.server_policy_max_connections =
                 super::policy::extract_policy_max_connections(ns_inner);

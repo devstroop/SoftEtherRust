@@ -6,9 +6,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod io {
-    use super::{ConfigError, Result};
+    use super::{ClientConfig, ConfigError, Result};
     use serde::{de::DeserializeOwned, Serialize};
     use std::path::Path;
+    use serde_json::Value;
 
     pub fn load_json<T: DeserializeOwned, P: AsRef<Path>>(path: P) -> Result<T> {
         let data = mayaqua::fs::read_all(path).map_err(|e| ConfigError::Io(e.to_string()))?;
@@ -18,6 +19,25 @@ pub mod io {
     pub fn save_json<T: Serialize, P: AsRef<Path>>(path: P, value: &T) -> Result<()> {
         let data = serde_json::to_vec_pretty(value).map_err(|e| ConfigError::Json(e.to_string()))?;
         mayaqua::fs::write_all_atomic(path, &data).map_err(|e| ConfigError::Io(e.to_string()))
+    }
+
+    /// Load a `ClientConfig`, returning any unknown top-level keys (excluding alias forms)
+    pub fn load_client_config_with_unknowns<P: AsRef<Path>>(path: P) -> Result<(ClientConfig, Vec<String>)> {
+        let data = mayaqua::fs::read_all(&path).map_err(|e| ConfigError::Io(e.to_string()))?;
+        let v: Value = serde_json::from_slice(&data).map_err(|e| ConfigError::Json(e.to_string()))?;
+        let mut unknown = Vec::new();
+        if let Some(map) = v.as_object() {
+            // Known canonical keys (include legacy aliases to avoid false positives if used)
+            const KNOWN: &[&str] = &[
+                "server","port","hub","username","password","password_hash","skip_tls_verify","use_compress","max_connections","nat_traversal","udp_acceleration","static_ip","static_ipv4","static_ipv6","ip_version","require_static_ip"
+            ];
+            for k in map.keys() {
+                if !KNOWN.contains(&k.as_str()) { unknown.push(k.clone()); }
+            }
+        }
+        // Now deserialize proper config struct
+        let cfg: ClientConfig = serde_json::from_value(v).map_err(|e| ConfigError::Json(e.to_string()))?;
+        Ok((cfg, unknown))
     }
 }
 
@@ -64,6 +84,9 @@ pub struct ClientConfig {
     /// Values: "auto" (default) -> independently attempt v4/v6 if no static; "v4" -> only IPv4; "v6" -> only IPv6.
     #[serde(default)]
     pub ip_version: IpVersionPreference,
+    /// If true, abort connection if no static_ip provided (skip DHCP attempts entirely). Default false.
+    #[serde(default)]
+    pub require_static_ip: bool,
 }
 
 impl Default for ClientConfig {
@@ -82,6 +105,7 @@ impl Default for ClientConfig {
             udp_acceleration: None,
             static_ip: None,
             ip_version: IpVersionPreference::Auto,
+            require_static_ip: false,
         }
     }
 }
@@ -125,10 +149,25 @@ impl ClientConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     #[test]
     fn default_values() {
         let c = ClientConfig::default();
         assert_eq!(c.port, 443);
         assert_eq!(c.hub, "DEFAULT");
+    }
+
+    #[test]
+    fn unknown_key_detection() {
+        let blob = json!({
+            "server":"1.2.3.4","port":443,"hub":"DEFAULT","username":"u","max_connections":1,
+            "use_compress":false,"ip_version":"auto","mystery_field":123
+        });
+        let val = serde_json::to_vec(&blob).unwrap();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &val).unwrap();
+        let (cfg, unknown) = crate::shared_config::io::load_client_config_with_unknowns(tmp.path()).unwrap();
+        assert_eq!(cfg.server, "1.2.3.4");
+        assert_eq!(unknown, vec!["mystery_field".to_string()]);
     }
 }

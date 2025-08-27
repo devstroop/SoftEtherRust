@@ -396,6 +396,9 @@ impl VpnClient {
                     self.network_settings = Some(ns.clone());
                     // Emit initial server snapshot including v6 if present
                     self.emit_server_interface_snapshot();
+                    // Emit skip event for DHCP if static IPv4 assigned and DHCP would otherwise run
+                    if !self.config.client.enable_in_tunnel_dhcp { if let Some(tx)=&self.event_tx { let _=tx.send(ClientEvent{ level: EventLevel::Info, code:292, message:"dhcp skipped (static_ip present)".into() }); }
+                    }
                 }
             }
 
@@ -428,7 +431,13 @@ impl VpnClient {
             if let Err(e) = self.open_primary_data_link().await { error!("Failed to establish primary data link: {}", e); return Err(e); }
             // Early placeholder snapshot if we already know there will be no server settings and DHCP disabled
             if self.network_settings.is_none() && !self.config.client.enable_in_tunnel_dhcp { self.emit_placeholder_interface_snapshot(); }
-            // Bridging / DHCP flow: if no IPv4 settings and DHCP enabled, perform acquisition
+            // If require_static_ip flag is set but no static network provided, abort before any DHCP logic
+            if self.config.require_static_ip && self.config.static_network.is_none() {
+                if let Some(tx)=&self.event_tx { let _=tx.send(ClientEvent{ level: EventLevel::Warn, code:293, message:"require_static_ip set but no static_ip provided".into() }); }
+                return Err(anyhow::anyhow!("static_ip required by configuration"));
+            }
+
+            // Bridging / DHCP flow: if no IPv4 settings and DHCP enabled, perform acquisition (unless skipped earlier)
             if self.config.client.enable_in_tunnel_dhcp && self.network_settings.as_ref().and_then(|n| n.assigned_ipv4).is_none() {
                 if let Some(dp)=self.dataplane.clone() {
                     self.emit_event(EventLevel::Info, 299, "dhcp acquisition attempt");
@@ -444,7 +453,16 @@ impl VpnClient {
                     info!("Attempting DHCP over tunnel");
                     let iface_for_dhcp=self.actual_interface_name.as_ref().unwrap_or(&self.config.client.interface_name).clone();
                     if let Some(xid)=self.dhcp_xid { dhcp=crate::dhcp::DhcpClient::new_with_xid(dp_clone, mac, xid); }
-                    match dhcp.run_once(&iface_for_dhcp, Duration::from_secs(30), None).await {
+                    // Hook DHCP diagnostics into event stream
+                    let event_tx_cb = self.event_tx.clone();
+                    let cb = move |code: u32, message: String| {
+                        if let Some(tx) = &event_tx_cb {
+                            // Map DHCP diag codes to levels: 297/296 = Warn, others Info
+                            let level = if code == 297 || code == 296 { crate::types::EventLevel::Warn } else { crate::types::EventLevel::Info };
+                            let _ = tx.send(crate::types::ClientEvent { level, code: code as i32, message });
+                        }
+                    };
+                    match dhcp.run_once(&iface_for_dhcp, Duration::from_secs(30), Some(&cb)).await {
                         Ok(Some(lease))=>{
                             self.network_settings=Some(crate::types::network_settings_from_lease(&lease));
                             self.emit_settings_snapshot();
@@ -562,7 +580,7 @@ impl VpnClient {
         self.event_tx = Some(tx);
     }
 
-    fn emit_event(&self, level: EventLevel, code: i32, msg: impl Into<String>) {
+    pub(crate) fn emit_event(&self, level: EventLevel, code: i32, msg: impl Into<String>) {
         if let Some(tx) = &self.event_tx {
             let _ = tx.send(ClientEvent {
                 level,
@@ -1043,12 +1061,20 @@ mod tests {
             // mac address now implicit deterministic; no user fields
             static_ip: None,
             ip_version: crate::shared_config::IpVersionPreference::Auto,
+            require_static_ip: false,
         };
         let client = VpnClient::from_shared_config(shared)?;
         assert!(!client.is_connected());
         assert!(client.get_stats().is_none());
 
         Ok(())
+    }
+
+    #[test]
+    fn test_require_static_ip_without_static() {
+        let shared = crate::shared_config::ClientConfig { require_static_ip: true, server:"1.1.1.1".into(), port:443, hub:"H".into(), username:"u".into(), password:None, password_hash:None, skip_tls_verify:false, use_compress:false, max_connections:1, nat_traversal:None, udp_acceleration:None, static_ip:None, ip_version: crate::shared_config::IpVersionPreference::Auto };
+        let rc = crate::config::RuntimeConfig::try_from(shared);
+        assert!(rc.is_ok(), "RuntimeConfig creation should not fail just because static absent; enforcement occurs later");
     }
 
     // removed tests that referenced legacy create_auth_pack
@@ -1128,7 +1154,7 @@ impl VpnClient {
     // interface_auto removed
     // health threshold handled externally by monitor
     let acquired_at_atomic = self.lease_acquired_at_atomic.clone();
-        let handle = tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
             if let (Some(dp_root), Some(mut cur_lt)) = (dp, lease.lease_time) {
                 let mut current_lease = lease;
                 let mac_use = mac.unwrap_or_else(|| { let mut m=[0u8;6]; use rand::RngCore; let mut r=rand::rng(); r.fill_bytes(&mut m); m[0]=(m[0]&0b1111_1110)|0b0000_0010; m });
@@ -1148,6 +1174,8 @@ impl VpnClient {
                         if let Some(tx)=&event_tx { let _= tx.send(ClientEvent{ level: EventLevel::Info, code:300, message: format!("dhcp renew attempt (T1) cycle={}",cycle)}); }
                         metrics.renew_attempts.fetch_add(1, Ordering::Relaxed);
                         let mut client = crate::dhcp::DhcpClient::new_with_xid(dp_root.clone(), mac_use, xid);
+                        // Provide learned server MAC if known to prefer unicast Ethernet
+                        client.set_server_mac(current_lease.server_mac);
                         if let Ok(Some(frame)) = client.build_renew_unicast(&current_lease) { client.send_frame(frame); }
                         if let Ok(Some(ack)) = client.wait_for(dhcproto::v4::MessageType::Ack, Instant::now()+Duration::from_secs(5), None, &iface).await {
                             if let Ok(newl) = client.lease_from_ack(&ack) { current_lease = newl; renewed = true; }

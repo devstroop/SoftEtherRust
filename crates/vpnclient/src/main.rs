@@ -65,9 +65,13 @@ async fn connect(cli: &Cli) -> Result<()> {
     info!("Loading configuration from: {}", config_path);
 
     // Parse shared ClientConfig only (legacy format no longer supported here)
-    let cc: shared_config::ClientConfig = shared_config::io::load_json(config_path)
+    let (cc_loaded, unknown) = shared_config::io::load_client_config_with_unknowns(config_path)
         .with_context(|| format!("Failed to load configuration from: {config_path}"))?;
-    let mut cc = cc;
+    if !unknown.is_empty() {
+        // Lightweight single-line warning (issue #010)
+        tracing::warn!("Unknown config keys: {} (ignored)", unknown.join(","));
+    }
+    let mut cc = cc_loaded;
     // Optional override: --insecure only effective when allowed via feature or env
     let allow_insecure = cfg!(feature = "allow-insecure")
         || std::env::var("SOFTETHER_VPNCLIENT_ALLOW_INSECURE")

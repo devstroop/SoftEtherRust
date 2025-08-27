@@ -13,8 +13,10 @@ The JSON config used by `softether_client_create` maps to `crates/config::Client
 - skip_tls_verify: bool, skip TLS verification (development only)
 - use_compress: bool, enable LZ4 compression
 - max_connections: number, number of parallel data links (1..N)
-- nat_traversal: bool, enable NAT traversal (SecureNAT / NAT-T), default false
-- udp_acceleration: bool, enable UDP acceleration datapath (if supported), default false
+- nat_traversal: bool, enable NAT traversal (NAT-T); default false. For Local Bridge deployments with SecureNAT disabled, keep this false.
+- udp_acceleration: bool, enable UDP acceleration datapath (if supported); default false. For most deployments here, keep this false.
+- require_static_ip: bool, require a static IP configuration and skip DHCP; default false. Set true for Local Bridge without DHCP.
+- static_ip: object|null, provide static IPv4/IPv6 configuration (CIDR-form IP and optional gateway/dns).
 
 ## Password guidance
 
@@ -35,6 +37,14 @@ If you can't store plain passwords:
   "password_hash": "T2kl2mB84H5y2tn7n9qf65/8jXI=",
   "use_compress": false,
   "max_connections": 1,
-  "skip_tls_verify": false
+  "skip_tls_verify": false,
+  "nat_traversal": false,
+  "udp_acceleration": false,
+  "require_static_ip": true,
+  "static_ip": {
+    "ip": "192.0.2.10/24",
+    "gateway": "192.0.2.1",
+    "dns": ["9.9.9.9","149.112.112.112"]
+  }
 }
 ```

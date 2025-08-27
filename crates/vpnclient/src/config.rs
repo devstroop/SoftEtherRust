@@ -15,6 +15,7 @@ pub struct RuntimeConfig {
     pub client: ClientRuntime,
     /// Precomputed static network settings (from shared config), if any.
     pub static_network: Option<crate::types::NetworkSettings>,
+    pub require_static_ip: bool,
 }
 
 impl RuntimeConfig {
@@ -187,7 +188,7 @@ impl TryFrom<shared_config::ClientConfig> for RuntimeConfig {
             }
         }
 
-        let runtime = Self {
+    let runtime = Self {
             host: c.server.clone(),
             port: c.port,
             hub_name: c.hub.clone(),
@@ -206,6 +207,7 @@ impl TryFrom<shared_config::ClientConfig> for RuntimeConfig {
             },
             client: ClientRuntime { enable_in_tunnel_dhcp: dhcp_enabled, enable_in_tunnel_dhcpv6: dhcpv6_enabled, mac_address: mac_bytes, ..client_defaults },
             static_network: static_ipv4_ns.clone(),
+            require_static_ip: c.require_static_ip,
         };
 
         // If static IPv4 present, store synthesized network settings into a side-channel file for later detection.

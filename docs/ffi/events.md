@@ -22,6 +22,24 @@ Delivered via `softether_client_set_event_callback(h, cb, user)` as `(level, cod
   - 201: Connection timeout (warn)
   - 210: Redirect to another host/port (info)
   - 220: Tunnel opened (info)
+  - 292: DHCP skipped (static profile) (info)
+    - Emitted when a static IP configuration is present and DHCP discovery is bypassed intentionally.
+    - Message example: "dhcp skipped (static_ip present)"
+  - 293: DHCP required static missing (warn)
+    - Emitted when configuration sets `require_static_ip=true` but no valid `static_ip` block provided; connection setup aborts.
+  - 295: DHCP retransmit (info)
+    - Message example: "dhcp discover retransmit iface=utun8 mac=.. xid=0x.. attempt=2"
+  - 296: DHCP ACK timeout (warn)
+  - 297: DHCP OFFER timeout (warn)
+  - 298: DHCP send (info)
+    - Message examples: "dhcp discover sent ...", "dhcp request sent ..."
+  - 299: DHCP acquisition attempt (info)
+  - 2998: DHCP no-traffic observed within window (info)
+    - Emitted if no DHCP frames are seen on RX during the discover window; indicates likely framing mismatch.
+  - 2999: DHCP decode error (info, throttled)
+    - Emitted up to a few times per cycle when dhcproto fails to parse a candidate DHCP message; helps surface silent drops.
+  - 1201: Policy summary (info)
+    - Emits flags the server advertised that may affect networking (e.g., NoRouting=1, NoBroadcast=1)
   - 3301: DNS restore applied (info)
     - Message examples:
       - "dns_restore: linux resolv.conf restored from snapshot"
