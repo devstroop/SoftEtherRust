@@ -22,6 +22,17 @@ Delivered via `softether_client_set_event_callback(h, cb, user)` as `(level, cod
   - 201: Connection timeout (warn)
   - 210: Redirect to another host/port (info)
   - 220: Tunnel opened (info)
+  - 3301: DNS restore applied (info)
+    - Message examples:
+      - "dns_restore: linux resolv.conf restored from snapshot"
+      - "dns_restore: macos restored '<Service>' to 1.1.1.1,1.0.0.1"
+      - "dns_restore: macos restored '<Service>' to Empty"
+  - 3302: DNS restore fallback (info)
+    - Emitted when no original DNS snapshot was available; the client falls back to clearing DNS.
+    - Message examples:
+      - "dns_restore: linux no snapshot; cleared resolv.conf"
+      - "dns_restore: macos no snapshot for '<Service>'; set to Empty"
+      - "dns_restore: macos fallback; set '<Service>' to Empty"
 
 ### Settings snapshot event (iOS/Android helpers)
 

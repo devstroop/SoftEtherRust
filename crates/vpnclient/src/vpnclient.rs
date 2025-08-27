@@ -74,6 +74,10 @@ pub struct VpnClient {
     pub(crate) dhcp_xid: Option<u32>,
     pub(crate) dhcp_metrics: Arc<DhcpMetrics>,
     pub(crate) actual_interface_name: Option<String>,
+    // Idempotence: last applied network settings signature
+    pub(crate) last_net_apply_sig: Option<u64>,
+    // Tracking: record applied resources for safe teardown
+    pub(crate) applied_resources: Option<AppliedResources>,
     metrics_shutdown_tx: Option<mpsc::UnboundedSender<()>>,
     initial_interface_snapshot_emitted: bool,
     cached_lease_reused: bool,
@@ -88,6 +92,7 @@ use tun_rs::DeviceBuilder;
 use crate::dhcp::Lease as DhcpLease;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 pub struct DhcpMetrics {
     renew_attempts: AtomicU64,
@@ -104,6 +109,18 @@ pub struct DhcpMetrics {
     v6_rediscover_attempts: AtomicU64,
     v6_rediscover_success: AtomicU64,
     v6_failures: AtomicU64,
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct AppliedResources {
+    pub interface_name: String,
+    pub ipv4_addr: Option<(Ipv4Addr, u8)>,
+    pub ipv6_addr: Option<(Ipv6Addr, u8)>,
+    pub routes_added: Vec<String>,
+    pub original_dns: Option<Vec<std::net::IpAddr>>,
+    pub dns_modified: bool,
+    pub dns_service_name: Option<String>,
+    pub net_apply_sig: Option<u64>,
 }
 
 impl DhcpMetrics {
@@ -181,6 +198,8 @@ impl VpnClient {
             dhcp_xid: None,
             dhcp_metrics: Arc::new(DhcpMetrics::new()),
             actual_interface_name: None,
+            last_net_apply_sig: None,
+            applied_resources: None,
             metrics_shutdown_tx: None,
             initial_interface_snapshot_emitted: false,
             cached_lease_reused: false,
@@ -193,6 +212,10 @@ impl VpnClient {
 
     /// Connect to the VPN server
     pub async fn connect(&mut self) -> Result<()> {
+    // Feature flags visibility: log connect-time feature state
+    let nat = if self.config.connection.nat_traversal { "on" } else { "off" };
+    let udp = if self.config.connection.udp_acceleration { "on" } else { "off" };
+    self.emit_event(EventLevel::Info, 406, format!("transport: udp_accel={} nat_traversal={}", udp, nat));
         info!(
             "Starting VPN connection to {}",
             self.config.server_address()
@@ -366,6 +389,16 @@ impl VpnClient {
             std::env::set_var("RUST_DHCP_JITTER_PCT", format!("{}", self.config.client.dhcp_jitter_pct));
             self.emit_event(EventLevel::Info, 220, "tunnel opened");
 
+            // If static network provided in runtime config, apply it pre-DHCP and emit a snapshot.
+            if self.network_settings.is_none() {
+                if let Some(ns) = self.config.static_network.clone() {
+                    // Preserve any v6 static fields already computed from config.rs
+                    self.network_settings = Some(ns.clone());
+                    // Emit initial server snapshot including v6 if present
+                    self.emit_server_interface_snapshot();
+                }
+            }
+
             // If DHCPv4 disabled and no server-provided settings but static IP config exists, synthesize NetworkSettings now.
             if !self.config.client.enable_in_tunnel_dhcp && self.network_settings.is_none() {
                 // Static IP config path now handled during RuntimeConfig build (network_settings may still be None until applied)
@@ -395,14 +428,17 @@ impl VpnClient {
             if let Err(e) = self.open_primary_data_link().await { error!("Failed to establish primary data link: {}", e); return Err(e); }
             // Early placeholder snapshot if we already know there will be no server settings and DHCP disabled
             if self.network_settings.is_none() && !self.config.client.enable_in_tunnel_dhcp { self.emit_placeholder_interface_snapshot(); }
-            // Bridging / DHCP flow: if no server-pushed IPv4 settings and DHCP enabled, perform acquisition
+            // Bridging / DHCP flow: if no IPv4 settings and DHCP enabled, perform acquisition
             if self.config.client.enable_in_tunnel_dhcp && self.network_settings.as_ref().and_then(|n| n.assigned_ipv4).is_none() {
                 if let Some(dp)=self.dataplane.clone() {
                     self.emit_event(EventLevel::Info, 299, "dhcp acquisition attempt");
                     let start=std::time::Instant::now();
                     while dp.summary().total_links==0 && start.elapsed() < Duration::from_secs(3) { tokio::time::sleep(Duration::from_millis(100)).await; }
-                    if self.dhcp_mac.is_none(){ self.dhcp_mac=Some(self.config.client.mac_address); }
-                    let mac=self.dhcp_mac.unwrap();
+                    if self.dhcp_mac.is_none(){
+                        tracing::warn!("dhcp_mac not initialized; using deterministic client MAC");
+                        self.dhcp_mac=Some(self.config.client.mac_address);
+                    }
+                    let mac=self.dhcp_mac.unwrap_or(self.config.client.mac_address);
                     let dp_clone=dp.clone();
                     let mut dhcp=crate::dhcp::DhcpClient::new(dp_clone.clone(), mac);
                     info!("Attempting DHCP over tunnel");
@@ -548,7 +584,7 @@ impl VpnClient {
     // Signal periodic metrics task (if running) to terminate early for clean shutdown
     if let Some(tx)=self.metrics_shutdown_tx.take() { let _=tx.send(()); }
 
-        // Stop dataplane first so its worker threads stop reading/writing
+    // Stop dataplane first so its worker threads stop reading/writing
         if let Some(dp) = self.dataplane.take() {
             dp.shutdown();
         }
@@ -583,39 +619,251 @@ impl VpnClient {
             connection.close()?;
         }
 
-        // Tear down TUN interface (best-effort)
-        if let Some(_tun) = self.tun.take() {
-            #[cfg(target_os = "linux")]
-            {
-                use tokio::process::Command;
-                let _ = Command::new("ip")
-                    .arg("link")
-                    .arg("set")
-                    .arg(self.config.client.interface_name.clone())
-                    .arg("down")
-                    .output()
-                    .await;
-            }
-            #[cfg(target_os = "macos")]
-            {
-                use tokio::process::Command;
-                let _ = Command::new("ifconfig")
-                    .arg(self.config.client.interface_name.clone())
-                    .arg("down")
-                    .output()
-                    .await;
+        // Restore DNS if we changed it
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(applied) = self.applied_resources.as_ref() {
+            if applied.dns_modified {
+                #[cfg(target_os = "linux")]
+                {
+                    use tokio::process::Command;
+                    if let Some(orig) = &applied.original_dns {
+                        let content = orig
+                            .iter()
+                            .map(|ip| format!("nameserver {}\n", ip))
+                            .collect::<String>();
+                        let _ = Command::new("bash")
+                            .arg("-c")
+                            .arg(format!(
+                                "printf '{}' | sudo tee /etc/resolv.conf > /dev/null",
+                                content.replace("'", "'\\''")
+                            ))
+                            .output()
+                            .await;
+                        self.emit_event(EventLevel::Info, 3301, "dns_restore: linux resolv.conf restored from snapshot");
+                    } else {
+                        let _ = Command::new("bash")
+                            .arg("-c")
+                            .arg("echo -n '' | sudo tee /etc/resolv.conf > /dev/null")
+                            .output()
+                            .await;
+                        self.emit_event(EventLevel::Info, 3302, "dns_restore: linux no snapshot; cleared resolv.conf");
+                    }
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    use tokio::process::Command;
+                    if let Some(svc) = &applied.dns_service_name {
+                        if let Some(orig) = &applied.original_dns {
+                            if orig.is_empty() {
+                                let _ = Command::new("networksetup")
+                                    .arg("-setdnsservers")
+                                    .arg(svc)
+                                    .arg("Empty")
+                                    .output()
+                                    .await;
+                                self.emit_event(EventLevel::Info, 3301, format!("dns_restore: macos restored '{}' to Empty", svc));
+                            } else {
+                                let args = orig.iter().map(|i| i.to_string()).collect::<Vec<_>>();
+                                let cmd = format!(
+                                    "networksetup -setdnsservers '{}' {}",
+                                    svc.replace("'", "'\\''"),
+                                    args.join(" ")
+                                );
+                                let _ = Command::new("bash").arg("-c").arg(&cmd).output().await;
+                                self.emit_event(EventLevel::Info, 3301, format!("dns_restore: macos restored '{}' to {}", svc, args.join(",")));
+                            }
+                        } else {
+                            let _ = Command::new("networksetup")
+                                .arg("-setdnsservers")
+                                .arg(svc)
+                                .arg("Empty")
+                                .output()
+                                .await;
+                            self.emit_event(EventLevel::Info, 3302, format!("dns_restore: macos no snapshot for '{}'; set to Empty", svc));
+                        }
+                    } else {
+                        // Fallback: clear all services to Empty
+                        let out = Command::new("networksetup")
+                            .arg("-listallnetworkservices")
+                            .output()
+                            .await?;
+                        if out.status.success() {
+                            let s = String::from_utf8_lossy(&out.stdout);
+                            for line in s.lines() {
+                                let svc = line.trim();
+                                if svc.is_empty() || svc.starts_with("An asterisk (*)") {
+                                    continue;
+                                }
+                                let _ = Command::new("networksetup")
+                                    .arg("-setdnsservers")
+                                    .arg(svc)
+                                    .arg("Empty")
+                                    .output()
+                                    .await;
+                                self.emit_event(EventLevel::Info, 3302, format!("dns_restore: macos fallback; set '{}' to Empty", svc));
+                            }
+                        }
+                    }
+                }
             }
         }
+
+        // Tear down TUN interface using tracked resources when available
+        if let Some(_tun) = self.tun.take() {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            {
+                use tokio::process::Command;
+                if let Some(resources) = self.applied_resources.take() {
+                    let ifname = resources.interface_name;
+                    // Remove routes in reverse order
+                    for r in resources.routes_added.iter().rev() {
+                        #[cfg(target_os = "linux")]
+                        {
+                            if let Some(gw) = r.strip_prefix("v4 default via ") {
+                                let _ = Command::new("ip")
+                                    .arg("route")
+                                    .arg("del")
+                                    .arg("default")
+                                    .arg("via")
+                                    .arg(gw.trim())
+                                    .arg("dev")
+                                    .arg(&ifname)
+                                    .output()
+                                    .await;
+                                continue;
+                            }
+                            if let Some(gw6) = r.strip_prefix("v6 default via ") {
+                                let _ = Command::new("ip")
+                                    .arg("-6")
+                                    .arg("route")
+                                    .arg("del")
+                                    .arg("default")
+                                    .arg("via")
+                                    .arg(gw6.trim())
+                                    .arg("dev")
+                                    .arg(&ifname)
+                                    .output()
+                                    .await;
+                                continue;
+                            }
+                        }
+                        #[cfg(target_os = "macos")]
+                        {
+                            if let Some(gw) = r.strip_prefix("v4 default via ") {
+                                let _ = Command::new("route")
+                                    .arg("delete")
+                                    .arg("default")
+                                    .arg(gw.trim())
+                                    .output()
+                                    .await;
+                                continue;
+                            }
+                            if r.starts_with("v6 default via ") {
+                                let _ = Command::new("route")
+                                    .arg("delete")
+                                    .arg("-inet6")
+                                    .arg("default")
+                                    .output()
+                                    .await;
+                                continue;
+                            }
+                        }
+                    }
+                    // Remove IP addresses (IPv4, IPv6)
+                    if let Some((ip, _pfx)) = resources.ipv4_addr {
+                        #[cfg(target_os = "linux")]
+                        {
+                            let _ = Command::new("ip")
+                                .arg("addr")
+                                .arg("del")
+                                .arg(format!("{}/{}", ip, pfx))
+                                .arg("dev")
+                                .arg(&ifname)
+                                .output()
+                                .await;
+                        }
+                        #[cfg(target_os = "macos")]
+                        {
+                            let _ = Command::new("ifconfig")
+                                .arg(&ifname)
+                                .arg("inet")
+                                .arg(ip.to_string())
+                                .arg("-alias")
+                                .output()
+                                .await;
+                        }
+                    }
+                    if let Some((ip6, _pfx6)) = resources.ipv6_addr {
+                        #[cfg(target_os = "linux")]
+                        {
+                            let _ = Command::new("ip")
+                                .arg("-6")
+                                .arg("addr")
+                                .arg("del")
+                                .arg(format!("{}/{}", ip6, pfx6))
+                                .arg("dev")
+                                .arg(&ifname)
+                                .output()
+                                .await;
+                        }
+                        #[cfg(target_os = "macos")]
+                        {
+                            let _ = Command::new("ifconfig")
+                                .arg(&ifname)
+                                .arg("inet6")
+                                .arg(ip6.to_string())
+                                .arg("-alias")
+                                .output()
+                                .await;
+                        }
+                    }
+                    // Bring iface down last
+                    #[cfg(target_os = "linux")]
+                    {
+                        let _ = Command::new("ip")
+                            .arg("link")
+                            .arg("set")
+                            .arg(&ifname)
+                            .arg("down")
+                            .output()
+                            .await;
+                    }
+                    #[cfg(target_os = "macos")]
+                    {
+                        let _ = Command::new("ifconfig")
+                            .arg(&ifname)
+                            .arg("down")
+                            .output()
+                            .await;
+                    }
+                } else {
+                    // Fallback: no tracker; do best-effort like before
+                    let ifname = self
+                        .actual_interface_name
+                        .as_deref()
+                        .unwrap_or(&self.config.client.interface_name)
+                        .to_string();
+                    #[cfg(target_os = "linux")]
+                    { let _ = Command::new("ip").arg("link").arg("set").arg(&ifname).arg("down").output().await; }
+                    #[cfg(target_os = "macos")]
+                    { let _ = Command::new("ifconfig").arg(&ifname).arg("down").output().await; }
+                }
+            }
+        }
+
+    // Tracker was consumed above when present
 
         // Abort auxiliary tasks
         for handle in self.aux_tasks.drain(..) {
             handle.abort();
         }
 
-        // Tear down virtual adapter (utun)
+    // Tear down virtual adapter (utun)
     // No adapter teardown needed after removing adapter integration
 
-        self.is_connected = false;
+    self.is_connected = false;
+    // Reset last applied signature after teardown so future applies aren't skipped
+    self.last_net_apply_sig = None;
         // Reset connection-scoped flags
         self.dhcp_spawned = false;
         self.set_state(ConnectionState::Idle);
@@ -1038,9 +1286,13 @@ impl VpnClient {
                 if !verbose { dns.truncate(4); } else { dns.truncate(8); }
                 let router = ns.gateway.map(|g| if redact { "***".into() } else { g.to_string() });
                 let ipv4 = if redact { "***".into() } else { format!("{}/{}", ip, prefix) };
+                // Attach v6 if present in settings
+                let ipv6 = ns.assigned_ipv6.map(|a| if redact { "***".into() } else { a.to_string() });
+                let mut dns6: Option<Vec<String>> = None;
+                if !ns.dns_servers_v6.is_empty() { dns6 = Some(if redact { vec!["***".into()] } else { ns.dns_servers_v6.iter().map(|d| d.to_string()).collect() }); }
                 #[derive(serde::Serialize)] struct Snap<'a>{kind:&'a str,name:&'a str,ipv4:String,router:Option<String>,dns:Vec<String>,lease_seconds_total:u64,lease_seconds_remaining:u64,renew_elapsed_secs:u64,t1_epoch:u64,t2_epoch:u64,expiry_epoch:u64,mtu:Option<u32>,xid:Option<u32>,cache_reused:bool,initial:bool,verbose:bool,ipv6:Option<String>,dns6:Option<Vec<String>>}
                 let now=current_unix_secs();
-                let snap=Snap{kind:"interface_snapshot",name:iface,ipv4,router,dns,lease_seconds_total:0,lease_seconds_remaining:0,renew_elapsed_secs:0,t1_epoch:now,t2_epoch:now,expiry_epoch:now,mtu:Some(1500),xid:None,cache_reused:false,initial:true,verbose,ipv6:None,dns6:None};
+                let snap=Snap{kind:"interface_snapshot",name:iface,ipv4,router,dns,lease_seconds_total:0,lease_seconds_remaining:0,renew_elapsed_secs:0,t1_epoch:now,t2_epoch:now,expiry_epoch:now,mtu:Some(1500),xid:None,cache_reused:false,initial:true,verbose,ipv6,dns6};
                 if let Ok(js)=serde_json::to_string(&snap){ self.emit_event(EventLevel::Info,2220,js); self.initial_interface_snapshot_emitted=true; }
             }
         }

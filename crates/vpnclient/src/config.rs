@@ -13,6 +13,8 @@ pub struct RuntimeConfig {
     pub auth: AuthConfig,
     pub connection: ConnectionConfig,
     pub client: ClientRuntime,
+    /// Precomputed static network settings (from shared config), if any.
+    pub static_network: Option<crate::types::NetworkSettings>,
 }
 
 impl RuntimeConfig {
@@ -124,19 +126,30 @@ impl TryFrom<shared_config::ClientConfig> for RuntimeConfig {
         let mut static_v6: Option<(Ipv6Addr, u8, Option<Ipv6Addr>, Vec<Ipv6Addr>)> = None;
         if let Some(cfg) = c.static_ip.as_ref() {
             let parts: Vec<&str> = cfg.ip.split('/').collect();
+            if parts.len() != 2 { anyhow::bail!(crate::shared_config::ConfigError::Invalid("static_ip must be in CIDR form <addr>/<prefix>".into())); }
             if parts.len() == 2 { if let Ok(prefix) = parts[1].parse::<u8>() {
                 if let Ok(v4) = parts[0].parse::<Ipv4Addr>() {
+                    if prefix==0 || prefix>32 { anyhow::bail!(crate::shared_config::ConfigError::Invalid(format!("invalid IPv4 prefix /{}", prefix))); }
                     let gw = cfg.gateway.as_ref().and_then(|g| g.parse::<Ipv4Addr>().ok());
                     let mut dns_v4 = Vec::new();
-                    for d in &cfg.dns { if let Ok(v4d)=d.parse::<Ipv4Addr>() { dns_v4.push(v4d); } }
+                    for d in &cfg.dns { if let Ok(v4d)=d.parse::<Ipv4Addr>() { dns_v4.push(v4d); } else { anyhow::bail!(crate::shared_config::ConfigError::Invalid(format!("dns entry '{}' not IPv4", d))); } }
                     static_v4 = Some((v4, prefix.min(32), gw, dns_v4));
                 } else if let Ok(v6) = parts[0].parse::<Ipv6Addr>() {
+                    if prefix==0 || prefix>128 { anyhow::bail!(crate::shared_config::ConfigError::Invalid(format!("invalid IPv6 prefix /{}", prefix))); }
                     let gw = cfg.gateway.as_ref().and_then(|g| g.parse::<Ipv6Addr>().ok());
                     let mut dns_v6 = Vec::new();
-                    for d in &cfg.dns { if let Ok(v6d)=d.parse::<Ipv6Addr>() { dns_v6.push(v6d); } }
+                    for d in &cfg.dns { if let Ok(v6d)=d.parse::<Ipv6Addr>() { dns_v6.push(v6d); } else { anyhow::bail!(crate::shared_config::ConfigError::Invalid(format!("dns entry '{}' not IPv6", d))); } }
                     static_v6 = Some((v6, prefix.min(128), gw, dns_v6));
                 }
             }}
+            // Family mismatch checks
+            if let Some(gw) = cfg.gateway.as_ref() {
+                let ip_is_v4 = parts[0].parse::<Ipv4Addr>().is_ok();
+                let gw_v4 = gw.parse::<Ipv4Addr>().is_ok();
+                let gw_v6 = gw.parse::<Ipv6Addr>().is_ok();
+                if ip_is_v4 && !gw_v4 && gw_v6 { anyhow::bail!(crate::shared_config::ConfigError::Invalid("gateway family mismatch (expected IPv4)".into())); }
+                if !ip_is_v4 && !gw_v6 && gw_v4 { anyhow::bail!(crate::shared_config::ConfigError::Invalid("gateway family mismatch (expected IPv6)".into())); }
+            }
         }
 
         let (dhcp_enabled, dhcpv6_enabled) = match c.ip_version {
@@ -146,7 +159,7 @@ impl TryFrom<shared_config::ClientConfig> for RuntimeConfig {
         };
 
         // Pre-build network settings from static v4 (v6 static currently not stored in NetworkSettings structure)
-        let mut static_ipv4_ns: Option<crate::types::NetworkSettings> = None;
+    let mut static_ipv4_ns: Option<crate::types::NetworkSettings> = None;
         if let Some((ipv4, prefix, gw, dns_list)) = static_v4 {
             // Convert prefix to netmask
             let mask = if prefix==0 { Ipv4Addr::new(0,0,0,0) } else { let mask_u32 = (!0u32) << (32-prefix as u32); Ipv4Addr::from(mask_u32.to_be_bytes()) };
@@ -192,12 +205,13 @@ impl TryFrom<shared_config::ClientConfig> for RuntimeConfig {
                 client_id: None,
             },
             client: ClientRuntime { enable_in_tunnel_dhcp: dhcp_enabled, enable_in_tunnel_dhcpv6: dhcpv6_enabled, mac_address: mac_bytes, ..client_defaults },
+            static_network: static_ipv4_ns.clone(),
         };
 
         // If static IPv4 present, store synthesized network settings into a side-channel file for later detection.
         // Simplest: write to lease cache path if provided and no existing lease cache; marked as static.
     if let Some(_ns) = static_ipv4_ns.as_ref() { /* now purely in-memory; persistence removed */ }
 
-        Ok(runtime)
+    Ok(runtime)
     }
 }

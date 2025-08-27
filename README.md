@@ -304,6 +304,26 @@ cargo doc --document-private-items --open
 - Inline documentation in source code
 - Test cases demonstrating usage
 
+### DNS recovery (manual)
+
+If the process exits abnormally before DNS is restored, you can recover manually:
+
+- macOS: list services and reset DNS to Empty (DHCP/default):
+
+```bash
+networksetup -listallnetworkservices
+# For the affected service (e.g. "Wi-Fi"):
+sudo networksetup -setdnsservers "Wi-Fi" Empty
+```
+
+- Linux: restore resolv.conf with your desired nameservers, e.g.:
+
+```bash
+printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\n' | sudo tee /etc/resolv.conf >/dev/null
+```
+
+The client also emits events 3301/3302 describing the DNS restore path on disconnect.
+
 ## 🔧 Development
 
 ### Prerequisites
