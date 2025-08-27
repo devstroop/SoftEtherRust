@@ -6,7 +6,7 @@
   "password_hash": "base64-of-20-byte-sha0",
   "skip_tls_verify": false,
   "use_compress": true,
-  "use_encrypt": true,
   "max_connections": 2,
-  "udp_port": null
+  "nat_traversal": false,
+  "udp_acceleration": false
 }

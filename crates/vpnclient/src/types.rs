@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::dhcp::Lease as DhcpLease;
 
@@ -11,6 +11,11 @@ pub struct NetworkSettings {
     pub subnet_mask: Option<Ipv4Addr>,
     pub gateway: Option<Ipv4Addr>,
     pub ports: Vec<u16>,
+    // IPv6 additions
+    pub assigned_ipv6: Option<Ipv6Addr>,
+    pub assigned_ipv6_prefix: Option<u8>,
+    pub ipv6_gateway: Option<Ipv6Addr>,
+    pub dns_servers_v6: Vec<Ipv6Addr>,
 }
 
 /// Helper: serialize a snapshot of NetworkSettings to a compact JSON used by FFI/events.
@@ -24,6 +29,14 @@ pub fn settings_json_with_kind(ns: Option<&NetworkSettings>, include_kind: bool)
         subnet_mask: Option<String>,
         gateway: Option<String>,
         dns_servers: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        assigned_ipv6: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        assigned_ipv6_prefix: Option<u8>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ipv6_gateway: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        dns_servers_v6: Vec<String>,
     }
 
     let mut json = SettingsJson {
@@ -32,6 +45,10 @@ pub fn settings_json_with_kind(ns: Option<&NetworkSettings>, include_kind: bool)
         subnet_mask: None,
         gateway: None,
         dns_servers: vec![],
+        assigned_ipv6: None,
+        assigned_ipv6_prefix: None,
+        ipv6_gateway: None,
+        dns_servers_v6: vec![],
     };
     if let Some(ns) = ns {
         if let Some(ip) = ns.assigned_ipv4 {
@@ -44,6 +61,10 @@ pub fn settings_json_with_kind(ns: Option<&NetworkSettings>, include_kind: bool)
             json.gateway = Some(g.to_string());
         }
         json.dns_servers = ns.dns_servers.iter().map(|d| d.to_string()).collect();
+        if let Some(v6) = ns.assigned_ipv6 { json.assigned_ipv6 = Some(v6.to_string()); }
+        if let Some(pfx) = ns.assigned_ipv6_prefix { json.assigned_ipv6_prefix = Some(pfx); }
+        if let Some(g6) = ns.ipv6_gateway { json.ipv6_gateway = Some(g6.to_string()); }
+        json.dns_servers_v6 = ns.dns_servers_v6.iter().map(|d| d.to_string()).collect();
     }
     serde_json::to_string(&json).unwrap_or_else(|_| "{}".to_string())
 }

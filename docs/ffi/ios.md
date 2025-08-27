@@ -34,7 +34,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
       if let err = err { completionHandler(err); return }
 
       // Load config JSON (from provider configuration or app group)
-      let json = "{ \"server\": \"vpn.example.com\", \"port\": 443, \"hub\": \"DEFAULT\", \"username\": \"user\", \"password\": \"pass\", \"use_encrypt\": true, \"use_compress\": false, \"max_connections\": 1 }"
+  let json = "{ \"server\": \"vpn.example.com\", \"port\": 443, \"hub\": \"DEFAULT\", \"username\": \"user\", \"password\": \"pass\", \"use_compress\": false, \"max_connections\": 1 }" // encryption always enabled implicitly
   self.se = softether_client_create(json)
 
       // State callback

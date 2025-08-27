@@ -149,7 +149,6 @@ pub struct RudpSettings {
 /// Protocol option flags
 #[derive(Debug, Clone, Default)]
 pub struct ProtocolOptions {
-    pub use_encrypt: bool,
     pub use_fast_rc4: bool,
     pub use_compress: bool,
     pub half_connection: bool,
@@ -185,7 +184,6 @@ pub const PACK_ELEMENT_SERVER_STR: &str = "server_str";
 pub const PACK_ELEMENT_PROTOCOL: &str = "protocol";
 pub const PACK_ELEMENT_COMPRESSED: &str = "compressed";
 pub const PACK_ELEMENT_MAX_CONNECTION: &str = "max_connection";
-pub const PACK_ELEMENT_USE_ENCRYPT: &str = "use_encrypt";
 pub const PACK_ELEMENT_USE_COMPRESS: &str = "use_compress";
 pub const PACK_ELEMENT_HALF_CONNECTION: &str = "half_connection";
 pub const PACK_ELEMENT_TIMEOUT: &str = "timeout";

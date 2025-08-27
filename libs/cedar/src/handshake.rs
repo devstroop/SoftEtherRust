@@ -6,7 +6,7 @@ use crate::constants::{
     CEDAR_SIGNATURE_STR, PACK_ELEMENT_BUILD, PACK_ELEMENT_CLIENT_STR, PACK_ELEMENT_HALF_CONNECTION,
     PACK_ELEMENT_HUBNAME, PACK_ELEMENT_MAX_CONNECTION, PACK_ELEMENT_METHOD, PACK_ELEMENT_PASSWORD,
     PACK_ELEMENT_PROTOCOL, PACK_ELEMENT_USERNAME, PACK_ELEMENT_USE_COMPRESS,
-    PACK_ELEMENT_USE_ENCRYPT, PACK_ELEMENT_VERSION,
+    PACK_ELEMENT_VERSION,
 };
 use crate::{ClientAuth, ClientOption, SOFTETHER_BUILD, SOFTETHER_VER};
 use mayaqua::crypto::{sha0, Sha1Sum};
@@ -32,7 +32,6 @@ pub fn build_login_pack(opt: &ClientOption, auth: &ClientAuth) -> Result<Pack> {
 
     // Options
     pack.add_int(PACK_ELEMENT_MAX_CONNECTION, opt.max_connection)?;
-    pack.add_int(PACK_ELEMENT_USE_ENCRYPT, opt.use_encrypt as u32)?;
     pack.add_int(PACK_ELEMENT_USE_COMPRESS, opt.use_compress as u32)?;
     pack.add_int(PACK_ELEMENT_HALF_CONNECTION, opt.half_connection as u32)?;
 

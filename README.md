@@ -109,15 +109,16 @@ The client reads `config.json` using the shared `crates/config` schema:
 | password | string | no | - | Plaintext; if set, SHA1 is derived client-side (dev only) |
 | password_hash | string | no | - | Base64 of 20-byte SHA‑0(password + UPPER(username)) |
 | use_compress | bool | no | true | Enable compression |
-| use_encrypt | bool | no | true | Enable RC4 bulk encryption |
 | max_connections | number | no | 2 | Desired total TCP links (server may cap) |
 | skip_tls_verify | bool | no | false | Skip TLS cert validation (dangerous; for testing) |
-| udp_port | number | no | null | Reserved for UDP accel (not wired yet) |
+| nat_traversal | bool | no | false | Enable NAT traversal (SecureNAT / NAT-T) |
+| udp_acceleration | bool | no | false | Enable UDP data acceleration path |
 
 Notes:
 - Provide only one of password or password_hash.
 - Servers commonly expect SHA‑0(password + UPPER(username)).
 - For production, prefer the hashed variants and keep `skip_tls_verify` = false.
+- Encryption: always on (TLS). Former `use_encrypt` flag removed—there is no plaintext mode.
 
 Example minimal config:
 

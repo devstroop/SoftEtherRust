@@ -25,6 +25,7 @@ subtle = { workspace = true }
 serde_json = "1.0"
 
 [features]
-default = ["udp-accel"]
+default = []
 trace = []
 udp-accel = []
+nat-traversal = []

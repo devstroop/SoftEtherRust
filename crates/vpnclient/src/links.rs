@@ -44,7 +44,6 @@ impl VpnClient {
             p.add_str("client_str", CLIENT_STRING)?;
             p.add_int("client_ver", CLIENT_VERSION)?;
             p.add_int("client_build", CLIENT_BUILD)?;
-            p.add_int("use_encrypt", 1)?;
             // Force-disable compression on data link; our dataplane doesn't implement bulk compression
             p.add_int("use_compress", 0)?;
             p.add_int(
@@ -245,7 +244,6 @@ impl VpnClient {
                         p.add_str("client_str", &client_str)?;
                         p.add_int("client_ver", client_ver)?;
                         p.add_int("client_build", client_build)?;
-                        p.add_int("use_encrypt", 1)?;
                         p.add_int("use_compress", use_compress as u32)?;
                         p.add_int("half_connection", if half_conn { 1 } else { 0 })?;
                         p.add_int("qos", 0)?;

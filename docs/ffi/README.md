@@ -40,9 +40,9 @@ The JSON passed to `softether_client_create` maps to `crates/config::ClientConfi
   "password_hash": "...",// base64(SHA0(password + UPPER(username))) 20 bytes
   "skip_tls_verify": false,           // skip TLS verify (development only)
   "use_compress": false,
-  "use_encrypt": true,
   "max_connections": 1,
-  "udp_port": null
+  "nat_traversal": false,
+  "udp_acceleration": false
 }
 ```
 

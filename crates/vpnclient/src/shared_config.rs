@@ -47,35 +47,23 @@ pub struct ClientConfig {
     #[serde(default)]
     pub skip_tls_verify: bool,
     pub use_compress: bool,
-    pub use_encrypt: bool,
     pub max_connections: u32,
-    pub udp_port: Option<u16>,
+    /// Enable NAT traversal (SecureNAT / NAT-T style) if supported; default false
     #[serde(default)]
-    pub enable_in_tunnel_dhcp: Option<bool>,
+    pub nat_traversal: Option<bool>,
+    /// Enable UDP acceleration (datapath over UDP) if supported; default false
     #[serde(default)]
-    pub lease_cache_path: Option<String>,
+    pub udp_acceleration: Option<bool>,
+    // Telemetry / cosmetic tuning fields removed.
+    /// Optional static IP (IPv4 or IPv6). Field `ip` should be CIDR, e.g. "192.168.1.10/24" or "2001:db8::1/64".
+    /// Applies equally to both families; same property names regardless of version.
+    /// `gateway` and each entry in `dns` may be either IPv4 or IPv6 literals consistent with `ip` family.
+    #[serde(default, alias = "static_ipv4", alias = "static_ipv6", skip_serializing_if = "Option::is_none")]
+    pub static_ip: Option<StaticIpConfig>,
+    /// Which IP version(s) to attempt for in-tunnel dynamic configuration when no static IP for that family.
+    /// Values: "auto" (default) -> independently attempt v4/v6 if no static; "v4" -> only IPv4; "v6" -> only IPv6.
     #[serde(default)]
-    pub interface_auto: Option<bool>,
-    #[serde(default)]
-    pub dhcp_metrics_interval_secs: Option<u64>,
-    #[serde(default)]
-    pub interface_snapshot_redact: Option<bool>,
-    #[serde(default)]
-    pub interface_snapshot_verbose: Option<bool>,
-    #[serde(default)]
-    pub lease_health_warn_pct: Option<u32>,
-    #[serde(default)]
-    pub interface_snapshot_period_secs: Option<u64>,
-    #[serde(default)]
-    pub enable_in_tunnel_dhcpv6: Option<bool>,
-    #[serde(default)]
-    pub dhcp_debug_frames: Option<bool>,
-    /// Optional fixed MAC address to use for in-tunnel DHCP (format: 6 hex bytes with or without colons)
-    #[serde(default)]
-    pub mac_address: Option<String>,
-    /// When true (default), derive a deterministic MAC from username+hub if mac_address not set.
-    #[serde(default)]
-    pub deterministic_mac: Option<bool>,
+    pub ip_version: IpVersionPreference,
 }
 
 impl Default for ClientConfig {
@@ -89,51 +77,45 @@ impl Default for ClientConfig {
             password_hash: None,
             skip_tls_verify: false,
             use_compress: false,
-            use_encrypt: true,
             max_connections: 1,
-            udp_port: None,
-            enable_in_tunnel_dhcp: None,
-            lease_cache_path: None,
-            interface_auto: None,
-            dhcp_metrics_interval_secs: None,
-            interface_snapshot_redact: None,
-            interface_snapshot_verbose: None,
-            lease_health_warn_pct: None,
-            interface_snapshot_period_secs: None,
-            enable_in_tunnel_dhcpv6: None,
-            dhcp_debug_frames: None,
-            mac_address: None,
-            deterministic_mac: None,
+            nat_traversal: None,
+            udp_acceleration: None,
+            static_ip: None,
+            ip_version: IpVersionPreference::Auto,
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StaticIpConfig {
+    /// CIDR string (address/prefix); prefix required to derive mask or routing info.
+    pub ip: String,
+    #[serde(default)]
+    pub gateway: Option<String>,
+    #[serde(default)]
+    pub dns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum IpVersionPreference { Auto, V4, V6 }
+
+impl Default for IpVersionPreference { fn default() -> Self { IpVersionPreference::Auto } }
 
 impl ClientConfig {
     pub fn to_client_option(&self) -> std::result::Result<cedar::ClientOption, mayaqua::Error> {
         let mut opt = cedar::ClientOption::new(&self.server, self.port, &self.hub)?;
         opt = opt.with_max_connections(self.max_connections);
         opt = opt.with_compression(self.use_compress);
-        opt = opt.with_encryption(self.use_encrypt);
-        if let Some(udp) = self.udp_port {
-            opt.port_udp = udp;
-        }
         Ok(opt)
     }
 
     pub fn to_client_auth(&self) -> std::result::Result<cedar::ClientAuth, mayaqua::Error> {
-        if let Some(ref pass) = self.password {
-            return cedar::ClientAuth::new_password(&self.username, pass);
-        }
-        // Prefer SHA-0(password + UPPER(username)) variant when provided
+        if let Some(ref pass) = self.password { return cedar::ClientAuth::new_password(&self.username, pass); }
         if let Some(ref b64) = self.password_hash {
-            // Construct with empty password then replace hashed bytes
             let mut auth = cedar::ClientAuth::new_password(&self.username, "")?;
             auth.plain_password.clear();
-            if let Ok(bytes) = base64::prelude::BASE64_STANDARD.decode(b64) {
-                if bytes.len() == 20 {
-                    auth.hashed_password.copy_from_slice(&bytes);
-                }
-            }
+            if let Ok(bytes) = base64::prelude::BASE64_STANDARD.decode(b64) { if bytes.len() == 20 { auth.hashed_password.copy_from_slice(&bytes); } }
             return Ok(auth);
         }
         Ok(cedar::ClientAuth::new_anonymous())

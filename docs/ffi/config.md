@@ -12,9 +12,9 @@ The JSON config used by `softether_client_create` maps to `crates/config::Client
 - password_hash: string|null, base64 of 20-byte SHA-0(password + UPPER(username)) [preferred]
 - skip_tls_verify: bool, skip TLS verification (development only)
 - use_compress: bool, enable LZ4 compression
-- use_encrypt: bool, enable encryption (recommended)
 - max_connections: number, number of parallel data links (1..N)
-- udp_port: number|null, reserved for future UDP acceleration path
+- nat_traversal: bool, enable NAT traversal (SecureNAT / NAT-T), default false
+- udp_acceleration: bool, enable UDP acceleration datapath (if supported), default false
 
 ## Password guidance
 
@@ -34,7 +34,6 @@ If you can't store plain passwords:
   "username": "user1",
   "password_hash": "T2kl2mB84H5y2tn7n9qf65/8jXI=",
   "use_compress": false,
-  "use_encrypt": true,
   "max_connections": 1,
   "skip_tls_verify": false
 }

@@ -65,7 +65,7 @@ class MyVpnService: VpnService() {
     b.addRoute("0.0.0.0", 0)
     tun = b.establish()
 
-    val json = "{\"server\":\"vpn.example.com\",\"port\":443,\"hub\":\"DEFAULT\",\"username\":\"user\",\"password\":\"pass\",\"use_encrypt\":true,\"use_compress\":false,\"max_connections\":1}"
+  val json = "{\"server\":\"vpn.example.com\",\"port\":443,\"hub\":\"DEFAULT\",\"username\":\"user\",\"password\":\"pass\",\"use_compress\":false,\"max_connections\":1}" // encryption always enabled implicitly
     h = seCreate(json)
     seSetRx(h)
     seConnect(h)

@@ -41,7 +41,6 @@ Header: `include/softether_ffi.h`
 	"username": "user1",
 	"password": "pass123",
 	"use_compress": false,
-	"use_encrypt": true,
 	"max_connections": 1,
 	"skip_tls_verify": false
 }

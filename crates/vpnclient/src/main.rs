@@ -82,9 +82,7 @@ async fn connect(cli: &Cli) -> Result<()> {
             info!("--insecure ignored: enable feature 'allow-insecure' or set env SOFTETHER_VPNCLIENT_ALLOW_INSECURE=1");
         }
     }
-    // Interface snapshot overrides
-    if let Some(redact)=cc.interface_snapshot_redact.as_mut() { if cli.redact_interface { *redact = true; } } else if cli.redact_interface { cc.interface_snapshot_redact = Some(true); }
-    if let Some(verbose)=cc.interface_snapshot_verbose.as_mut() { if cli.verbose_interface { *verbose = true; } } else if cli.verbose_interface { cc.interface_snapshot_verbose = Some(true); }
+    // Snapshot redact/verbose config fields removed; CLI flags now ignored (future: runtime-only effects if reintroduced)
     let mut vpn_client = VpnClient::from_shared_config(cc)?;
     // Wire up event channel so interface_snapshot and metrics events are surfaced
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ClientEvent>();

@@ -55,77 +55,18 @@ cargo run -p client -- --config config.json connect
 
 Use Ctrl+C to disconnect. Set `RUST_LOG=info` or `RUST_LOG=debug` for more detail.
 
-## In‑Tunnel DHCP & Lease Caching
+## In‑Tunnel IP Acquisition (DHCP)
 
-When the server does not push IPv4 settings, the client can negotiate a DHCP lease over the encrypted tunnel using the embedded `dhcproto` + `tun-rs` path (raw Ethernet/IPv4/UDP frames injected via the dataplane).
+Automatic in‑tunnel DHCP is attempted based on a simplified model plus an explicit `ip_version` selector.
 
-Config fields (add under the top‑level JSON, or where your loader maps into `ClientConfig`):
+`ip_version` (optional, default: `"auto"`) values:
+- `"auto"`: Independently decide per family: attempt IPv4 DHCP only if `static_ipv4` absent; attempt IPv6 DHCP only if `static_ipv6` absent. (So effectively "both if neither static is present".)
+- `"v4"`: Only attempt IPv4 DHCP (still skipped if `static_ipv4` provided).
+- `"v6"`: Only attempt IPv6 DHCP (still skipped if `static_ipv6` provided).
 
-```jsonc
-{
-  // ... existing fields ...
-  "enable_in_tunnel_dhcp": true,        // set false to skip DHCP attempt
-  "lease_cache_path": "/var/tmp/sevpn_lease.json", // optional path to persist lease
-  "interface_auto": true, // force OS auto-assigned TUN name ignoring interface_name
-  "dhcp_metrics_interval_secs": 300     // periodic metrics emission interval (min 10s)
-  ,"interface_snapshot_redact": false    // redact IP/DNS in interface snapshot events
-  ,"interface_snapshot_verbose": false  // include extended details (more DNS entries) in snapshots
-}
-```
+If the server control channel already supplies settings for a family, DHCP for that family is skipped regardless of `ip_version`.
 
-Behavior:
-- On connect, if no server‑assigned IP and DHCP is enabled, a cached lease is first loaded (if not expired) to provide immediate network settings.
-- If no valid cache, the client sends DHCP DISCOVER/REQUEST frames; on ACK, it applies IP/DNS (subject to `apply_dns`) and persists the lease.
-- Renewal lifecycle (RFC‑inspired):
-  - T1 (~50%): Unicast RENEW (REQUEST w/ ciaddr+ServerID) attempted with jitter (configurable pct). Up to 3 cycles with exponential backoff (1s,2s,4s equivalent delays).
-  - Fallback: Broadcast RENEW if unicast fails in a cycle.
-  - T2 (~87.5%): REBIND (broadcast REQUEST without ServerID) if all RENEW cycles failed.
-  - Final fallback: Full rediscovery (DISCOVER/REQUEST) before expiry.
-  - Successful RENEW/REBIND/REDISCOVER restarts the cycle with the new lease time.
+Removed legacy flags: `enable_in_tunnel_dhcp`, `enable_in_tunnel_dhcpv6` (now derived), and all former tuning fields (metrics interval, snapshot redaction / verbosity, lease health %, periodic snapshots, DHCP debug frames). Metrics and interface snapshots are event‑driven only.
 
-Notes:
-- Structured events (ClientEvent codes):
-  - 300: renew attempt cycle start
-  - 301: renew success
-  - 302: renew phase exhausted (enter rebind)
-  - 303: rebind attempt
-  - 304: rebind success
-  - 305: rebind failed (rediscover next)
-  - 306: rediscover success
-  - 307: rediscover failed (lease may expire; connection keeps last settings)
-  - 221: interface created (message: `interface: <ifname>`)
-  - 2211: periodic DHCP metrics snapshot (`{"kind":"dhcp_metrics",...}` every 5m)
-  - 222: final DHCP metrics snapshot on disconnect (includes `final_snapshot:true`)
-- Disable with `"enable_in_tunnel_dhcp": false` if the server reliably provides IP settings or for static addressing.
-- The lease cache file is JSON; remove it to force fresh negotiation.
-- Lease cache now also persists `iface` and `xid`; startup reuses the cached transaction ID (xid) and adopts cached iface name if none already established. This can help DHCP servers correlate renewals.
-- Public API: `dhcp_metrics_snapshot()` returns `(renew_attempts,renew_success,rebind_attempts,rebind_success,rediscover_attempts,rediscover_success,failures)` if DHCP enabled.
-- Metrics (in‑memory) track counts of attempts/success/failures for renew/rebind/rediscover; future API exposure may surface them.
-
-Security Considerations:
-- The cached lease contains only layer‑3 parameters (no secrets). Ensure the directory has appropriate permissions if multi‑user.
-
-### Lease Cache JSON Schema (example)
-
-```json
-{
-  "lease": {
-    "client_ip": "10.10.20.34",
-    "server_ip": "10.10.20.1",
-    "subnet_mask": "255.255.255.0",
-    "router": "10.10.20.1",
-    "dns_servers": ["10.10.20.1","1.1.1.1"],
-    "lease_time": 86400              // seconds (serialized Duration)
-  },
-  "expires_at": 1724699999,          // unix epoch seconds when considered stale
-  "iface": "utun5",                  // last interface name used (optional)
-  "xid": 305419896                   // last DHCP transaction ID (u32)
-}
-```
-
-Field notes:
-- `lease_time` may be absent/null if server omits it.
-- Client discards cache if `expires_at` <= current time.
-- `iface` is advisory; if OS assigns a different name, new name overwrites on next persist.
-- `xid` reused on next negotiation to improve continuity; if missing a new random one is generated.
+Security: All DHCP negotiation occurs inside the encrypted tunnel; leases are maintained solely in memory (no persistence).
 

@@ -31,9 +31,10 @@ fn simulate_redirect_and_ticket_capture() {
         password_hash: Some(BASE64_STANDARD.encode([0x22u8; 20])),
         skip_tls_verify: false,
         use_compress: false,
-        use_encrypt: true,
-        max_connections: 1,
-        udp_port: None,
+    // encryption implicit
+    max_connections: 1,
+    nat_traversal: None,
+    udp_acceleration: None,
     };
     let mut client = VpnClient::from_shared_config(cfg).expect("create vpn client");
 

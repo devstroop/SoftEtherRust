@@ -26,7 +26,6 @@ pub struct ClientOption {
     pub retry_interval: u32,                 // Retry interval (seconds)
     pub hubname: String,                     // HUB name
     pub max_connection: u32,                 // Max concurrent TCP connections
-    pub use_encrypt: bool,                   // Use encrypted communication
     pub use_compress: bool,                  // Use data compression
     pub half_connection: bool,               // Use half connection in TCP
     pub no_routing_tracking: bool,           // Disable routing tracking
@@ -41,6 +40,7 @@ pub struct ClientOption {
     pub from_admin_pack: bool,               // For Administration Pack
     pub no_tls1: bool,                       // Do not use TLS 1.0
     pub no_udp_acceleration: bool,           // Do not use UDP acceleration
+    pub enable_nat_traversal: bool,          // Enable NAT traversal (if feature)
     pub host_unique_key: [u8; SHA1_SIZE],    // Host unique key
 }
 
@@ -71,7 +71,7 @@ impl ClientOption {
             retry_interval: 15,
             hubname: hubname.to_string(),
             max_connection: 1,
-            use_encrypt: true,
+            // encryption always enforced (implicit over TLS)
             use_compress: false,
             half_connection: false,
             no_routing_tracking: false,
@@ -86,6 +86,7 @@ impl ClientOption {
             from_admin_pack: false,
             no_tls1: false,
             no_udp_acceleration: false,
+            enable_nat_traversal: false,
             host_unique_key: [0u8; SHA1_SIZE],
         })
     }
@@ -176,11 +177,22 @@ impl ClientOption {
 
     /// Enable UDP acceleration
     pub fn with_udp_acceleration(mut self, enable: bool) -> Self {
-        self.no_udp_acceleration = !enable;
-        if enable && self.port_udp == 0 {
-            self.port_udp = self.port; // Use same port for UDP by default
+        #[cfg(feature = "udp-accel")]
+        {
+            self.no_udp_acceleration = !enable;
+            if enable && self.port_udp == 0 { self.port_udp = self.port; }
         }
+        #[cfg(not(feature = "udp-accel"))]
+        { let _ignored = enable; self.no_udp_acceleration = true; }
         self
+    }
+
+    /// Enable NAT traversal (feature-gated)
+    pub fn with_nat_traversal(self, enable: bool) -> Self {
+        #[cfg(feature = "nat-traversal")]
+        { let mut s=self; s.enable_nat_traversal = enable; return s; }
+        #[cfg(not(feature = "nat-traversal"))]
+        { let _ = enable; self }
     }
 
     /// Set compression
@@ -189,11 +201,6 @@ impl ClientOption {
         self
     }
 
-    /// Set encryption (always enabled by default for security)
-    pub fn with_encryption(mut self, enable: bool) -> Self {
-        self.use_encrypt = enable;
-        self
-    }
 
     /// Set maximum connections
     pub fn with_max_connections(mut self, max: u32) -> Self {
@@ -305,7 +312,7 @@ impl Default for ClientOption {
             retry_interval: 15,
             hubname: String::new(),
             max_connection: 1,
-            use_encrypt: true,
+            // implicit encryption
             use_compress: false,
             half_connection: false,
             no_routing_tracking: false,
@@ -320,6 +327,7 @@ impl Default for ClientOption {
             from_admin_pack: false,
             no_tls1: false,
             no_udp_acceleration: false,
+            enable_nat_traversal: false,
             host_unique_key: [0u8; SHA1_SIZE],
         }
     }

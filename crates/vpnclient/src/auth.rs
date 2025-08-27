@@ -53,11 +53,11 @@ impl VpnClient {
     }
 
     pub(crate) fn create_client_option(&self) -> Result<ClientOption> {
-        let mut option =
-            ClientOption::new(&self.config.host, self.config.port, &self.config.hub_name)?
-                .with_compression(false)
-                .with_udp_acceleration(self.config.connection.udp_acceleration)
-                .with_max_connections(self.config.connection.max_connections);
+        let mut option = ClientOption::new(&self.config.host, self.config.port, &self.config.hub_name)?
+            .with_compression(false)
+            .with_udp_acceleration(self.config.connection.udp_acceleration)
+            .with_nat_traversal(self.config.connection.nat_traversal)
+            .with_max_connections(self.config.connection.max_connections);
         if self.config.connection.half_connection {
             option.half_connection = true;
         }
@@ -126,7 +126,6 @@ impl VpnClient {
             p.add_str("username", &client_auth.username)?;
             p.add_str("protocol", CEDAR_SIGNATURE_STR)?;
             p.add_int("max_connection", client_option.max_connection)?;
-            p.add_int("use_encrypt", client_option.use_encrypt as u32)?;
             p.add_int("use_compress", 0)?;
             p.add_int("half_connection", client_option.half_connection as u32)?;
             p.add_int("authtype", 1)?;
@@ -150,7 +149,6 @@ impl VpnClient {
             p.add_str("username", &client_auth.username)?;
             p.add_str("protocol", CEDAR_SIGNATURE_STR)?;
             p.add_int("max_connection", client_option.max_connection)?;
-            p.add_int("use_encrypt", client_option.use_encrypt as u32)?;
             p.add_int("use_compress", 0)?;
             p.add_int("half_connection", client_option.half_connection as u32)?;
             p.add_int("authtype", 99)?;

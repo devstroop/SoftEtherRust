@@ -12,7 +12,6 @@ This document consolidates DHCP metrics and interface snapshot related events em
 | 222  | Info  | final metrics snapshot (disconnect) | JSON `{ "kind":"dhcp_metrics", "final_snapshot":true, ... , "interface":{...}}` |
 | 2220 | Info  | initial interface snapshot | JSON `{ "kind":"interface_snapshot", ... , "initial":true }` |
 | 2221 | Info  | interface change snapshot | JSON `{ "kind":"interface_snapshot", ... , "initial":false }` |
-| 2222 | Warn  | lease health warning | JSON `{ "kind":"lease_health", "remaining_pct": <int>, ... }` |
 | 291  | Warn  | dataplane link removed | text |
 | 292  | Info  | dataplane link registered | text |
 | 293  | Warn  | dataplane tx failure | text |
@@ -79,9 +78,8 @@ Initial (2220) or change (2221):
   "t2_epoch": 1724705555,
   "expiry_epoch": 1724788888,
   "mtu": 1500,
-  "xid": 305419896,
-  "cache_reused": true,
-  "interface_auto": true,
+  "xid": null,
+  "cache_reused": false,
   "initial": true,
   "verbose": false
 }
@@ -104,9 +102,8 @@ Redacted output (when `interface_snapshot_redact=true` or `--redact-interface`):
   "t2_epoch": 1724705555,
   "expiry_epoch": 1724788888,
   "mtu": 1500,
-  "xid": 305419896,
+  "xid": null,
   "cache_reused": false,
-  "interface_auto": true,
   "initial": true,
   "verbose": false
 }
@@ -128,7 +125,7 @@ CLI overrides:
 - Initial snapshot emitted only once per connect.
 - Change snapshots only emitted on material change (IP, mask, router, DNS list).
 - DNS list truncated (4 entries normal, 8 in verbose mode).
-- Periodic metrics controlled by interval setting; final metrics always emitted on disconnect (if DHCP enabled).
+- Periodic metrics controlled by interval setting; final metrics always emitted on disconnect (if DHCP was attempted).
 
 Dataplane lifecycle / failure visibility (Option A minimal recovery):
 - 292 emitted when a link is registered.
@@ -146,8 +143,7 @@ Unknown extra fields should be ignored for forward compatibility.
 ## Future Extensions
 
 Implemented additions:
-- Lease health warning event (2222) when remaining percent <= configured threshold.
-- Renew elapsed reset marker (3001) to allow external tracking of time since last successful lease refresh.
+No current lease persistence or health warning events (previous 2222 removed with cache elimination).
 
 Planned:
 - Add IPv6 snapshot fields.

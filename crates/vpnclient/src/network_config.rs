@@ -187,7 +187,10 @@ impl VpnClient {
         #[cfg(target_os = "macos")]
         if let Some(_tun) = self.tun.as_ref() {
             use tokio::process::Command;
-            let ifname = &self.config.client.interface_name;
+            let ifname = self
+                .actual_interface_name
+                .as_deref()
+                .unwrap_or(&self.config.client.interface_name);
             // ifconfig <ifname> inet <ip> <mask> up
             let _ = Command::new("ifconfig")
                 .arg(ifname)
@@ -237,8 +240,13 @@ impl VpnClient {
         #[cfg(target_os = "macos")]
         {
             use tokio::process::Command;
+            let ifname = self
+                .actual_interface_name
+                .as_deref()
+                .unwrap_or(&self.config.client.interface_name)
+                .to_string();
             let _ = Command::new("ifconfig")
-                .arg(self.config.client.interface_name.clone())
+                .arg(ifname)
                 .arg("mtu")
                 .arg("1500")
                 .output()
