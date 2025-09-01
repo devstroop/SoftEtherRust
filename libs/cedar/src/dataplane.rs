@@ -98,7 +98,7 @@ impl DataPlane {
 
         let inner = Arc::new(Mutex::new(Inner {
             half_connection,
-            session_tx,
+            session_tx: session_tx.clone(), // Store for feeding from links
             adapter_rx_tx: None,
             tap_rx_tx: None,
             adapter_tx_task: None,
@@ -114,7 +114,16 @@ impl DataPlane {
         // Spawn the scheduler that forwards frames from session_rx to link writers
         let inner_for_task = inner.clone();
         let tx_task = tokio::spawn(async move {
+            debug!("DataPlane scheduler started - will forward session frames to links");
             while let Some(frame) = session_rx.recv().await {
+                debug!("DataPlane scheduler: received {} bytes from session", frame.len());
+                
+                // Log frame type for debugging
+                if frame.len() >= 14 {
+                    let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+                    debug!("DataPlane scheduler: EtherType=0x{:04x} len={}", ethertype, frame.len());
+                }
+                
                 // Choose a TX-capable link under lock, but don't hold across await
                 let target_id = {
                     let mut g = inner_for_task.lock().unwrap();
@@ -159,13 +168,13 @@ impl DataPlane {
                         g.links.get(&id).map(|l| l.writer_tx.clone())
                     };
                     if let Some(w) = writer {
-                        debug!("dataplane: TX frame len={} via link id={id}", frame.len());
+                        debug!("DataPlane scheduler: forwarding {} bytes to link id={}", frame.len(), id);
                         let _ = w.send(frame);
                     } else {
-                        warn!("dataplane: no writer found for link id={id}");
+                        warn!("DataPlane scheduler: no writer found for link id={}", id);
                     }
                 } else {
-                    warn!("dataplane: no active links for TX frame (dropping)");
+                    warn!("DataPlane scheduler: no active links for frame (len={}) - dropping", frame.len());
                 }
             }
         });
@@ -191,62 +200,26 @@ impl DataPlane {
     /// Spawns a task to forward those frames into the dataplane's scheduling path (session_tx).
     pub fn set_adapter_tx(&self, mut rx: mpsc::UnboundedReceiver<Vec<u8>>) {
         let inner = self.inner.clone();
-        let task = tokio::spawn(async move {
+        let _task = tokio::spawn(async move {
+            debug!("DataPlane adapter TX task started (TAP → Links)");
             while let Some(frame) = rx.recv().await {
-                // Choose a TX-capable link to send this frame
-                let target_id = {
-                    let mut g = inner.lock().unwrap();
-                    let elig: Vec<u64> = g
-                        .links
-                        .iter()
-                        .filter_map(|(id, l)| {
-                            if l.direction != LinkDirection::ServerToClient {
-                                Some(*id)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    if elig.is_empty() {
-                        None
-                    } else if g.half_connection {
-                        if let Some(id) = g.links.iter().find_map(|(id, l)| {
-                            if l.direction == LinkDirection::ClientToServer {
-                                Some(*id)
-                            } else {
-                                None
-                            }
-                        }) {
-                            Some(id)
-                        } else {
-                            let idx = g.rr_index % elig.len();
-                            g.rr_index = g.rr_index.wrapping_add(1);
-                            Some(elig[idx])
-                        }
-                    } else {
-                        let idx = g.rr_index % elig.len();
-                        g.rr_index = g.rr_index.wrapping_add(1);
-                        Some(elig[idx])
-                    }
+                debug!("DataPlane adapter TX: received {} bytes from TAP", frame.len());
+                
+                // ✅ FIX: Send directly to session_tx to feed the scheduler
+                let session_tx = {
+                    let g = inner.lock().unwrap();
+                    g.session_tx.clone()
                 };
-
-                if let Some(id) = target_id {
-                    let writer = {
-                        let g = inner.lock().unwrap();
-                        g.links.get(&id).map(|l| l.writer_tx.clone())
-                    };
-                    if let Some(w) = writer {
-                        let _ = w.send(frame);
-                    } else {
-                        warn!("dataplane: no writer for selected link id={id} (adapter TX)");
-                    }
-                } else {
-                    warn!("dataplane: no active links for adapter TX frame (dropping)");
+                
+                if let Err(_) = session_tx.send(frame) {
+                    warn!("DataPlane adapter TX: session channel closed");
+                    break;
                 }
             }
+            debug!("DataPlane adapter TX task ended");
         });
         let mut g = self.inner.lock().unwrap();
-        g.adapter_tx_task = Some(task);
+        g.adapter_tx_task = Some(_task);
     }
 
     /// Set an optional RX tap to observe frames delivered from links (used by protocol helpers like DHCP).
@@ -316,6 +289,7 @@ impl DataPlane {
     /// Register a bonded TLS stream with direction and spawn RX/TX workers.
     pub fn register_link(&self, tls: TlsStream<TcpStream>, direction: i32) -> u64 {
         let direction = LinkDirection::from(direction);
+        debug!("dataplane: registering link with direction={:?}", direction);
         // Shared TLS for RX/TX guarded by a mutex
         let tls_shared = Arc::new(Mutex::new(tls));
         // Writer channel toward this link
@@ -324,7 +298,12 @@ impl DataPlane {
         // RX task: parse frames from link RX and forward to adapter sink
         let inner_for_rx = self.inner.clone();
         let tls_for_rx = tls_shared.clone();
+        let link_id_for_debug = {
+            let g = self.inner.lock().unwrap();
+            g.next_id
+        };
         let rx_handle = tokio::task::spawn_blocking(move || {
+            debug!("dataplane: Starting RX loop for link_id={}", link_id_for_debug);
             // limit hexdump logs to avoid noise
             let mut debug_hexdump_budget: usize = 8;
             loop {
@@ -466,12 +445,18 @@ impl DataPlane {
                 // Forward to adapter sink and tap (if any)
                 let adapter_tx_opt = { inner_for_rx.lock().unwrap().adapter_rx_tx.clone() };
                 if let Some(ext) = adapter_tx_opt {
+                    debug!("DataPlane link RX: forwarding {} frames to adapter sink", frames.len());
                     for f in &frames {
                         let _ = ext.send(f.clone());
+                    }
+                } else {
+                    if !frames.is_empty() {
+                        debug!("DataPlane link RX: no adapter sink configured - {} frames dropped", frames.len());
                     }
                 }
                 let tap_tx_opt = { inner_for_rx.lock().unwrap().tap_rx_tx.clone() };
                 if let Some(ext) = tap_tx_opt {
+                    debug!("DataPlane link RX: forwarding {} frames to tap", frames.len());
                     for f in &frames {
                         let _ = ext.send(f.clone());
                     }
@@ -572,6 +557,7 @@ impl DataPlane {
             },
         );
     if let Some(cb)=&self.event_cb { cb(292, format!("dataplane link registered id={id} direction={direction:?}")); }
+        debug!("dataplane: link_id={} fully registered and RX/TX tasks started", id);
         id
     }
 

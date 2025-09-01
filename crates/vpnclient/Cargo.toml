@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 mayaqua = { path = "../../libs/mayaqua" }
 cedar = { path = "../../libs/cedar" }
-tun-rs = { path = "../../libs/tun-rs" }
+tun-rs = { path = "../../libs/tun-rs", features = ["async_tokio"] }
 dhcproto = { path = "../../libs/dhcproto" }
 
 # Async runtime
@@ -53,7 +53,6 @@ trace = []
 adapter-tests = []
 test-redirect = []
 dev-proto = []
-allow-insecure = []
 
 # Platform-specific network adapter
 [target.'cfg(target_os = "macos")'.dependencies]

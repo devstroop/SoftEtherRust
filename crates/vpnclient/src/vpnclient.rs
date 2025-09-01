@@ -88,7 +88,7 @@ pub struct VpnClient {
 
 use crate::types::settings_json_with_kind;
 use crate::types::{ClientEvent, ClientState, EventLevel, NetworkSettings, SessionStats};
-use tun_rs::DeviceBuilder;
+use tun_rs::{DeviceBuilder, Layer};
 use crate::dhcp::Lease as DhcpLease;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -343,8 +343,8 @@ impl VpnClient {
                 #[cfg(target_os = "macos")]
                 {
                     if self.config.client.interface_name == "auto" {
-                        match DeviceBuilder::new().mtu(1500).build_sync() {
-                            Ok(dev)=>{ if let Ok(n)=dev.name(){ self.actual_interface_name=Some(n.clone()); info!("Created TUN interface: {} (auto-assigned, forced)", n); self.emit_event(EventLevel::Info,221,format!("interface: {}", n)); } self.tun=Some(dev);} Err(e)=>warn!("Failed to create TUN interface (auto-assigned, forced): {}", e)
+                        match DeviceBuilder::new().layer(Layer::L2).mtu(1500).build_sync() {
+                            Ok(dev)=>{ if let Ok(n)=dev.name(){ self.actual_interface_name=Some(n.clone()); info!("Created TAP interface: {} (auto-assigned)", n); self.emit_event(EventLevel::Info,221,format!("interface: {}", n)); } self.tun=Some(dev);} Err(e)=>warn!("Failed to create TAP interface (auto-assigned): {}", e)
                         }
                     } else {
                         let requested = self.config.client.interface_name.clone();
@@ -353,7 +353,7 @@ impl VpnClient {
                             let base_index = requested[4..].parse::<u32>().unwrap_or(0);
                             for idx in base_index..=base_index+32 {
                                 let cand=format!("utun{}", idx); tried.push(cand.clone());
-                                match DeviceBuilder::new().name(cand.clone()).mtu(1500).build_sync(){
+                                match DeviceBuilder::new().layer(Layer::L2).name(cand.clone()).mtu(1500).build_sync(){
                                     Ok(dev)=>{ if let Ok(actual)=dev.name(){ self.actual_interface_name=Some(actual.clone()); info!("Created TUN interface: {} (after probing)", actual); self.emit_event(EventLevel::Info,221,format!("interface: {}", actual)); } self.tun=Some(dev); created=true; break; }
                                     Err(e)=>{ if let Some(raw)=e.raw_os_error(){ if raw!=16 { warn!("Failed to create TUN interface {}: {}", cand, e); break; }} }
                                 }
@@ -361,7 +361,7 @@ impl VpnClient {
                             if !created { info!("All probed utun names busy (tried: {:?}); falling back to auto-assignment", tried); }
                         } else { info!("Interface name '{}' not macOS-style; using system auto-assignment", requested); }
                         if !created && self.tun.is_none(){
-                            match DeviceBuilder::new().mtu(1500).build_sync(){
+                            match DeviceBuilder::new().layer(Layer::L2).mtu(1500).build_sync(){
                                 Ok(dev)=>{ if let Ok(actual)=dev.name(){ self.actual_interface_name=Some(actual.clone()); info!("Created TUN interface: {} (auto-assigned)", actual); self.emit_event(EventLevel::Info,221,format!("interface: {}", actual)); } else { info!("Created TUN interface (auto-assigned)"); } self.tun=Some(dev); }
                                 Err(e)=>warn!("Failed to create TUN interface (auto-assigned): {}", e)
                             }
@@ -371,22 +371,17 @@ impl VpnClient {
                 #[cfg(not(target_os = "macos"))]
                 {
                     if self.config.client.interface_name == "auto" {
-                        match DeviceBuilder::new().mtu(1500).build_sync(){
+                        match DeviceBuilder::new().layer(Layer::L2).mtu(1500).build_sync(){
                             Ok(dev)=>{ if let Ok(n)=dev.name(){ self.actual_interface_name=Some(n.clone()); info!("Created TUN interface: {} (auto-assigned, forced)", n); self.emit_event(EventLevel::Info,221,format!("interface: {}", n)); } self.tun=Some(dev);} Err(e)=>warn!("Failed to create TUN interface (auto-assigned, forced): {}", e)
                         }
                     } else {
                         let ifname=self.config.client.interface_name.clone();
-                        match DeviceBuilder::new().name(ifname.clone()).mtu(1500).build_sync(){
+                        match DeviceBuilder::new().layer(Layer::L2).name(ifname.clone()).mtu(1500).build_sync(){
                             Ok(dev)=>{ if let Ok(n)=dev.name(){ self.actual_interface_name=Some(n.clone()); } info!("Created TUN interface: {}", ifname); self.emit_event(EventLevel::Info,221,format!("interface: {}", ifname)); self.tun=Some(dev);} Err(e)=>warn!("Failed to create TUN interface: {}", e)
                         }
                     }
                 }
             }
-            // Apply DHCP timing from config via environment overrides consumed by dhcp.rs
-            std::env::set_var("RUST_DHCP_SETTLE_MS", self.config.client.dhcp_settle_ms.to_string());
-            std::env::set_var("RUST_DHCP_DISCOVER_INITIAL_MS", self.config.client.dhcp_initial_ms.to_string());
-            std::env::set_var("RUST_DHCP_DISCOVER_MAX_MS", self.config.client.dhcp_max_ms.to_string());
-            std::env::set_var("RUST_DHCP_JITTER_PCT", format!("{}", self.config.client.dhcp_jitter_pct));
             self.emit_event(EventLevel::Info, 220, "tunnel opened");
 
             // If static network provided in runtime config, apply it pre-DHCP and emit a snapshot.
@@ -429,6 +424,35 @@ impl VpnClient {
             }
             // Establish the first bulk data link via additional_connect before bridging/DHCP
             if let Err(e) = self.open_primary_data_link().await { error!("Failed to establish primary data link: {}", e); return Err(e); }
+            // Wire dataplane <-> TAP bridge (RX always; TX always enabled for TAP)
+            self.setup_adapter_bridge();
+            
+            // 🔧 STATIC IP FIX: Apply static network configuration if provided
+            if let Some(static_ns) = &self.config.static_network {
+                info!("Applying static network configuration: IPv4={:?}, Gateway={:?}", 
+                    static_ns.assigned_ipv4, static_ns.gateway);
+                
+                // Set the network settings and apply them
+                self.network_settings = Some(static_ns.clone());
+                
+                // Apply network settings to the interface
+                if let Err(e) = self.apply_network_settings().await {
+                    error!("Failed to apply static network settings: {}", e);
+                    return Err(e);
+                }
+                
+                // Emit success event
+                if let Some(tx) = &self.event_tx {
+                    let _ = tx.send(ClientEvent {
+                        level: EventLevel::Info,
+                        code: 292,
+                        message: "Static IP configuration applied successfully".to_string(),
+                    });
+                }
+                
+                info!("Static IP applied successfully, skipping DHCP acquisition");
+            }
+            
             // Early placeholder snapshot if we already know there will be no server settings and DHCP disabled
             if self.network_settings.is_none() && !self.config.client.enable_in_tunnel_dhcp { self.emit_placeholder_interface_snapshot(); }
             // If require_static_ip flag is set but no static network provided, abort before any DHCP logic
@@ -968,6 +992,103 @@ impl VpnClient {
             }
         }
         Ok(())
+    }
+
+    /// Setup TAP ↔ DataPlane bridge for bidirectional traffic flow.
+    /// TAP interface handles Layer 2 Ethernet frames (required for DHCP compatibility).
+    fn setup_adapter_bridge(&mut self) {
+        let Some(dp) = self.dataplane.clone() else { return; };
+        let Some(tap_dev) = self.tun.take() else { return; };
+        let tap_shared = std::sync::Arc::new(std::sync::Mutex::new(tap_dev));
+
+        // RX: dataplane -> TAP interface (Server -> Local)
+        let (rx_tx, mut rx_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        dp.set_adapter_rx(rx_tx);
+        let tap_rx = tap_shared.clone();
+        let rx_task = tokio::spawn(async move {
+            debug!("TAP bridge RX task started (DataPlane -> TAP)");
+            while let Some(frame) = rx_rx.recv().await {
+                debug!("TAP bridge: received {} bytes from DataPlane -> TAP", frame.len());
+                // Log frame type for debugging
+                if frame.len() >= 14 {
+                    let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+                    debug!("TAP bridge RX: EtherType=0x{:04x} len={}", ethertype, frame.len());
+                }
+                // TAP interface expects full Ethernet frames - send as-is
+                if let Ok(dev) = tap_rx.lock() {
+                    match dev.send(&frame) {
+                        Ok(_) => debug!("TAP bridge: sent {} bytes to TAP interface", frame.len()),
+                        Err(e) => warn!("TAP bridge: failed to send to TAP interface: {}", e),
+                    }
+                } else {
+                    warn!("TAP bridge: failed to acquire TAP device lock");
+                }
+            }
+            debug!("TAP bridge RX task ending");
+        });
+        self.aux_tasks.push(rx_task);
+
+        // TX: TAP interface -> dataplane (Local -> Server) - Always enabled for TAP
+        let (tx_tx, tx_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        dp.set_adapter_tx(tx_rx);
+        let tap_tx = tap_shared.clone();
+        let tx_task = tokio::spawn(async move {
+            debug!("TAP bridge TX task started (TAP -> DataPlane)");
+            
+            // Wait briefly for DataPlane to be fully ready
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            
+            loop {
+                // Read full Ethernet frame from TAP interface
+                let mut buf = [0u8; 2000];
+                match tokio::task::spawn_blocking({
+                    let tap = tap_tx.clone();
+                    move || {
+                        if let Ok(dev) = tap.lock() {
+                            dev.recv(&mut buf)
+                        } else {
+                            Err(std::io::Error::new(std::io::ErrorKind::Other, "TAP lock failed"))
+                        }
+                    }
+                }).await {
+                    Ok(Ok(n)) => {
+                        if n == 0 {
+                            continue;
+                        }
+                        let frame = buf[..n].to_vec();
+                        debug!("TAP bridge: received {} bytes from TAP interface -> DataPlane", frame.len());
+                        
+                        // Log frame type for debugging  
+                        if frame.len() >= 14 {
+                            let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+                            debug!("TAP bridge TX: EtherType=0x{:04x} len={}", ethertype, frame.len());
+                        }
+                        
+                        // Send full Ethernet frame to DataPlane
+                        if let Err(e) = tx_tx.send(frame) {
+                            warn!("TAP bridge: failed to send to DataPlane: {}", e);
+                            break;
+                        } else {
+                            debug!("TAP bridge: sent {} bytes to DataPlane", n);
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        warn!("TAP bridge: TAP interface read error: {}", e);
+                        // Continue on read errors - interface might recover
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    }
+                    Err(e) => {
+                        error!("TAP bridge: blocking task failed: {}", e);
+                        break;
+                    }
+                }
+            }
+            debug!("TAP bridge TX task ending");
+        });
+        self.aux_tasks.push(tx_task);
+
+        debug!("TAP ↔ DataPlane bridge established with bidirectional traffic flow");
+        // Keep no direct handle; the Arc in tasks holds the device lifetime. Teardown uses applied_resources.
     }
 
     // auth-related methods moved to vpnclient/auth.rs

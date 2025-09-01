@@ -23,7 +23,7 @@ struct Cli {
     verbose: bool,
 
     /// Disable TLS certificate verification (insecure). Overrides config for this run.
-    /// Guarded by feature flag or env (SOFTETHER_VPNCLIENT_ALLOW_INSECURE=1).
+    /// Guarded by env var: set SOFTETHER_ALLOW_INSECURE=1 to enable this flag.
     #[arg(long, default_value_t = false)]
     insecure: bool,
 
@@ -40,12 +40,9 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Initialize tracing with env overrides
-    // Priority: RUST_LOG (standard), then RUST_LOG_LEVEL (custom, e.g., "debug"), then --verbose flag
+    // Initialize tracing - use standard RUST_LOG or fallback to CLI verbose flag
     let fallback = if cli.verbose { "debug" } else { "info" };
-    let default_level = std::env::var("RUST_LOG_LEVEL").unwrap_or_else(|_| fallback.to_string());
     let env_filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new(default_level.clone()))
         .unwrap_or_else(|_| EnvFilter::new(fallback));
 
     tracing_subscriber::registry()
@@ -72,18 +69,16 @@ async fn connect(cli: &Cli) -> Result<()> {
         tracing::warn!("Unknown config keys: {} (ignored)", unknown.join(","));
     }
     let mut cc = cc_loaded;
-    // Optional override: --insecure only effective when allowed via feature or env
-    let allow_insecure = cfg!(feature = "allow-insecure")
-        || std::env::var("SOFTETHER_VPNCLIENT_ALLOW_INSECURE")
-            .ok()
-            .as_deref()
-            == Some("1");
+    // Optional override: --insecure only effective when allowed via env var
+    let allow_insecure = std::env::var("SOFTETHER_ALLOW_INSECURE")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false);
     if cli.insecure {
         if allow_insecure {
             info!("--insecure enabled for this run (overrides config)");
             cc.skip_tls_verify = true;
         } else {
-            info!("--insecure ignored: enable feature 'allow-insecure' or set env SOFTETHER_VPNCLIENT_ALLOW_INSECURE=1");
+            info!("--insecure ignored: set env SOFTETHER_ALLOW_INSECURE=1 to enable");
         }
     }
     // Snapshot redact/verbose config fields removed; CLI flags now ignored (future: runtime-only effects if reintroduced)
