@@ -3200,6 +3200,7 @@ dependencies = [
  "clap 4.5.45",
  "dhcproto",
  "hex",
+ "ipnet",
  "libc",
  "log",
  "mayaqua",

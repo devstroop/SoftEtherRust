@@ -446,35 +446,61 @@ impl VpnClient {
             }
             #[cfg(target_os = "macos")]
             {
-                if self.config.connection.apply_dns {
+                // Check if server has NoRouting policy - if so, skip DNS changes entirely
+                let has_no_routing = ns
+                    .policies
+                    .iter()
+                    .any(|(k, v)| k.to_ascii_lowercase().contains("norouting") && *v != 0);
+
+                if has_no_routing {
+                    info!("Server policy 'NoRouting' detected; skipping DNS changes (Local Bridge Mode)");
+                    if !ns.dns_servers.is_empty() || !ns.dns_servers_v6.is_empty() {
+                        info!(
+                            "(macOS) VPN DNS servers available but not applied in Local Bridge Mode: {} (manual apply if needed: networksetup -setdnsservers <ServiceName> {})",
+                            ns.dns_servers
+                                .iter()
+                                .map(|d| d.to_string())
+                                .chain(ns.dns_servers_v6.iter().map(|d| d.to_string()))
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            ns.dns_servers
+                                .iter()
+                                .map(|d| d.to_string())
+                                .chain(ns.dns_servers_v6.iter().map(|d| d.to_string()))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        );
+                    }
+                } else if self.config.connection.apply_dns {
                     use tokio::process::Command;
                     let mut service_name: Option<String> =
                         self.config.client.macos_dns_service_name.clone();
                     if service_name.is_none() {
-                        let out = Command::new("networksetup")
-                            .arg("-listnetworkserviceorder")
-                            .output()
-                            .await?;
-                        if out.status.success() {
-                            let s = String::from_utf8_lossy(&out.stdout);
-                            let mut last_service: Option<String> = None;
-                            for line in s.lines() {
-                                let line = line.trim();
-                                if line.starts_with('(') {
-                                    if let Some(pos) = line.find(") ") {
-                                        let name = line[pos + 2..].trim();
-                                        if !name.is_empty() {
-                                            last_service = Some(name.to_string());
+                        // Try to find a service associated with the VPN interface
+                        if let Some(vpn_interface) = &self.actual_interface_name {
+                            let out = Command::new("networksetup")
+                                .arg("-listnetworkserviceorder")
+                                .output()
+                                .await?;
+                            if out.status.success() {
+                                let s = String::from_utf8_lossy(&out.stdout);
+                                let mut last_service: Option<String> = None;
+                                for line in s.lines() {
+                                    let line = line.trim();
+                                    if line.starts_with('(') {
+                                        if let Some(pos) = line.find(") ") {
+                                            let name = line[pos + 2..].trim();
+                                            if !name.is_empty() {
+                                                last_service = Some(name.to_string());
+                                            }
                                         }
                                     }
-                                }
-                                if line.contains("Device:") {
-                                    if let Some(dev_pos) = line.find("Device:") {
-                                        let dev = line[dev_pos + 7..].trim();
-                                        let dev = dev.trim_end_matches(')');
-                                        let dev = dev.trim();
-                                        if !dev.is_empty() {
-                                            if dev.starts_with("en") || dev.starts_with("bridge") {
+                                    if line.contains("Device:") {
+                                        if let Some(dev_pos) = line.find("Device:") {
+                                            let dev = line[dev_pos + 7..].trim();
+                                            let dev = dev.trim_end_matches(')');
+                                            let dev = dev.trim();
+                                            if !dev.is_empty() && dev == vpn_interface {
                                                 if let Some(svc) = last_service.clone() {
                                                     service_name = Some(svc);
                                                     break;
@@ -484,6 +510,26 @@ impl VpnClient {
                                     }
                                 }
                             }
+                        }
+                        
+                        // Fallback: warn user instead of applying to physical interface
+                        if service_name.is_none() {
+                            warn!("Could not find network service for VPN interface; DNS not applied automatically");
+                            info!(
+                                "(macOS) DNS servers suggested: {} (manual apply with: networksetup -setdnsservers <ServiceName> {})",
+                                ns.dns_servers
+                                    .iter()
+                                    .map(|d| d.to_string())
+                                    .chain(ns.dns_servers_v6.iter().map(|d| d.to_string()))
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
+                                ns.dns_servers
+                                    .iter()
+                                    .map(|d| d.to_string())
+                                    .chain(ns.dns_servers_v6.iter().map(|d| d.to_string()))
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                            );
                         }
                     }
                     if let Some(svc) = service_name {
@@ -551,11 +597,23 @@ impl VpnClient {
                                 r.dns_service_name = Some(svc.clone());
                             }
                         }
-                    } else {
-                        info!("(macOS) DNS servers suggested: {} (manual apply with: networksetup -setdnsservers <ServiceName> <servers> )", ns.dns_servers.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "));
                     }
                 } else {
-                    info!("(macOS) DNS servers suggested: {} (manual apply with: networksetup -setdnsservers <ServiceName> <servers> )", ns.dns_servers.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "));
+                    info!(
+                        "(macOS) DNS servers suggested: {} (manual apply with: networksetup -setdnsservers <ServiceName> {})",
+                        ns.dns_servers
+                            .iter()
+                            .map(|d| d.to_string())
+                            .chain(ns.dns_servers_v6.iter().map(|d| d.to_string()))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        ns.dns_servers
+                            .iter()
+                            .map(|d| d.to_string())
+                            .chain(ns.dns_servers_v6.iter().map(|d| d.to_string()))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
                 }
             }
         }

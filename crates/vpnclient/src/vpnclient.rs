@@ -651,12 +651,19 @@ impl VpnClient {
             }
         }
 
-        // Stop session
+        // Stop session with timeout to prevent hanging
         if let Some(mut session) = self.session.take() {
-            session.stop().await?;
+            match timeout(Duration::from_secs(2), session.stop()).await {
+                Ok(result) => {
+                    result?;
+                }
+                Err(_) => {
+                    warn!("Session stop timed out after 2s, forcing close");
+                }
+            }
         }
 
-        // Close connection
+        // Close connection (this should be fast)
         if let Some(connection) = self.connection.take() {
             connection.close()?;
         }
@@ -937,11 +944,14 @@ impl VpnClient {
         // Connect to server
         self.connect().await?;
 
-        // Set up signal handling
+        // Set up signal handling with immediate shutdown on first signal
         let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
         let mut sigint = signal::unix::signal(signal::unix::SignalKind::interrupt())?;
         // Cross-platform fallback (also works on macOS)
         let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
+        
+        // Flag to ensure we only handle first signal
+        let mut shutdown_initiated = false;
 
         info!("VPN client running. Press Ctrl+C to disconnect.");
 
@@ -950,25 +960,42 @@ impl VpnClient {
             tokio::select! {
                 // Handle SIGTERM
                 _ = sigterm.recv() => {
-                    info!("Received SIGTERM, shutting down...");
-                    break;
+                    if !shutdown_initiated {
+                        shutdown_initiated = true;
+                        info!("Received SIGTERM, shutting down...");
+                        break;
+                    }
                 },
 
                 // Handle SIGINT (Ctrl+C)
                 _ = sigint.recv() => {
-                    info!("Received SIGINT, shutting down...");
-                    break;
+                    if !shutdown_initiated {
+                        shutdown_initiated = true;
+                        info!("Received SIGINT, shutting down...");
+                        break;
+                    } else {
+                        // Second signal - force exit immediately
+                        warn!("Second SIGINT received - forcing immediate exit");
+                        std::process::exit(0);
+                    }
                 },
 
                 // Fallback Ctrl+C
                 _ = &mut ctrl_c => {
-                    info!("Received Ctrl+C, shutting down...");
-                    break;
+                    if !shutdown_initiated {
+                        shutdown_initiated = true;
+                        info!("Received Ctrl+C, shutting down...");
+                        break;
+                    } else {
+                        // Second Ctrl+C - force exit immediately
+                        warn!("Second Ctrl+C received - forcing immediate exit");
+                        std::process::exit(0);
+                    }
                 },
 
                 // Keep alive check
                 _ = sleep(Duration::from_secs(30)) => {
-                    if self.is_connected {
+                    if self.is_connected && !shutdown_initiated {
                         if let Err(e) = self.keep_alive_check().await {
                             error!("Keep alive check failed: {}", e);
                             break;
@@ -978,17 +1005,19 @@ impl VpnClient {
             }
         }
 
-        // Disconnect gracefully with a timeout; if it hangs, abort tasks and proceed
-        match timeout(Duration::from_secs(8), self.disconnect()).await {
+        // Disconnect gracefully with a shorter timeout; if it hangs, abort and exit immediately
+        match timeout(Duration::from_secs(3), self.disconnect()).await {
             Ok(res) => {
                 res?;
             }
             Err(_) => {
-                warn!("Graceful disconnect timed out; forcing shutdown");
+                warn!("Graceful disconnect timed out after 3s; forcing shutdown");
                 // Best-effort: abort background tasks to avoid lingering
                 for handle in self.aux_tasks.drain(..) {
                     handle.abort();
                 }
+                // Force exit if disconnect hangs
+                std::process::exit(0);
             }
         }
         Ok(())

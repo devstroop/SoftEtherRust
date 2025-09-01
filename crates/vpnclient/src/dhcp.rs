@@ -20,10 +20,28 @@ pub struct Lease {
     pub router: Option<Ipv4Addr>,
     pub dns_servers: Vec<Ipv4Addr>,
     pub lease_time: Option<Duration>,
+    pub domain_name: Option<String>,
+    pub interface_mtu: Option<u16>,
+    pub broadcast_addr: Option<Ipv4Addr>,
+    pub classless_routes: Vec<(ipnet::Ipv4Net, Ipv4Addr)>,
 }
 
 impl Default for Lease {
-    fn default() -> Self { Self { client_ip: Ipv4Addr::UNSPECIFIED, server_ip: None, server_mac: None, subnet_mask: None, router: None, dns_servers: Vec::new(), lease_time: None } }
+    fn default() -> Self { 
+        Self { 
+            client_ip: Ipv4Addr::UNSPECIFIED, 
+            server_ip: None, 
+            server_mac: None, 
+            subnet_mask: None, 
+            router: None, 
+            dns_servers: Vec::new(), 
+            lease_time: None,
+            domain_name: None,
+            interface_mtu: None,
+            broadcast_addr: None,
+            classless_routes: Vec::new(),
+        } 
+    }
 }
 
 pub struct DhcpClient {
@@ -160,6 +178,10 @@ impl DhcpClient {
             v4::OptionCode::Router,
             v4::OptionCode::DomainNameServer,
             v4::OptionCode::AddressLeaseTime,
+            v4::OptionCode::DomainName,
+            v4::OptionCode::InterfaceMtu,
+            v4::OptionCode::BroadcastAddr,
+            v4::OptionCode::ClasslessStaticRoute,
         ]));
     self.wrap_dhcp(&msg, Ipv4Addr::UNSPECIFIED, Ipv4Addr::new(255,255,255,255), None, true)
     }
@@ -192,6 +214,10 @@ impl DhcpClient {
             v4::OptionCode::Router,
             v4::OptionCode::DomainNameServer,
             v4::OptionCode::AddressLeaseTime,
+            v4::OptionCode::DomainName,
+            v4::OptionCode::InterfaceMtu,
+            v4::OptionCode::BroadcastAddr,
+            v4::OptionCode::ClasslessStaticRoute,
         ]));
         self.wrap_dhcp(&msg, lease.client_ip, Ipv4Addr::new(255,255,255,255), None, true)
     }
@@ -210,6 +236,10 @@ impl DhcpClient {
             v4::OptionCode::Router,
             v4::OptionCode::DomainNameServer,
             v4::OptionCode::AddressLeaseTime,
+            v4::OptionCode::DomainName,
+            v4::OptionCode::InterfaceMtu,
+            v4::OptionCode::BroadcastAddr,
+            v4::OptionCode::ClasslessStaticRoute,
         ]));
         Ok(Some(self.wrap_dhcp(&msg, lease.client_ip, server, self.server_mac, false)?))
     }
@@ -226,6 +256,10 @@ impl DhcpClient {
             v4::OptionCode::Router,
             v4::OptionCode::DomainNameServer,
             v4::OptionCode::AddressLeaseTime,
+            v4::OptionCode::DomainName,
+            v4::OptionCode::InterfaceMtu,
+            v4::OptionCode::BroadcastAddr,
+            v4::OptionCode::ClasslessStaticRoute,
         ]));
         self.wrap_dhcp(&msg, lease.client_ip, Ipv4Addr::new(255,255,255,255), None, true)
     }
@@ -314,6 +348,11 @@ impl DhcpClient {
     if let Some(DhcpOption::Router(routers)) = ack.opts().get(OC::Router) { if let Some(r) = routers.first() { lease.router = Some(*r); } }
     if let Some(DhcpOption::DomainNameServer(servers)) = ack.opts().get(OC::DomainNameServer) { lease.dns_servers.extend(servers.iter().copied()); }
     if let Some(DhcpOption::AddressLeaseTime(secs)) = ack.opts().get(OC::AddressLeaseTime) { lease.lease_time = Some(Duration::from_secs(*secs as u64)); }
+    // Extract additional options
+    if let Some(DhcpOption::DomainName(domain)) = ack.opts().get(OC::DomainName) { lease.domain_name = Some(domain.clone()); }
+    if let Some(DhcpOption::InterfaceMtu(mtu)) = ack.opts().get(OC::InterfaceMtu) { lease.interface_mtu = Some(*mtu); }
+    if let Some(DhcpOption::BroadcastAddr(addr)) = ack.opts().get(OC::BroadcastAddr) { lease.broadcast_addr = Some(*addr); }
+    if let Some(DhcpOption::ClasslessStaticRoute(routes)) = ack.opts().get(OC::ClasslessStaticRoute) { lease.classless_routes.extend(routes.iter().copied()); }
         Ok(lease)
     }
 }

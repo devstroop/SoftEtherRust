@@ -105,16 +105,14 @@ async fn connect(cli: &Cli) -> Result<()> {
     match vpn_client.run_until_interrupted().await {
         Ok(()) => {
             info!("VPN session ended");
-            if std::env::var("RUST_FORCE_EXIT_ON_CTRL_C").ok().as_deref() == Some("1") {
-                // Give log a moment to flush then exit the process to avoid lingering background tasks
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                std::process::exit(0);
-            }
-            Ok(())
+            // Give a moment for logs to flush, then exit immediately
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            std::process::exit(0);
         }
         Err(e) => {
             error!("❌ VPN session error: {}", e);
-            Err(e)
+            // Exit immediately on error too
+            std::process::exit(1);
         }
     }
 }

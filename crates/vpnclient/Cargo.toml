@@ -15,6 +15,7 @@ mayaqua = { path = "../../libs/mayaqua" }
 cedar = { path = "../../libs/cedar" }
 tun-rs = { path = "../../libs/tun-rs", features = ["async_tokio"] }
 dhcproto = { path = "../../libs/dhcproto" }
+ipnet = { version = "2.5", features = ["serde"] }
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }
