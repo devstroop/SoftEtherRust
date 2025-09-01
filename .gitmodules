@@ -1,0 +1,6 @@
+[submodule "dhcproto"]
+	path = libs/dhcproto
+	url = https://github.com/devstroop/dhcproto.git
+[submodule "tun-rs"]
+	path = libs/tun-rs
+	url = https://github.com/devstroop/tun-rs.git
