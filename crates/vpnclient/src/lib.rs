@@ -3,28 +3,28 @@
 //! A complete VPN client implementation in Rust that connects to SoftEther VPN servers
 //! and establishes secure tunnels using virtual network adapters.
 
+// Legacy modules (remaining to be integrated)
 mod config;
 pub mod shared_config; // formerly standalone config crate (shared JSON config API)
-pub mod dhcp;
-pub mod dhcp_localbridge;
 pub mod network_mode;
-pub mod dhcpv6;
 pub mod network;
 pub mod network_config;
-mod auth;
-mod connection;
-mod links;
 mod policy;
 pub mod types;
-pub mod vpnclient; 
 mod pencore;
 
+// Modern modular architecture (clean, organized, inspired by Go implementation)
+pub mod modules;
+
+// Primary exports - use modern client architecture
+pub use modules::{ModernVpnClient, VpnClient}; // VpnClient is legacy wrapper
+pub use modules::dhcp::{DhcpClient, DhcpOptions, Lease, LeaseV6, DhcpState, DhcpMetrics};
+pub use modules::{ModuleError, ModuleResult};
 
 // internal runtime configuration (private); public config is shared_config::ClientConfig
 pub use pencore::Pencore;
 pub use network::*;
 pub use types::*;
-pub use vpnclient::*;
 
 // Re-export shared configuration types (stable JSON-facing schema)
 pub use shared_config::{ClientConfig, ConfigError};

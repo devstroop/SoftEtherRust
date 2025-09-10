@@ -113,7 +113,7 @@ impl ClientHandle {
         // Attach to dataplane if available
         let client_arc = self.client.clone();
         let tx2 = tx.clone();
-        let _ = self.rt.block_on(async move {
+        self.rt.block_on(async move {
             let c = client_arc.lock().unwrap();
             if let Some(dp) = c.dataplane() {
                 dp.set_adapter_rx(tx2);
@@ -208,7 +208,7 @@ pub extern "C" fn softether_client_connect(handle: *mut softether_client_t) -> c
         // If we had an RX callback registered before connect, wire the adapter sink now
         let client_arc2 = h.client.clone();
         let tx_opt = h.adapter_tx.clone();
-        let _ = h.rt.block_on(async move {
+        h.rt.block_on(async move {
             if let Some(tx) = tx_opt {
                 let c = client_arc2.lock().unwrap();
                 if let Some(dp) = c.dataplane() {
@@ -221,7 +221,7 @@ pub extern "C" fn softether_client_connect(handle: *mut softether_client_t) -> c
             let client_arc3 = h.client.clone();
             let _ = h.rt.spawn(async move {
                 let c = client_arc3.lock().unwrap();
-                let json = settings_json_with_kind(c.get_network_settings().as_ref(), true);
+                let json = settings_json_with_kind(c.get_network_settings(), true);
                 let cstr = CString::new(json).unwrap_or_else(|_| CString::new("{}").unwrap());
                 (cb.func)(0, 1001, cstr.as_ptr(), cb.user);
                 // CString dropped after callback returns
@@ -282,7 +282,7 @@ pub extern "C" fn softether_client_get_network_settings_json(
     let client_arc = h.client.clone();
     let s = h.rt.block_on(async move {
         let c = client_arc.lock().unwrap();
-        settings_json_with_kind(c.get_network_settings().as_ref(), false)
+        settings_json_with_kind(c.get_network_settings(), false)
     });
     CString::new(s)
         .map(|cs| cs.into_raw())
@@ -508,7 +508,7 @@ pub extern "C" fn softether_client_set_state_callback(
         let _ = h.rt.spawn(async move {
             let cb_local = cb; // move Arc into task
             while let Some(s) = rx.recv().await {
-                ((*cb_local).func)(s as i32, (*cb_local).user);
+                (cb_local.func)(s as i32, cb_local.user);
             }
         });
     }

@@ -211,7 +211,7 @@ impl DataPlane {
                     g.session_tx.clone()
                 };
                 
-                if let Err(_) = session_tx.send(frame) {
+                if session_tx.send(frame).is_err() {
                     warn!("DataPlane adapter TX: session channel closed");
                     break;
                 }
@@ -468,10 +468,8 @@ impl DataPlane {
                     for f in &frames {
                         let _ = ext.send(f.clone());
                     }
-                } else {
-                    if !frames.is_empty() {
-                        warn!("⚠️  DataPlane link RX: no adapter sink configured - {} frames dropped", frames.len());
-                    }
+                } else if !frames.is_empty() {
+                    warn!("⚠️  DataPlane link RX: no adapter sink configured - {} frames dropped", frames.len());
                 }
                 let tap_tx_opt = { inner_for_rx.lock().unwrap().tap_rx_tx.clone() };
                 if let Some(ext) = tap_tx_opt {

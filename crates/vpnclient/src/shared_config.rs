@@ -122,9 +122,10 @@ pub struct StaticIpConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum IpVersionPreference { Auto, V4, V6 }
+#[derive(Default)]
+pub enum IpVersionPreference { #[default]
+Auto, V4, V6 }
 
-impl Default for IpVersionPreference { fn default() -> Self { IpVersionPreference::Auto } }
 
 impl ClientConfig {
     pub fn to_client_option(&self) -> std::result::Result<cedar::ClientOption, mayaqua::Error> {

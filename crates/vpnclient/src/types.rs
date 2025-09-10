@@ -1,6 +1,6 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use crate::dhcp::Lease as DhcpLease;
+use crate::modules::dhcp::Lease as DhcpLease;
 
 /// Parsed network settings (assigned IP, DNS, policy flags) extracted from welcome/auth packs
 #[derive(Debug, Clone, Default)]
