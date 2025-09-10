@@ -6,6 +6,8 @@
 mod config;
 pub mod shared_config; // formerly standalone config crate (shared JSON config API)
 pub mod dhcp;
+pub mod dhcp_localbridge;
+pub mod network_mode;
 pub mod dhcpv6;
 pub mod network;
 pub mod network_config;

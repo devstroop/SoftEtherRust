@@ -15,15 +15,17 @@ use cedar::DataPlane;
 pub struct Lease {
     pub client_ip: Ipv4Addr,
     pub server_ip: Option<Ipv4Addr>,
-    pub server_mac: Option<[u8; 6]>,
+    pub gateway: Option<Ipv4Addr>,
     pub subnet_mask: Option<Ipv4Addr>,
-    pub router: Option<Ipv4Addr>,
     pub dns_servers: Vec<Ipv4Addr>,
     pub lease_time: Option<Duration>,
+    pub renewal_time: Option<Duration>,
+    pub rebinding_time: Option<Duration>,
     pub domain_name: Option<String>,
     pub interface_mtu: Option<u16>,
     pub broadcast_addr: Option<Ipv4Addr>,
     pub classless_routes: Vec<(ipnet::Ipv4Net, Ipv4Addr)>,
+    pub server_mac: Option<[u8; 6]>,
 }
 
 impl Default for Lease {
@@ -31,15 +33,17 @@ impl Default for Lease {
         Self { 
             client_ip: Ipv4Addr::UNSPECIFIED, 
             server_ip: None, 
-            server_mac: None, 
+            gateway: None,
             subnet_mask: None, 
-            router: None, 
             dns_servers: Vec::new(), 
             lease_time: None,
+            renewal_time: None,
+            rebinding_time: None,
             domain_name: None,
             interface_mtu: None,
             broadcast_addr: None,
             classless_routes: Vec::new(),
+            server_mac: None,
         } 
     }
 }
@@ -80,8 +84,17 @@ impl DhcpClient {
         let mut attempt: u32 = 0;
         let mut next_send = Instant::now();
         let mut offer: Option<v4::Message> = None;
-    let mut backoff = Duration::from_millis(800);
-        let max_backoff = Duration::from_secs(4);
+        // Adaptive backoff based on timeout - longer timeouts (LocalBridge) get slower backoff
+        let mut backoff = if timeout > Duration::from_secs(15) {
+            Duration::from_millis(1500) // LocalBridge mode: slower initial backoff
+        } else {
+            Duration::from_millis(800)  // SecureNAT mode: faster backoff
+        };
+        let max_backoff = if timeout > Duration::from_secs(15) {
+            Duration::from_secs(8)      // LocalBridge mode: longer max backoff
+        } else {
+            Duration::from_secs(4)      // SecureNAT mode: shorter max backoff
+        };
         // Track whether any DHCP traffic was observed during the discovery window (for diagnostics)
         let mut dhcp_frames_observed: u32 = 0;
     let mut decode_errs_emitted: u32 = 0; // throttle decode error events
@@ -89,18 +102,30 @@ impl DhcpClient {
             if Instant::now() >= next_send {
                 let discover = self.build_discover()?;
                 if attempt == 0 {
-                    if let Some(cb)=event_cb { cb(298, format!("dhcp discover sent iface={iface_name} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} xid={:#x} attempt={}", self.mac[0],self.mac[1],self.mac[2],self.mac[3],self.mac[4],self.mac[5], self.xid, attempt+1)); }
-                    info!("DHCP DISCOVER sent iface={iface_name} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} xid={:#x} attempt={}", self.mac[0],self.mac[1],self.mac[2],self.mac[3],self.mac[4],self.mac[5], self.xid, attempt+1);
+                    if let Some(cb)=event_cb { cb(298, format!("dhcp discover sent iface={iface_name} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} xid={:#x} attempt={} timeout={:?}", self.mac[0],self.mac[1],self.mac[2],self.mac[3],self.mac[4],self.mac[5], self.xid, attempt+1, timeout)); }
+                    info!("DHCP DISCOVER sent iface={iface_name} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} xid={:#x} attempt={} timeout={:?}", self.mac[0],self.mac[1],self.mac[2],self.mac[3],self.mac[4],self.mac[5], self.xid, attempt+1, timeout);
                 } else {
-                    if let Some(cb)=event_cb { cb(295, format!("dhcp discover retransmit iface={iface_name} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} xid={:#x} attempt={}", self.mac[0],self.mac[1],self.mac[2],self.mac[3],self.mac[4],self.mac[5], self.xid, attempt+1)); }
-                    info!("DHCP DISCOVER retransmit iface={iface_name} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} xid={:#x} attempt={}", self.mac[0],self.mac[1],self.mac[2],self.mac[3],self.mac[4],self.mac[5], self.xid, attempt+1);
+                    if let Some(cb)=event_cb { cb(295, format!("dhcp discover retransmit iface={iface_name} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} xid={:#x} attempt={} timeout={:?}", self.mac[0],self.mac[1],self.mac[2],self.mac[3],self.mac[4],self.mac[5], self.xid, attempt+1, timeout)); }
+                    info!("DHCP DISCOVER retransmit iface={iface_name} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} xid={:#x} attempt={} timeout={:?}", self.mac[0],self.mac[1],self.mac[2],self.mac[3],self.mac[4],self.mac[5], self.xid, attempt+1, timeout);
                 }
                 if std::env::var("RUST_DHCP_DEBUG_FRAMES").ok().as_deref()==Some("1") {
                     let dump_len = discover.len().min(120);
                     info!("DHCP DISCOVER frame[0..{}]={}", dump_len, hex::encode(&discover[..dump_len]));
                 }
                 // Send full Ethernet frame over the SoftEther dataplane
-                self.send_frame(discover);
+                if !self.send_frame(discover) {
+                    // If send fails, wait longer before retry and emit diagnostic event
+                    let summary = self.dp.summary();
+                    if let Some(cb) = event_cb { 
+                        cb(2997, format!("dhcp discover send failed iface={iface_name} links={} attempt={}", summary.total_links, attempt)); 
+                    }
+                    warn!("DHCP DISCOVER send failed, extending backoff");
+                    backoff = if timeout > Duration::from_secs(15) {
+                        (backoff * 2).min(Duration::from_secs(10)) // LocalBridge mode: longer backoff
+                    } else {
+                        (backoff * 3).min(Duration::from_secs(8))  // SecureNAT mode: shorter backoff
+                    };
+                }
                 attempt += 1;
                 next_send = Instant::now() + backoff;
                 backoff = (backoff * 2).min(max_backoff);
@@ -131,7 +156,20 @@ impl DhcpClient {
                                 }
                                 else if let Some(mt) = mt { if let Some(cb)=event_cb { cb(294, format!("dhcp frame observed mismatched iface={iface_name} our_xid={:#x} frame_xid={:#x} mt={:?}", self.xid, msg.xid(), mt)); } }
                             }
-                            Err(e) => { debug!("DHCP decode error (discover): {e}"); if decode_errs_emitted < 3 { if let Some(cb)=event_cb { cb(2999, format!("dhcp decode error: {e}")); } decode_errs_emitted += 1; } }
+                            Err(e) => { 
+                                debug!("DHCP decode error (discover): {e}"); 
+                                if decode_errs_emitted < 3 { 
+                                    if let Some(cb)=event_cb { 
+                                        cb(2999, format!("dhcp decode error: {e} (frame_len={} dhcp_len={})", frame.len(), view.dhcp.len())); 
+                                    } 
+                                    decode_errs_emitted += 1; 
+                                }
+                                // Add hex dump for decode errors when debugging
+                                if std::env::var("RUST_DHCP_DEBUG_FRAMES").ok().as_deref()==Some("1") && decode_errs_emitted <= 1 {
+                                    let dump_len = view.dhcp.len().min(64);
+                                    debug!("Failed DHCP decode frame[0..{}]={}", dump_len, hex::encode(&view.dhcp[..dump_len]));
+                                }
+                            }
                         }
                     } else if std::env::var("RUST_DHCP_DEBUG_FRAMES").ok().as_deref()==Some("1") {
                         let dump_len = frame.len().min(120);
@@ -156,10 +194,15 @@ impl DhcpClient {
             info!("DHCP REQUEST frame[0..{}]={}", dump_len, hex::encode(&request[..dump_len]));
         }
     // Send full Ethernet frame over the SoftEther dataplane
-    self.send_frame(request);
+    if !self.send_frame(request) {
+        if let Some(cb) = event_cb { 
+            cb(2997, format!("dhcp request send failed iface={iface_name} xid={:#x}", self.xid)); 
+        }
+        warn!("DHCP REQUEST send failed, may affect ACK reception");
+    }
     if let Some(ack) = self.wait_for(v4::MessageType::Ack, deadline, event_cb, iface_name).await? {
             let lease = self.lease_from_ack(&ack)?;
-            info!("DHCP lease iface={iface_name} ip={} router={:?} dns={:?}", lease.client_ip, lease.router, lease.dns_servers);
+            info!("DHCP lease iface={iface_name} ip={} gateway={:?} dns={:?}", lease.client_ip, lease.gateway, lease.dns_servers);
             return Ok(Some(lease));
         }
         if let Some(cb)=event_cb { cb(296, format!("dhcp ack timeout iface={iface_name} xid={:#x}", self.xid)); }
@@ -173,6 +216,33 @@ impl DhcpClient {
         msg.set_htype(v4::HType::Eth);
         msg.set_flags(v4::Flags::default().set_broadcast());
         msg.opts_mut().insert(v4::DhcpOption::MessageType(v4::MessageType::Discover));
+        // Add DHCP Client Identifier (htype=1 + MAC) for better interoperability with relays/bridges
+        let mut cid = Vec::with_capacity(7); cid.push(1u8); cid.extend_from_slice(&self.mac);
+        msg.opts_mut().insert(v4::DhcpOption::ClientIdentifier(cid));
+        // Provide hostname if discoverable (mirrors Go impl behavior supplying a hostname)
+        if let Ok(hn) = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")) { if !hn.is_empty() { msg.opts_mut().insert(v4::DhcpOption::Hostname(hn)); } }
+        // Minimal initial parameter list; expanded during REQUEST to reduce initial packet size over slow LocalBridge paths
+        msg.opts_mut().insert(v4::DhcpOption::ParameterRequestList(vec![
+            v4::OptionCode::SubnetMask,
+            v4::OptionCode::Router,
+            v4::OptionCode::DomainNameServer,
+            v4::OptionCode::AddressLeaseTime,
+        ]));
+        self.wrap_dhcp(&msg, Ipv4Addr::UNSPECIFIED, Ipv4Addr::new(255,255,255,255), None, true)
+    }
+
+    fn build_request(&self, offer: &v4::Message) -> Result<Vec<u8>> {
+        let mut msg = v4::Message::new_with_id(self.xid, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, &self.mac);
+        msg.set_opcode(v4::Opcode::BootRequest);
+        msg.set_htype(v4::HType::Eth);
+        msg.set_flags(v4::Flags::default().set_broadcast());
+        msg.opts_mut().insert(v4::DhcpOption::MessageType(v4::MessageType::Request));
+        if offer.yiaddr() != Ipv4Addr::UNSPECIFIED { msg.opts_mut().insert(v4::DhcpOption::RequestedIpAddress(offer.yiaddr())); }
+        if let Some(v4::DhcpOption::ServerIdentifier(sid)) = offer.opts().get(v4::OptionCode::ServerIdentifier) { msg.opts_mut().insert(v4::DhcpOption::ServerIdentifier(*sid)); }
+        // Include Client Identifier and Hostname again (some servers expect continuity)
+        let mut cid = Vec::with_capacity(7); cid.push(1u8); cid.extend_from_slice(&self.mac); msg.opts_mut().insert(v4::DhcpOption::ClientIdentifier(cid));
+        if let Ok(hn) = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")) { if !hn.is_empty() { msg.opts_mut().insert(v4::DhcpOption::Hostname(hn)); } }
+        // Full parameter request list now that server selected an address
         msg.opts_mut().insert(v4::DhcpOption::ParameterRequestList(vec![
             v4::OptionCode::SubnetMask,
             v4::OptionCode::Router,
@@ -183,21 +253,6 @@ impl DhcpClient {
             v4::OptionCode::BroadcastAddr,
             v4::OptionCode::ClasslessStaticRoute,
         ]));
-    self.wrap_dhcp(&msg, Ipv4Addr::UNSPECIFIED, Ipv4Addr::new(255,255,255,255), None, true)
-    }
-
-    fn build_request(&self, offer: &v4::Message) -> Result<Vec<u8>> {
-        let mut msg = v4::Message::new_with_id(self.xid, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, &self.mac);
-        msg.set_opcode(v4::Opcode::BootRequest);
-        msg.set_htype(v4::HType::Eth);
-        msg.set_flags(v4::Flags::default().set_broadcast());
-        msg.opts_mut().insert(v4::DhcpOption::MessageType(v4::MessageType::Request));
-        if offer.yiaddr() != Ipv4Addr::UNSPECIFIED {
-            msg.opts_mut().insert(v4::DhcpOption::RequestedIpAddress(offer.yiaddr()));
-        }
-        if let Some(v4::DhcpOption::ServerIdentifier(sid)) = offer.opts().get(v4::OptionCode::ServerIdentifier) {
-            msg.opts_mut().insert(v4::DhcpOption::ServerIdentifier(*sid));
-        }
         self.wrap_dhcp(&msg, Ipv4Addr::UNSPECIFIED, Ipv4Addr::new(255,255,255,255), None, true)
     }
 
@@ -301,7 +356,22 @@ impl DhcpClient {
         Ok(eth)
     }
 
-    pub fn send_frame(&self, frame: Vec<u8>) { if !self.dp.send_frame(frame) { warn!("DHCP frame send failed (no link)"); } }
+    pub fn send_frame(&self, frame: Vec<u8>) -> bool { 
+        let success = self.dp.send_frame(frame.clone());
+        if !success { 
+            let summary = self.dp.summary();
+            warn!("DHCP frame send failed: links={} tx_capable={} (total_tx={})", 
+                  summary.total_links, 
+                  summary.c2s_links + summary.both_links,
+                  summary.total_tx); 
+            // Add debug frame dump for troubleshooting
+            if std::env::var("RUST_DHCP_DEBUG_FRAMES").ok().as_deref() == Some("1") {
+                let dump_len = frame.len().min(120);
+                warn!("Failed DHCP frame[0..{}]={}", dump_len, hex::encode(&frame[..dump_len]));
+            }
+        }
+        success
+    }
 
     // Removed raw IPv4 preference helper; SoftEther dataplane operates on L2 frames.
 
@@ -327,7 +397,20 @@ impl DhcpClient {
                     return Ok(Some(msg));
                 }
                         }
-                        Err(e) => { debug!("DHCP decode error: {e}"); if decode_errs_emitted < 3 { if let Some(cb)=event_cb { cb(2999, format!("dhcp decode error: {e}")); } decode_errs_emitted += 1; } },
+                        Err(e) => { 
+                            debug!("DHCP decode error: {e}"); 
+                            if decode_errs_emitted < 3 { 
+                                if let Some(cb)=event_cb { 
+                                    cb(2999, format!("dhcp decode error: {e} (frame_len={} dhcp_len={})", frame.len(), view.dhcp.len())); 
+                                } 
+                                decode_errs_emitted += 1; 
+                            }
+                            // Add hex dump for decode errors when debugging
+                            if std::env::var("RUST_DHCP_DEBUG_FRAMES").ok().as_deref()==Some("1") && decode_errs_emitted <= 1 {
+                                let dump_len = view.dhcp.len().min(64);
+                                debug!("Failed DHCP decode frame[0..{}]={}", dump_len, hex::encode(&view.dhcp[..dump_len]));
+                            }
+                        },
                     }
                 }
                 if std::env::var("RUST_DHCP_DEBUG_FRAMES").ok().as_deref()==Some("1") {
@@ -345,15 +428,72 @@ impl DhcpClient {
     if let Some(DhcpOption::ServerIdentifier(ip)) = ack.opts().get(OC::ServerIdentifier) { lease.server_ip = Some(*ip); }
     lease.server_mac = self.server_mac;
     if let Some(DhcpOption::SubnetMask(mask)) = ack.opts().get(OC::SubnetMask) { lease.subnet_mask = Some(*mask); }
-    if let Some(DhcpOption::Router(routers)) = ack.opts().get(OC::Router) { if let Some(r) = routers.first() { lease.router = Some(*r); } }
+    if let Some(DhcpOption::Router(routers)) = ack.opts().get(OC::Router) { if let Some(r) = routers.first() { lease.gateway = Some(*r); } }
     if let Some(DhcpOption::DomainNameServer(servers)) = ack.opts().get(OC::DomainNameServer) { lease.dns_servers.extend(servers.iter().copied()); }
-    if let Some(DhcpOption::AddressLeaseTime(secs)) = ack.opts().get(OC::AddressLeaseTime) { lease.lease_time = Some(Duration::from_secs(*secs as u64)); }
+    if let Some(DhcpOption::AddressLeaseTime(secs)) = ack.opts().get(OC::AddressLeaseTime) { 
+        lease.lease_time = Some(Duration::from_secs(*secs as u64)); 
+        // Calculate renewal and rebinding times based on RFC 2131
+        lease.renewal_time = Some(Duration::from_secs((*secs as u64) / 2));
+        lease.rebinding_time = Some(Duration::from_secs((*secs as u64) * 7 / 8));
+    }
     // Extract additional options
     if let Some(DhcpOption::DomainName(domain)) = ack.opts().get(OC::DomainName) { lease.domain_name = Some(domain.clone()); }
     if let Some(DhcpOption::InterfaceMtu(mtu)) = ack.opts().get(OC::InterfaceMtu) { lease.interface_mtu = Some(*mtu); }
     if let Some(DhcpOption::BroadcastAddr(addr)) = ack.opts().get(OC::BroadcastAddr) { lease.broadcast_addr = Some(*addr); }
     if let Some(DhcpOption::ClasslessStaticRoute(routes)) = ack.opts().get(OC::ClasslessStaticRoute) { lease.classless_routes.extend(routes.iter().copied()); }
-        Ok(lease)
+    
+    // Apply Go-style fallback logic for missing critical fields
+    lease = self.apply_go_fallback_logic(lease);
+    
+    Ok(lease)
+    }
+
+    /// Apply Go implementation fallback logic for incomplete DHCP responses
+    fn apply_go_fallback_logic(&self, mut lease: Lease) -> Lease {
+        // Subnet mask inference (key Go innovation)
+        if lease.subnet_mask.is_none() {
+            lease.subnet_mask = Some(self.infer_subnet_mask_go_style(&lease));
+        }
+
+        // Gateway fallback (use server if no router provided)
+        if lease.gateway.is_none() && lease.server_ip.is_some() {
+            lease.gateway = lease.server_ip;
+        }
+
+        // DNS fallback (use gateway/server as DNS when not provided)
+        if lease.dns_servers.is_empty() {
+            if let Some(gateway) = lease.gateway {
+                lease.dns_servers.push(gateway);
+            } else if let Some(server) = lease.server_ip {
+                lease.dns_servers.push(server);
+            }
+        }
+
+        lease
+    }
+
+    /// Infer subnet mask using Go implementation logic
+    fn infer_subnet_mask_go_style(&self, lease: &Lease) -> Ipv4Addr {
+        let client_octets = lease.client_ip.octets();
+        
+        if let Some(server_ip) = lease.server_ip {
+            let server_octets = server_ip.octets();
+            
+            // Same Class B network - likely /16 (Go logic)
+            if client_octets[0] == server_octets[0] && client_octets[1] == server_octets[1] {
+                return Ipv4Addr::new(255, 255, 0, 0);
+            }
+            
+            // Same Class C network - likely /24 (Go logic)
+            if client_octets[0] == server_octets[0] && 
+               client_octets[1] == server_octets[1] && 
+               client_octets[2] == server_octets[2] {
+                return Ipv4Addr::new(255, 255, 255, 0);
+            }
+        }
+        
+        // Default assumption for VPN networks (Go logic)
+        Ipv4Addr::new(255, 255, 0, 0)
     }
 }
 
@@ -364,6 +504,11 @@ struct DhcpView<'a> {
 }
 
 fn extract_dhcp(frame: &[u8]) -> Option<DhcpView<'_>> {
+    // Validate minimum frame size first
+    if frame.len() < 42 { // Minimum Ethernet(14) + IPv4(20) + UDP(8)
+        return None;
+    }
+    
     // Try Ethernet + IPv4 first
     if frame.len() >= 14 + 20 + 8 {
         let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
@@ -371,14 +516,26 @@ fn extract_dhcp(frame: &[u8]) -> Option<DhcpView<'_>> {
             let ip = &frame[14..];
             if ip.len() >= 20 && ip[9] == 17 {
                 let ihl = (ip[0] & 0x0f) as usize * 4;
-                if ip.len() >= ihl + 8 {
+                if ihl >= 20 && ip.len() >= ihl + 8 {
                     let udp = &ip[ihl..];
-                    let src = u16::from_be_bytes([udp[0], udp[1]]);
-                    let dst = u16::from_be_bytes([udp[2], udp[3]]);
-                    if (src == 67 || src == 68) || (dst == 67 || dst == 68) {
-                        let mut mac = [0u8;6]; mac.copy_from_slice(&frame[6..12]);
-                        let src_ip = Ipv4Addr::new(ip[12], ip[13], ip[14], ip[15]);
-                        return Some(DhcpView{ dhcp: &udp[8..], l2_src: Some(mac), ip_src: Some(src_ip) });
+                    let udp_len = u16::from_be_bytes([udp[4], udp[5]]) as usize;
+                    // Validate UDP length
+                    if udp_len >= 8 && udp.len() >= udp_len && udp_len >= 8 + 240 { // Min DHCP size
+                        let src = u16::from_be_bytes([udp[0], udp[1]]);
+                        let dst = u16::from_be_bytes([udp[2], udp[3]]);
+                        if (src == 67 || src == 68) || (dst == 67 || dst == 68) {
+                            let mut mac = [0u8;6]; 
+                            mac.copy_from_slice(&frame[6..12]);
+                            let src_ip = Ipv4Addr::new(ip[12], ip[13], ip[14], ip[15]);
+                            let dhcp_payload = &udp[8..udp_len];
+                            // Basic DHCP validation: check magic cookie
+                            if dhcp_payload.len() >= 240 && dhcp_payload.len() >= 236 + 4 {
+                                let magic = u32::from_be_bytes([dhcp_payload[236], dhcp_payload[237], dhcp_payload[238], dhcp_payload[239]]);
+                                if magic == 0x63825363 { // DHCP magic cookie
+                                    return Some(DhcpView{ dhcp: dhcp_payload, l2_src: Some(mac), ip_src: Some(src_ip) });
+                                }
+                            }
+                        }
                     }
                 }
             }

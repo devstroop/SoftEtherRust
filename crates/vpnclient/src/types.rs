@@ -74,7 +74,7 @@ pub fn network_settings_from_lease(lease: &DhcpLease) -> NetworkSettings {
     let mut ns = NetworkSettings::default();
     ns.assigned_ipv4 = Some(lease.client_ip);
     ns.subnet_mask = lease.subnet_mask;
-    ns.gateway = lease.router;
+    ns.gateway = lease.gateway;
     ns.dns_servers.extend(lease.dns_servers.iter().copied());
     ns
 }

@@ -26,10 +26,9 @@ pub(crate) fn local_hostname() -> String {
 }
 use cedar::{Session, SessionConfig};
 // use mayaqua::Pack; // not needed here post-refactor
+use std::hash::Hasher;
 use std::time::{Duration, Instant};
-use tokio::signal;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
 use crate::config::RuntimeConfig;
@@ -56,9 +55,9 @@ pub struct VpnClient {
     pub(crate) network_settings: Option<NetworkSettings>,
     // Newly integrated raw TUN device (replaces old adapter abstraction)
     pub(crate) tun: Option<tun_rs::SyncDevice>,
+    pub(crate) aux_tasks: Vec<tokio::task::JoinHandle<()>>,
     pub(crate) server_policy_max_connections: Option<u32>,
     pub(crate) server_negotiated_max_connections: Option<u32>,
-    pub(crate) aux_tasks: Vec<JoinHandle<()>>,
     pub(crate) server_session_key: Option<[u8; 20]>,
     pub(crate) aux_directions: std::sync::Arc<std::sync::Mutex<Vec<i32>>>,
     pub(crate) endpoints_rr: Vec<String>,
@@ -77,6 +76,7 @@ pub struct VpnClient {
     // Idempotence: last applied network settings signature
     pub(crate) last_net_apply_sig: Option<u64>,
     // Tracking: record applied resources for safe teardown
+    #[allow(dead_code)] // Used in conditional compilation for macOS/Linux
     pub(crate) applied_resources: Option<AppliedResources>,
     metrics_shutdown_tx: Option<mpsc::UnboundedSender<()>>,
     initial_interface_snapshot_emitted: bool,
@@ -84,11 +84,13 @@ pub struct VpnClient {
     lease_acquired_at: Option<u64>,
     lease_acquired_at_atomic: Arc<AtomicU64>,
     dhcpv6_lease: std::sync::Arc<std::sync::Mutex<Option<crate::dhcpv6::LeaseV6>>>,
+    // True when underlying virtual adapter provides raw Ethernet frames (TAP). False for L3 (Wintun) devices.
+    adapter_is_l2: bool,
 }
 
 use crate::types::settings_json_with_kind;
 use crate::types::{ClientEvent, ClientState, EventLevel, NetworkSettings, SessionStats};
-use tun_rs::{DeviceBuilder, Layer};
+use tun_rs::{DeviceBuilder, Layer, SyncDevice};
 use crate::dhcp::Lease as DhcpLease;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -206,6 +208,7 @@ impl VpnClient {
             lease_acquired_at: None,
             lease_acquired_at_atomic: Arc::new(AtomicU64::new(0)),
             dhcpv6_lease: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            adapter_is_l2: true,
         })
     }
     
@@ -319,10 +322,7 @@ impl VpnClient {
             }
 
             session.start().await?;
-            debug!(
-                "[DEBUG] session_established (local) session_name={}",
-                session.name
-            );
+            debug!("[DEBUG] session_established (local) session_name={}", session.name);
             // Create dataplane bound to the session's packet channels (tunnel protocol TBD)
             let half_connection = self.config.connection.half_connection;
             let mut sess = session;
@@ -370,14 +370,69 @@ impl VpnClient {
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    if self.config.client.interface_name == "auto" {
-                        match DeviceBuilder::new().layer(Layer::L2).mtu(1500).build_sync(){
-                            Ok(dev)=>{ if let Ok(n)=dev.name(){ self.actual_interface_name=Some(n.clone()); info!("Created TUN interface: {} (auto-assigned, forced)", n); self.emit_event(EventLevel::Info,221,format!("interface: {}", n)); } self.tun=Some(dev);} Err(e)=>warn!("Failed to create TUN interface (auto-assigned, forced): {}", e)
+                    // Windows: attempt Wintun (Layer3) first; fallback to TAP (Layer2) if unavailable.
+                    #[cfg(target_os = "windows")]
+                    {
+                        let want_name = self.config.client.interface_name.clone();
+                        let attempt_wintun = |name_opt: Option<&str>| -> Result<SyncDevice, std::io::Error> {
+                            let mut builder = DeviceBuilder::new().layer(Layer::L3).mtu(1500).with(|opt| {
+                                opt.wintun_log(false);
+                                opt.wintun_file("wintun.dll".to_string());
+                            });
+                            if let Some(n) = name_opt { builder = builder.name(n); }
+                            builder.build_sync()
+                        };
+                        let wintun_res = if want_name == "auto" { attempt_wintun(None) } else { attempt_wintun(Some(&want_name)) };
+                        match wintun_res {
+                            Ok(dev) => {
+                                self.adapter_is_l2 = false; // Wintun (L3)
+                                if let Ok(n) = dev.name() { self.actual_interface_name = Some(n.clone()); info!("Created Wintun adapter (L3): {}", n); self.emit_event(EventLevel::Info,221,format!("interface: {}", n)); } else { info!("Created Wintun adapter (L3)"); }
+                                self.tun = Some(dev);
+                                
+                                // Start packet bridge will be handled by setup_wintun_localbridge() 
+                                if !self.config.connection.nat_traversal {
+                                    info!("� LocalBridge mode: packet bridge will be configured by setup_wintun_l3_bridge()");
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Wintun (L3) adapter creation failed: {e}. Will attempt TAP (Layer2) fallback. Hint: ensure wintun.dll is present.");
+                                // Fallback to TAP
+                                let build_tap = |name_opt: Option<&str>| -> Result<SyncDevice, std::io::Error> {
+                                    let mut b = DeviceBuilder::new().layer(Layer::L2).mtu(1500);
+                                    if let Some(n)=name_opt { b = b.name(n); }
+                                    b.build_sync()
+                                };
+                                let tap_res = if want_name == "auto" { build_tap(None) } else { build_tap(Some(&want_name)) };
+                                match tap_res {
+                                    Ok(dev) => {
+                                        self.adapter_is_l2 = true;
+                                        if let Ok(n)=dev.name(){ self.actual_interface_name=Some(n.clone()); info!("Created TAP adapter (Layer2): {}", n); self.emit_event(EventLevel::Info,221,format!("interface: {}", n)); } else { info!("Created TAP adapter (Layer2)"); }
+                                        self.tun=Some(dev);
+                        
+                        // Packet bridge will be handled by setup_wintun_localbridge()
+                        if !self.config.connection.nat_traversal {
+                            info!("� LocalBridge mode: packet bridge will be configured by setup_wintun_l3_bridge()");
                         }
-                    } else {
-                        let ifname=self.config.client.interface_name.clone();
-                        match DeviceBuilder::new().layer(Layer::L2).name(ifname.clone()).mtu(1500).build_sync(){
-                            Ok(dev)=>{ if let Ok(n)=dev.name(){ self.actual_interface_name=Some(n.clone()); } info!("Created TUN interface: {}", ifname); self.emit_event(EventLevel::Info,221,format!("interface: {}", ifname)); self.tun=Some(dev);} Err(e)=>warn!("Failed to create TUN interface: {}", e)
+                                    }
+                                    Err(e2) => {
+                                        warn!("Failed to create TAP adapter (Layer2) as well: {e2}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        // Non-macOS, non-Windows (e.g., Linux): keep existing Layer2 behavior
+                        if self.config.client.interface_name == "auto" {
+                            match DeviceBuilder::new().layer(Layer::L2).mtu(1500).build_sync(){
+                                Ok(dev)=>{ if let Ok(n)=dev.name(){ self.actual_interface_name=Some(n.clone()); info!("Created TAP interface: {} (auto-assigned)", n); self.emit_event(EventLevel::Info,221,format!("interface: {}", n)); } self.tun=Some(dev);} Err(e)=>warn!("Failed to create TAP interface (auto-assigned): {}", e)
+                            }
+                        } else {
+                            let ifname=self.config.client.interface_name.clone();
+                            match DeviceBuilder::new().layer(Layer::L2).name(ifname.clone()).mtu(1500).build_sync(){
+                                Ok(dev)=>{ if let Ok(n)=dev.name(){ self.actual_interface_name=Some(n.clone()); } info!("Created TAP interface: {}", ifname); self.emit_event(EventLevel::Info,221,format!("interface: {}", ifname)); self.tun=Some(dev);} Err(e)=>warn!("Failed to create TAP interface: {}", e)
+                            }
                         }
                     }
                 }
@@ -424,8 +479,8 @@ impl VpnClient {
             }
             // Establish the first bulk data link via additional_connect before bridging/DHCP
             if let Err(e) = self.open_primary_data_link().await { error!("Failed to establish primary data link: {}", e); return Err(e); }
-            // Wire dataplane <-> TAP bridge (RX always; TX always enabled for TAP)
-            self.setup_adapter_bridge();
+            // Wire dataplane <-> adapter bridge if we have a Layer2 device; if Layer3 (Wintun), perform LocalBridge with L2 emulation.
+            if self.adapter_is_l2 { self.setup_adapter_bridge(); } else { self.setup_wintun_localbridge(); }
             
             // 🔧 STATIC IP FIX: Apply static network configuration if provided
             if let Some(static_ns) = &self.config.static_network {
@@ -466,41 +521,179 @@ impl VpnClient {
                 if let Some(dp)=self.dataplane.clone() {
                     self.emit_event(EventLevel::Info, 299, "dhcp acquisition attempt");
                     let start=std::time::Instant::now();
-                    while dp.summary().total_links==0 && start.elapsed() < Duration::from_secs(3) { tokio::time::sleep(Duration::from_millis(100)).await; }
+                    // Enhanced link waiting with better diagnostics
+                    let mut waited_total = Duration::ZERO;
+                    while dp.summary().total_links == 0 && start.elapsed() < Duration::from_secs(5) { 
+                        tokio::time::sleep(Duration::from_millis(200)).await; 
+                        waited_total += Duration::from_millis(200);
+                    }
+                    let summary = dp.summary();
+                    if summary.total_links == 0 {
+                        warn!("DHCP: No dataplane links available after {}ms wait", waited_total.as_millis());
+                        if let Some(tx) = &self.event_tx {
+                            let _ = tx.send(ClientEvent { 
+                                level: EventLevel::Warn, 
+                                code: 2996, 
+                                message: format!("dhcp: no dataplane links after {}ms wait", waited_total.as_millis()) 
+                            });
+                        }
+                    } else {
+                        info!("DHCP: {} links available (c2s={} s2c={} both={}) after {}ms", 
+                              summary.total_links, summary.c2s_links, summary.s2c_links, summary.both_links, waited_total.as_millis());
+                        if let Some(tx) = &self.event_tx {
+                            let _ = tx.send(ClientEvent { 
+                                level: EventLevel::Info, 
+                                code: 2995, 
+                                message: format!("dhcp: {} links ready after {}ms", summary.total_links, waited_total.as_millis()) 
+                            });
+                        }
+                    }
                     if self.dhcp_mac.is_none(){
                         tracing::warn!("dhcp_mac not initialized; using deterministic client MAC");
                         self.dhcp_mac=Some(self.config.client.mac_address);
                     }
                     let mac=self.dhcp_mac.unwrap_or(self.config.client.mac_address);
                     let dp_clone=dp.clone();
-                    let mut dhcp=crate::dhcp::DhcpClient::new(dp_clone.clone(), mac);
-                    info!("Attempting DHCP over tunnel");
                     let iface_for_dhcp=self.actual_interface_name.as_ref().unwrap_or(&self.config.client.interface_name).clone();
-                    if let Some(xid)=self.dhcp_xid { dhcp=crate::dhcp::DhcpClient::new_with_xid(dp_clone, mac, xid); }
-                    // Hook DHCP diagnostics into event stream
-                    let event_tx_cb = self.event_tx.clone();
-                    let cb = move |code: u32, message: String| {
-                        if let Some(tx) = &event_tx_cb {
-                            // Map DHCP diag codes to levels: 297/296 = Warn, others Info
-                            let level = if code == 297 || code == 296 { crate::types::EventLevel::Warn } else { crate::types::EventLevel::Info };
-                            let _ = tx.send(crate::types::ClientEvent { level, code: code as i32, message });
+                    
+                    // Follow Go implementation logic: NAT traversal determines DHCP mode
+                    // When nat_traversal=false and SecureNAT disabled, skip tunnel DHCP entirely
+                    if !self.config.connection.nat_traversal {
+                        info!("🌉 Network mode: LocalBridge (external DHCP/static) because nat_traversal=false");
+                        info!("⚠️  Skipping tunnel-based DHCP - server has SecureNAT disabled (NoRouting=1)");
+                        info!("💡 In LocalBridge mode, DHCP should come from external DHCP server via bridge, not tunnel");
+                        
+                        // If we have a Wintun adapter, attempt OS-level DHCP on it
+                        if let Some(ref adapter) = self.tun {
+                            if let Ok(name) = adapter.name() {
+                                info!("🔧 Attempting OS-level DHCP on Wintun adapter: {}", name);
+                                
+                                // Use Windows DHCP on the created adapter
+                                match self.attempt_os_dhcp_on_adapter(&name).await {
+                                    Ok(lease) => {
+                                        info!("✅ OS-level DHCP lease acquired on {}: {}", name, lease.client_ip);
+                                        self.network_settings = Some(crate::types::network_settings_from_lease(&lease));
+                                        self.emit_settings_snapshot();
+                                        self.maybe_emit_interface_snapshot(&lease, &name, true);
+                                    }
+                                    Err(e) => {
+                                        warn!("⚠️  OS-level DHCP failed on {}: {}", name, e);
+                                        
+                                        // Attempt static configuration if require_static_ip is set
+                                        if self.config.require_static_ip {
+                                            info!("🔧 Applying static IP configuration (require_static_ip=true)");
+                                            if let Some(static_net) = &self.config.static_network {
+                                                self.network_settings = Some(static_net.clone());
+                                                self.emit_settings_snapshot();
+                                                info!("✅ Static IP configuration applied to {}", name);
+                                            } else {
+                                                warn!("⚠️  require_static_ip=true but no static_network provided in config");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // Attempt static configuration if require_static_ip is set
+                            if self.config.require_static_ip {
+                                info!("� Applying static IP configuration (require_static_ip=true)");
+                                if let Some(static_net) = &self.config.static_network {
+                                    self.network_settings = Some(static_net.clone());
+                                    self.emit_settings_snapshot();
+                                    info!("✅ Static IP configuration applied");
+                                } else {
+                                    warn!("⚠️  require_static_ip=true but no static_network provided in config");
+                                }
+                            } else {
+                                info!("�💡 For LocalBridge external DHCP, ensure:");
+                                info!("   1. Physical network adapter is created and bridged");
+                                info!("   2. External DHCP server is accessible via bridge");
+                                info!("   3. Server LocalBridge is properly configured");
+                                warn!("⚠️  No physical adapter available - continuing with control session only");
+                            }
                         }
-                    };
-                    match dhcp.run_once(&iface_for_dhcp, Duration::from_secs(30), Some(&cb)).await {
-                        Ok(Some(lease))=>{
+                    } else {
+                        info!("🏢 Network mode: SecureNAT (server-side DHCP) because nat_traversal=true");
+                        // Use adaptive DHCP client that supports both SecureNAT and LocalBridge modes
+                        let mut adaptive_dhcp = crate::dhcp_localbridge::AdaptiveDhcpClient::new(dp_clone.clone(), mac);
+                        info!("🔄 Attempting adaptive DHCP over tunnel (supports SecureNAT and LocalBridge)");
+                        // Hook DHCP diagnostics into event stream
+                        let _event_tx_cb = self.event_tx.clone();
+                        match adaptive_dhcp.run(&iface_for_dhcp).await {
+                        Ok(lease)=>{
                             self.network_settings=Some(crate::types::network_settings_from_lease(&lease));
                             self.emit_settings_snapshot();
-                            info!("DHCP lease acquired: {}", lease.client_ip);
+                            info!("✅ Adaptive DHCP lease acquired: {}", lease.client_ip);
                             self.dhcp_mac=Some(mac);
-                            self.dhcp_xid=Some(dhcp.xid());
+                            // Store XID for future renewals (note: AdaptiveDhcpClient doesn't expose XID directly)
+                            // Generate a new XID for renewal operations
+                            use rand::RngCore;
+                            let mut xb = [0u8; 4];
+                            rand::rng().fill_bytes(&mut xb);
+                            self.dhcp_xid = Some(u32::from_be_bytes(xb));
                             let now_acq=current_unix_secs();
                             self.lease_acquired_at=Some(now_acq);
                             self.lease_acquired_at_atomic.store(now_acq, Ordering::Relaxed);
                             self.maybe_emit_interface_snapshot(&lease, &iface_for_dhcp, true);
                             if let Some(lt)=lease.lease_time { let xid=self.dhcp_xid; self.spawn_dhcp_renew_task(lease, lt, iface_for_dhcp.clone(), xid); self.spawn_lease_health_monitor(lt.as_secs()); }
                         }
-                        Ok(None)=>warn!("No DHCP offer/ack within timeout"),
-                        Err(e)=>warn!("DHCP negotiation failed: {e}"),
+                        Err(e)=>warn!("🚨 Adaptive DHCP negotiation failed: {e}"),
+                    }
+                    }
+                }
+            }
+
+            // LocalBridge OS-level DHCP (runs independently for nat_traversal=false)
+            if !self.config.connection.nat_traversal && self.network_settings.as_ref().and_then(|n| n.assigned_ipv4).is_none() {
+                        info!("🌉 LocalBridge mode: Attempting OS-level DHCP on physical adapter");
+                        info!("� Using existing Wintun L3 bridge for packet forwarding (adapter bridge already configured)");
+                        
+                        // Wait a moment for bridge to establish
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        
+                // Try to get adapter name from tun device or from actual_interface_name
+                let adapter_name = if let Some(ref adapter) = self.tun {
+                    adapter.name().ok()
+                } else {
+                    self.actual_interface_name.clone()
+                };
+                
+                if let Some(name) = adapter_name {
+                    info!("🔧 Attempting OS-level DHCP on adapter: {}", name);
+                    
+                    match self.attempt_os_dhcp_on_adapter(&name).await {
+                        Ok(lease) => {
+                            info!("✅ OS-level DHCP lease acquired on {}: {}", name, lease.client_ip);
+                            self.network_settings = Some(crate::types::network_settings_from_lease(&lease));
+                            self.emit_settings_snapshot();
+                            self.maybe_emit_interface_snapshot(&lease, &name, true);
+                        }
+                        Err(e) => {
+                            warn!("⚠️  OS-level DHCP failed on {}: {}", name, e);
+                            
+                            // Attempt static configuration if require_static_ip is set
+                            if self.config.require_static_ip {
+                                info!("🔧 Applying static IP configuration as fallback");
+                                if let Some(static_net) = &self.config.static_network {
+                                    self.network_settings = Some(static_net.clone());
+                                    self.emit_settings_snapshot();
+                                    info!("✅ Static IP configuration applied to {}", name);
+                                } else {
+                                    warn!("⚠️  require_static_ip=true but no static_network provided in config");
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    warn!("⚠️  LocalBridge mode but no adapter name available (tun={}, actual_name={:?})", 
+                          self.tun.is_some(), self.actual_interface_name);
+                    if self.config.require_static_ip {
+                        info!("🔧 Applying static IP configuration (no adapter)");
+                        if let Some(static_net) = &self.config.static_network {
+                            self.network_settings = Some(static_net.clone());
+                            self.emit_settings_snapshot();
+                            info!("✅ Static IP configuration applied");
+                        }
                     }
                 }
             }
@@ -945,49 +1138,28 @@ impl VpnClient {
         self.connect().await?;
 
         // Set up signal handling with immediate shutdown on first signal
-        let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
-        let mut sigint = signal::unix::signal(signal::unix::SignalKind::interrupt())?;
-        // Cross-platform fallback (also works on macOS)
+        // Cross-platform Ctrl+C (works on Windows and Unix)
         let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
         
         // Flag to ensure we only handle first signal
-        let mut shutdown_initiated = false;
+        let shutdown_initiated = false;
 
         info!("VPN client running. Press Ctrl+C to disconnect.");
 
         // Main event loop
         loop {
             tokio::select! {
-                // Handle SIGTERM
-                _ = sigterm.recv() => {
+                // Handle Ctrl+C (cross-platform)
+                _ = &mut ctrl_c => {
                     if !shutdown_initiated {
-                        shutdown_initiated = true;
-                        info!("Received SIGTERM, shutting down...");
-                        break;
-                    }
-                },
-
-                // Handle SIGINT (Ctrl+C)
-                _ = sigint.recv() => {
-                    if !shutdown_initiated {
-                        shutdown_initiated = true;
-                        info!("Received SIGINT, shutting down...");
+                        info!("Received Ctrl+C, shutting down gracefully...");
+                        // Immediately abort background tasks to prevent hanging
+                        for handle in &self.aux_tasks {
+                            handle.abort();
+                        }
                         break;
                     } else {
                         // Second signal - force exit immediately
-                        warn!("Second SIGINT received - forcing immediate exit");
-                        std::process::exit(0);
-                    }
-                },
-
-                // Fallback Ctrl+C
-                _ = &mut ctrl_c => {
-                    if !shutdown_initiated {
-                        shutdown_initiated = true;
-                        info!("Received Ctrl+C, shutting down...");
-                        break;
-                    } else {
-                        // Second Ctrl+C - force exit immediately
                         warn!("Second Ctrl+C received - forcing immediate exit");
                         std::process::exit(0);
                     }
@@ -1005,13 +1177,13 @@ impl VpnClient {
             }
         }
 
-        // Disconnect gracefully with a shorter timeout; if it hangs, abort and exit immediately
-        match timeout(Duration::from_secs(3), self.disconnect()).await {
+        // Disconnect gracefully with a very short timeout; if it hangs, abort and exit immediately
+        match timeout(Duration::from_secs(1), self.disconnect()).await {
             Ok(res) => {
                 res?;
             }
             Err(_) => {
-                warn!("Graceful disconnect timed out after 3s; forcing shutdown");
+                warn!("Graceful disconnect timed out after 1s; forcing shutdown");
                 // Best-effort: abort background tasks to avoid lingering
                 for handle in self.aux_tasks.drain(..) {
                     handle.abort();
@@ -1118,6 +1290,144 @@ impl VpnClient {
 
         debug!("TAP ↔ DataPlane bridge established with bidirectional traffic flow");
         // Keep no direct handle; the Arc in tasks holds the device lifetime. Teardown uses applied_resources.
+    }
+
+    /// Setup Wintun (Layer3) ↔ DataPlane bridge.
+    /// Sets up LocalBridge mode with proper Layer 2 DHCP support via Wintun
+    /// This mode emulates a full Layer 2 bridge to properly handle DHCP broadcasts
+    /// matching the behavior of the working Go implementation
+    fn setup_wintun_localbridge(&mut self) {
+        let Some(dp) = self.dataplane.clone() else { return; };
+        let Some(l3_dev) = self.tun.take() else { return; };
+        let dev_shared = std::sync::Arc::new(std::sync::Mutex::new(l3_dev));
+
+        // Generate deterministic MAC address based on connection details for DHCP consistency
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        hasher.write(self.config.host.as_bytes());
+        hasher.write(self.config.username.as_bytes());
+        let hash = hasher.finish();
+        let local_mac = [
+            0x02, // locally administered unicast
+            ((hash >> 40) & 0xFF) as u8,
+            ((hash >> 32) & 0xFF) as u8,
+            ((hash >> 24) & 0xFF) as u8,
+            ((hash >> 16) & 0xFF) as u8,
+            ((hash >> 8) & 0xFF) as u8,
+        ];
+        let remote_mac = [0x02,0x00,0x5e,0x00,0x01,0x02];
+        
+        info!("🌉 LocalBridge mode: Setting up Layer 2 DHCP-capable bridge with MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", 
+            local_mac[0], local_mac[1], local_mac[2], local_mac[3], local_mac[4], local_mac[5]);
+
+        // RX: DataPlane (Ethernet) -> Wintun (IP packets extracted from Ethernet frames)
+        let (rx_tx, mut rx_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let rx_tx_check = rx_tx.clone();
+        dp.set_adapter_rx(rx_tx);
+        let dev_rx = dev_shared.clone();
+        let rx_task = tokio::spawn(async move {
+            info!("🔄 LocalBridge RX task started (VPN tunnel -> Wintun adapter)");
+            let mut frame_count = 0;
+            while let Some(frame) = rx_rx.recv().await {
+                frame_count += 1;
+                info!("📥 Tunnel→Wintun: received {} bytes (frame #{})", frame.len(), frame_count);
+                
+                // Extract IP packet from Ethernet frame for Wintun
+                if frame.len() >= 14 {
+                    let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+                    if ethertype == 0x0800 || ethertype == 0x86DD { // IPv4 or IPv6
+                        let ip_packet = &frame[14..];
+                        if let Ok(dev) = dev_rx.lock() {
+                            match dev.send(ip_packet) {
+                                Ok(_) => info!("✅ Forwarded {} bytes to Wintun adapter (frame #{})", ip_packet.len(), frame_count),
+                                Err(e) => warn!("❌ Failed to send to Wintun: {}", e),
+                            }
+                        }
+                    } else {
+                        debug!("🚫 Dropping non-IP frame: EtherType=0x{:04x}", ethertype);
+                    }
+                } else {
+                    debug!("🚫 Dropping short frame: {} bytes", frame.len());
+                }
+            }
+            info!("🔄 LocalBridge RX task ended (received {} total frames)", frame_count);
+        });
+        self.aux_tasks.push(rx_task);
+
+        // TX: Wintun (IP packets) -> DataPlane (Ethernet frames with proper headers)
+        let (tx_tx, tx_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let tx_tx_check = tx_tx.clone();
+        dp.set_adapter_tx(tx_rx);
+        let dev_tx = dev_shared.clone();
+        let tx_task = tokio::spawn(async move {
+            info!("🔄 LocalBridge TX task started (Wintun adapter -> VPN tunnel)");
+            let mut buf = [0u8; 2000];
+            loop {
+                let read_res = tokio::task::spawn_blocking({
+                    let dev = dev_tx.clone();
+                    move || {
+                        if let Ok(d) = dev.lock() { 
+                            d.recv(&mut buf) 
+                        } else { 
+                            Err(std::io::Error::new(std::io::ErrorKind::Other, "Wintun lock failed")) 
+                        }
+                    }
+                }).await;
+                
+                match read_res {
+                    Ok(Ok(n)) => {
+                        if n == 0 { continue; }
+                        
+                        let ip_packet = &buf[..n];
+                        
+                        // Validate IP packet (Wintun provides L3 IP packets, not Ethernet frames)
+                        let (ethertype, is_valid) = match ip_packet.get(0) {
+                            Some(v) if v >> 4 == 4 && n >= 20 => (0x0800u16, true), // IPv4 (min 20 bytes)
+                            Some(v) if v >> 4 == 6 && n >= 40 => (0x86DDu16, true), // IPv6 (min 40 bytes)
+                            _ => (0u16, false)
+                        };
+                        
+                        if !is_valid {
+                            debug!("� Skipping malformed packet: {} bytes, version={:?}", 
+                                   n, ip_packet.get(0).map(|v| v >> 4));
+                            continue;
+                        }
+                        
+                        info!("📤 Wintun→Tunnel: processing {} bytes (IP version {})", 
+                              n, ip_packet[0] >> 4);
+                        
+                        // Create proper Ethernet frame for SoftEther tunnel
+                        let mut eth_frame = Vec::with_capacity(14 + n);
+                        eth_frame.extend_from_slice(&remote_mac); // destination
+                        eth_frame.extend_from_slice(&local_mac);  // source
+                        eth_frame.extend_from_slice(&ethertype.to_be_bytes());
+                        eth_frame.extend_from_slice(ip_packet);
+                        
+                        match tx_tx.send(eth_frame) {
+                            Ok(_) => info!("✅ Sent {} bytes to VPN tunnel as Ethernet frame", n + 14),
+                            Err(e) => { 
+                                warn!("❌ Failed to send to tunnel: {}", e); 
+                                break; 
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => { 
+                        warn!("⚠️  Wintun read error: {}", e); 
+                        tokio::time::sleep(Duration::from_millis(100)).await; 
+                    }
+                    Err(e) => { 
+                        error!("❌ Blocking task error: {}", e); 
+                        break; 
+                    }
+                }
+            }
+            info!("🔄 LocalBridge TX task ended");
+        });
+        self.aux_tasks.push(tx_task);
+
+        info!("🌉 LocalBridge mode: Layer 2 bridge established for DHCP support");
+        info!("🔍 Bridge verification: RX sink={}, TX sink={}", 
+            if rx_tx_check.is_closed() { "CLOSED" } else { "OPEN" },
+            if tx_tx_check.is_closed() { "CLOSED" } else { "OPEN" });
     }
 
     // auth-related methods moved to vpnclient/auth.rs
@@ -1345,7 +1655,7 @@ impl VpnClient {
                         acquired_at_atomic.store(current_unix_secs(), Ordering::Relaxed);
                             // mark last renew success time
                             if let Some(tx)=&event_tx { let _= tx.send(ClientEvent{ level: EventLevel::Info, code:3001, message: format!("renew_elapsed_reset" )}); }
-                        let sig = (current_lease.client_ip, current_lease.subnet_mask, current_lease.router, current_lease.dns_servers.clone());
+                        let sig = (current_lease.client_ip, current_lease.subnet_mask, current_lease.gateway, current_lease.dns_servers.clone());
                         if last_sig.as_ref().map(|s| s != &sig).unwrap_or(true) {
                             if let Some(tx)=&event_tx { if let Some(json)=interface_snapshot_json(&current_lease, &iface, Some(xid), cache_reused, false, None, false, false, None) { let _=tx.send(ClientEvent{ level: EventLevel::Info, code:2221, message: json}); } }
                             last_sig=Some(sig);
@@ -1371,7 +1681,7 @@ impl VpnClient {
                         // persistence removed
                         acquired_at_atomic.store(current_unix_secs(), Ordering::Relaxed);
                             if let Some(tx)=&event_tx { let _= tx.send(ClientEvent{ level: EventLevel::Info, code:3001, message: "renew_elapsed_reset".into()}); }
-                        let sig = (current_lease.client_ip, current_lease.subnet_mask, current_lease.router, current_lease.dns_servers.clone());
+                        let sig = (current_lease.client_ip, current_lease.subnet_mask, current_lease.gateway, current_lease.dns_servers.clone());
                         if last_sig.as_ref().map(|s| s != &sig).unwrap_or(true) {
                             if let Some(tx)=&event_tx { if let Some(json)=interface_snapshot_json(&current_lease, &iface, Some(xid), cache_reused, false, None, false, false, None) { let _=tx.send(ClientEvent{ level: EventLevel::Info, code:2221, message: json}); } }
                             last_sig=Some(sig);
@@ -1382,7 +1692,7 @@ impl VpnClient {
                     metrics.rediscover_attempts.fetch_add(1, Ordering::Relaxed);
                     let mut discover_client = crate::dhcp::DhcpClient::new_with_xid(dp_root.clone(), mac_use, xid);
                     match discover_client.run_once(&iface, Duration::from_secs(20), None).await {
-                        Ok(Some(newl)) => { metrics.rediscover_success.fetch_add(1, Ordering::Relaxed); if let Some(tx)=&event_tx { let _= tx.send(ClientEvent{ level: EventLevel::Info, code:306, message: "dhcp rediscover success".into()}); } current_lease=newl; acquired_at_atomic.store(current_unix_secs(), Ordering::Relaxed); if let Some(lt)=current_lease.lease_time { cur_lt=lt; let sig = (current_lease.client_ip, current_lease.subnet_mask, current_lease.router, current_lease.dns_servers.clone()); if last_sig.as_ref().map(|s| s != &sig).unwrap_or(true) { if let Some(tx)=&event_tx { if let Some(json)=interface_snapshot_json(&current_lease, &iface, Some(xid), cache_reused, false, None, false, false, None) { let _=tx.send(ClientEvent{ level: EventLevel::Info, code:2221, message: json}); } } last_sig=Some(sig); } continue; } else { break; } }
+                        Ok(Some(newl)) => { metrics.rediscover_success.fetch_add(1, Ordering::Relaxed); if let Some(tx)=&event_tx { let _= tx.send(ClientEvent{ level: EventLevel::Info, code:306, message: "dhcp rediscover success".into()}); } current_lease=newl; acquired_at_atomic.store(current_unix_secs(), Ordering::Relaxed); if let Some(lt)=current_lease.lease_time { cur_lt=lt; let sig = (current_lease.client_ip, current_lease.subnet_mask, current_lease.gateway, current_lease.dns_servers.clone()); if last_sig.as_ref().map(|s| s != &sig).unwrap_or(true) { if let Some(tx)=&event_tx { if let Some(json)=interface_snapshot_json(&current_lease, &iface, Some(xid), cache_reused, false, None, false, false, None) { let _=tx.send(ClientEvent{ level: EventLevel::Info, code:2221, message: json}); } } last_sig=Some(sig); } continue; } else { break; } }
                         _ => { metrics.failures.fetch_add(1, Ordering::Relaxed); if let Some(tx)=&event_tx { let _= tx.send(ClientEvent{ level: EventLevel::Error, code:307, message: "dhcp rediscover failed".into()}); } break; }
                     }
                 }
@@ -1407,7 +1717,7 @@ fn interface_snapshot_json(lease: &DhcpLease, iface: &str, xid: Option<u32>, cac
     let redact_token = "***".to_string();
     let ipv4 = if redact { redact_token.clone() } else if let Some(mask)=lease.subnet_mask { format!("{}/{}", lease.client_ip, mask_to_prefix(mask)) } else { lease.client_ip.to_string() };
     let dns: Vec<String> = if redact { vec![redact_token.clone()] } else { lease.dns_servers.iter().take(if verbose { 8 } else { 4 }).map(|d| d.to_string()).collect() };
-    let router = if redact { Some(redact_token) } else { lease.router.map(|r| r.to_string()) };
+    let router = if redact { Some(redact_token) } else { lease.gateway.map(|r| r.to_string()) };
     let (ipv6, dns6, ipv6_pref_rem, ipv6_valid_rem) = if let Some(v6l)=v6 { let now_u=current_unix_secs(); let ipv6=v6l.addr.map(|a| if redact { "***".into() } else { a.to_string() }); let dns6= if v6l.dns_servers.is_empty(){ None } else { Some(if redact { vec!["***".into()] } else { v6l.dns_servers.iter().take(if verbose {8}else{4}).map(|d|d.to_string()).collect() }) }; let pref_rem = v6l.preferred_lifetime.and_then(|d| v6l.acquired_at.map(|acq| d.as_secs().saturating_sub(now_u.saturating_sub(acq)))); let valid_rem = v6l.valid_lifetime.and_then(|d| v6l.acquired_at.map(|acq| d.as_secs().saturating_sub(now_u.saturating_sub(acq)))); (ipv6, dns6, pref_rem, valid_rem) } else { (None,None,None,None) };
     let snap = Snap{kind:"interface_snapshot", name:iface, ipv4, router, dns, lease_seconds_total: total, lease_seconds_remaining: remaining, renew_elapsed_secs: renew_elapsed, t1_epoch: t1, t2_epoch: t2, expiry_epoch: expiry, mtu: Some(1500), xid, cache_reused, initial, verbose, ipv6, dns6, ipv6_preferred_remaining: ipv6_pref_rem, ipv6_valid_remaining: ipv6_valid_rem};
     serde_json::to_string(&snap).ok()
@@ -1497,4 +1807,378 @@ impl VpnClient {
         }
     }
     fn spawn_lease_health_monitor(&mut self, _lease_total_secs: u64) { /* no-op after persistence removal */ }
+
+    /// Attempt OS-level DHCP on a Windows network adapter
+    async fn attempt_os_dhcp_on_adapter(&self, adapter_name: &str) -> Result<crate::dhcp::Lease, anyhow::Error> {
+        use std::process::Command;
+        use std::time::Duration;
+        
+        info!("🔄 Initiating Windows DHCP client on adapter: {}", adapter_name);
+        
+        // Enable DHCP on the interface using netsh
+        let enable_dhcp_result = Command::new("netsh")
+            .args(&["interface", "ip", "set", "address", adapter_name, "dhcp"])
+            .output();
+            
+        match enable_dhcp_result {
+            Ok(output) => {
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    warn!("⚠️  Failed to enable DHCP on {}: {}", adapter_name, stderr);
+                } else {
+                    info!("✅ DHCP enabled on adapter: {}", adapter_name);
+                }
+            }
+            Err(e) => {
+                warn!("⚠️  Error running netsh to enable DHCP: {}", e);
+            }
+        }
+        
+        // Wait a moment for DHCP to complete (increase timeout for APIPA detection)
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        
+        // Try multiple times to get IP configuration (DHCP can take time)
+        let mut attempts = 0;
+        let max_attempts = 3;
+        
+        while attempts < max_attempts {
+            attempts += 1;
+            info!("📋 Checking adapter configuration (attempt {} of {})...", attempts, max_attempts);
+            
+            // Try to get the assigned IP address
+            let ipconfig_result = Command::new("netsh")
+                .args(&["interface", "ip", "show", "config", adapter_name])
+                .output();
+                
+            match ipconfig_result {
+                Ok(output) => {
+                    let output_str = String::from_utf8_lossy(&output.stdout);
+                    info!("📋 Adapter configuration for {}:\n{}", adapter_name, output_str);
+                    
+                    // Parse the output to extract IP configuration
+                    if let Some(lease) = self.parse_netsh_config(&output_str) {
+                        // Check if this is an APIPA address
+                        let octets = lease.client_ip.octets();
+                        if octets[0] == 169 && octets[1] == 254 {
+                            warn!("⚠️  APIPA address assigned ({}): No DHCP server responded", lease.client_ip);
+                            warn!("💡 This indicates the VPN tunnel is not bridged to an external network");
+                            warn!("💡 Server-side LocalBridge configuration may be needed");
+                            warn!("💡 The adapter shows 'Network cable unplugged' - no data flow through tunnel");
+                            info!("📊 Lease details: IP={}, Mask={:?}, Gateway={:?}", 
+                                  lease.client_ip, lease.subnet_mask, lease.gateway);
+                            
+                            // Return error since APIPA indicates no real DHCP success
+                            return Err(anyhow::anyhow!("APIPA address assigned - no external DHCP server reachable"));
+                        } else {
+                            info!("✅ Valid DHCP lease acquired: {}", lease.client_ip);
+                            info!("📊 Subnet mask: {:?}, Gateway: {:?}", lease.subnet_mask, lease.gateway);
+                            return Ok(lease);
+                        }
+                    } else if output_str.contains("IP Address:") {
+                        warn!("⚠️  Found 'IP Address:' in output but failed to parse - checking raw format:");
+                        for line in output_str.lines() {
+                            if line.contains("IP Address:") {
+                                warn!("📝 Raw IP line: '{}'", line);
+                            }
+                        }
+                    } else {
+                        warn!("⚠️  No IP address found in netsh output (attempt {} of {})", attempts, max_attempts);
+                        if attempts < max_attempts {
+                            info!("⏳ Waiting 5 seconds before next attempt...");
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            continue;
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!("Failed to query adapter configuration: {}", e));
+                }
+            }
+        }
+        
+        Err(anyhow::anyhow!("No IP address assigned after {} attempts", max_attempts))
+    }
+    
+    /// Start bidirectional packet bridge between Wintun adapter and VPN tunnel
+    /// This is essential for LocalBridge mode to work properly
+    #[allow(dead_code)] // Alternative bridging implementation, kept for reference
+    async fn start_packet_bridge(&mut self, dataplane: &DataPlane) -> Result<(), anyhow::Error> {
+        use std::sync::Arc;
+        use tokio::sync::mpsc;
+        
+        let tun_device = match self.tun.take() {
+            Some(dev) => Arc::new(tokio::sync::Mutex::new(dev)),
+            None => return Err(anyhow::anyhow!("No Wintun adapter available for bridging")),
+        };
+        
+        // Create channels for bidirectional packet flow
+        let (wintun_to_tunnel_tx, wintun_to_tunnel_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (tunnel_to_wintun_tx, mut tunnel_to_wintun_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        
+        // Set up dataplane to receive packets from tunnel
+        dataplane.set_adapter_rx(tunnel_to_wintun_tx);
+        info!("🔗 DataPlane→Wintun channel configured");
+        
+        // Set up dataplane to send packets to tunnel  
+        dataplane.set_adapter_tx(wintun_to_tunnel_rx);
+        info!("🔗 Wintun→DataPlane channel configured");
+        
+        // Task 1: Wintun → VPN tunnel (OS network stack sends data to tunnel)
+        let tun_for_read = tun_device.clone();
+        let wintun_to_tunnel_handle = tokio::spawn(async move {
+            info!("🔄 Started Wintun→Tunnel bridge task");
+            loop {
+                // Read IP packet from Wintun
+                let packet = {
+                    let tun_guard = tun_for_read.lock().await;
+                    let mut buffer = vec![0u8; 1500]; // MTU size buffer
+                    match tun_guard.recv(&mut buffer) {
+                        Ok(n) if n > 0 => {
+                            buffer.truncate(n);
+                            Some(buffer)
+                        }
+                        Ok(_) => None, // Empty read
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            None
+                        }
+                        Err(e) => {
+                            warn!("Error reading from Wintun: {}", e);
+                            return;
+                        }
+                    }
+                };
+                
+                if let Some(ip_packet) = packet {
+                    // Convert IP packet to Ethernet frame for tunnel
+                    if let Some(eth_frame) = Self::ip_to_ethernet(&ip_packet) {
+                        info!("📤 Wintun→Tunnel: {} bytes (IP→Eth) - forwarding to VPN", eth_frame.len());
+                        if let Err(_) = wintun_to_tunnel_tx.send(eth_frame) {
+                            warn!("Wintun→Tunnel channel closed");
+                            break;
+                        }
+                    }
+                } else {
+                    // No data, small sleep to avoid busy waiting
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                }
+            }
+            info!("Wintun→Tunnel bridge task ended");
+        });
+        
+        // Task 2: VPN tunnel → Wintun (tunnel sends data to OS network stack)
+        let tun_for_write = tun_device.clone();
+        let tunnel_to_wintun_handle = tokio::spawn(async move {
+            info!("🔄 Started Tunnel→Wintun bridge task");
+            while let Some(eth_frame) = tunnel_to_wintun_rx.recv().await {
+                // Convert Ethernet frame to IP packet for Wintun
+                if let Some(ip_packet) = Self::ethernet_to_ip(&eth_frame) {
+                    info!("📥 Tunnel→Wintun: {} bytes (Eth→IP) - forwarding to adapter", ip_packet.len());
+                    let tun_guard = tun_for_write.lock().await;
+                    if let Err(e) = tun_guard.send(&ip_packet) {
+                        warn!("Error writing to Wintun: {}", e);
+                        break;
+                    }
+                    // Lock is dropped here automatically
+                } else {
+                    debug!("Dropping non-IP Ethernet frame from tunnel");
+                }
+            }
+            info!("Tunnel→Wintun bridge task ended");
+        });
+        
+        // Store task handles for cleanup
+        self.aux_tasks.push(wintun_to_tunnel_handle);
+        self.aux_tasks.push(tunnel_to_wintun_handle);
+        
+        info!("✅ Packet bridge established between Wintun and VPN tunnel");
+        Ok(())
+    }
+    
+    /// Convert IP packet to Ethernet frame (for sending to tunnel)
+    #[allow(dead_code)] // Utility function kept for alternative bridge implementations
+    fn ip_to_ethernet(ip_packet: &[u8]) -> Option<Vec<u8>> {
+        if ip_packet.len() < 20 {
+            return None; // Too small to be valid IP
+        }
+        
+        // Check if it's IPv4
+        let version = (ip_packet[0] >> 4) & 0x0F;
+        if version != 4 {
+            return None; // Only handle IPv4 for now
+        }
+        
+        // Create Ethernet frame with dummy MAC addresses
+        let mut eth_frame = Vec::with_capacity(14 + ip_packet.len());
+        
+        // Destination MAC (use broadcast for DHCP, or dummy for others)
+        let protocol = ip_packet[9];
+        if protocol == 17 { // UDP - might be DHCP
+            let ihl = (ip_packet[0] & 0x0F) as usize * 4;
+            if ip_packet.len() >= ihl + 8 {
+                let src_port = u16::from_be_bytes([ip_packet[ihl], ip_packet[ihl + 1]]);
+                let dst_port = u16::from_be_bytes([ip_packet[ihl + 2], ip_packet[ihl + 3]]);
+                if src_port == 68 || dst_port == 67 || src_port == 67 || dst_port == 68 {
+                    // DHCP packet - use broadcast
+                    eth_frame.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+                } else {
+                    // Regular UDP - use dummy unicast
+                    eth_frame.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+                }
+            } else {
+                eth_frame.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+            }
+        } else {
+            // Non-UDP - use dummy unicast MAC
+            eth_frame.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        }
+        
+        // Source MAC (locally administered)
+        eth_frame.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
+        
+        // EtherType (IPv4)
+        eth_frame.extend_from_slice(&[0x08, 0x00]);
+        
+        // IP payload
+        eth_frame.extend_from_slice(ip_packet);
+        
+        Some(eth_frame)
+    }
+    
+    /// Convert Ethernet frame to IP packet (for sending to Wintun)
+    #[allow(dead_code)] // Utility function kept for alternative bridge implementations
+    fn ethernet_to_ip(eth_frame: &[u8]) -> Option<Vec<u8>> {
+        if eth_frame.len() < 14 {
+            return None; // Too small for Ethernet header
+        }
+        
+        // Check EtherType for IPv4 (0x0800)
+        let ethertype = u16::from_be_bytes([eth_frame[12], eth_frame[13]]);
+        if ethertype != 0x0800 {
+            return None; // Not IPv4
+        }
+        
+        // Extract IP packet (skip 14-byte Ethernet header)
+        let ip_packet = &eth_frame[14..];
+        if ip_packet.len() < 20 {
+            return None; // Too small for IP header
+        }
+        
+        // Verify it's IPv4
+        let version = (ip_packet[0] >> 4) & 0x0F;
+        if version != 4 {
+            return None;
+        }
+        
+        Some(ip_packet.to_vec())
+    }
+    
+    /// Parse netsh interface configuration output into a DHCP lease
+    fn parse_netsh_config(&self, config_output: &str) -> Option<crate::dhcp::Lease> {
+        use std::net::Ipv4Addr;
+        use std::time::Duration;
+        
+        let mut client_ip: Option<Ipv4Addr> = None;
+        let mut subnet_mask: Option<Ipv4Addr> = None;
+        let mut gateway: Option<Ipv4Addr> = None;
+        let mut dns_servers: Vec<Ipv4Addr> = Vec::new();
+        
+        for line in config_output.lines() {
+            let line = line.trim();
+            
+            // Parse IP Address (handle both formats)
+            if line.contains("IP Address:") {
+                if let Some(ip_part) = line.split("IP Address:").nth(1) {
+                    // Handle format: "IP Address: 169.254.147.2"
+                    let ip_str = if ip_part.contains("(Preferred)") {
+                        ip_part.split("(Preferred)").nth(0).unwrap_or("").trim()
+                    } else {
+                        ip_part.trim()
+                    };
+                    
+                    if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
+                        client_ip = Some(ip);
+                    }
+                }
+            }
+            
+            // Parse Subnet Prefix (handle both "Subnet Prefix:" and "Subnet Prefix Length:")
+            if line.contains("Subnet Prefix Length:") {
+                if let Some(prefix_part) = line.split("Subnet Prefix Length:").nth(1) {
+                    if let Ok(prefix_len) = prefix_part.trim().parse::<u8>() {
+                        subnet_mask = Some(prefix_to_mask(prefix_len));
+                    }
+                }
+            } else if line.contains("Subnet Prefix:") {
+                // Handle format: "Subnet Prefix: 169.254.0.0/16 (mask 255.255.0.0)"
+                if let Some(prefix_part) = line.split("Subnet Prefix:").nth(1) {
+                    if let Some(mask_start) = prefix_part.find("(mask ") {
+                        if let Some(mask_end) = prefix_part[mask_start..].find(")") {
+                            let mask_str = &prefix_part[mask_start + 6..mask_start + mask_end].trim();
+                            if let Ok(mask) = mask_str.parse::<Ipv4Addr>() {
+                                subnet_mask = Some(mask);
+                            }
+                        }
+                    } else if let Some(slash_pos) = prefix_part.find('/') {
+                        // Handle format: "169.254.0.0/16"
+                        let prefix_str = &prefix_part[slash_pos + 1..].trim();
+                        if let Ok(prefix_len) = prefix_str.parse::<u8>() {
+                            subnet_mask = Some(prefix_to_mask(prefix_len));
+                        }
+                    }
+                }
+            }
+            
+            // Parse Default Gateway
+            if line.contains("Default Gateway:") && !line.contains("::") {
+                if let Some(gw_part) = line.split("Default Gateway:").nth(1) {
+                    if let Ok(gw) = gw_part.trim().parse::<Ipv4Addr>() {
+                        gateway = Some(gw);
+                    }
+                }
+            }
+            
+            // Parse DNS Servers
+            if line.contains("DNS Servers:") && !line.contains("::") {
+                if let Some(dns_part) = line.split("DNS Servers:").nth(1) {
+                    if let Ok(dns) = dns_part.trim().parse::<Ipv4Addr>() {
+                        dns_servers.push(dns);
+                    }
+                }
+            }
+        }
+        
+        // Create lease if we have minimum required information
+        if let Some(ip) = client_ip {
+            Some(crate::dhcp::Lease {
+                client_ip: ip,
+                server_ip: gateway, // Use gateway as server IP
+                gateway,
+                subnet_mask,
+                dns_servers,
+                lease_time: Some(Duration::from_secs(86400)), // Default 24 hours
+                renewal_time: Some(Duration::from_secs(43200)), // Default 12 hours
+                rebinding_time: Some(Duration::from_secs(75600)), // Default 21 hours
+                domain_name: None,
+                interface_mtu: Some(1500),
+                broadcast_addr: None,
+                classless_routes: vec![],
+                server_mac: None,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+/// Convert prefix length to subnet mask
+fn prefix_to_mask(prefix_len: u8) -> std::net::Ipv4Addr {
+    if prefix_len == 0 {
+        return std::net::Ipv4Addr::new(0, 0, 0, 0);
+    }
+    if prefix_len >= 32 {
+        return std::net::Ipv4Addr::new(255, 255, 255, 255);
+    }
+    
+    let mask_bits = 0xFFFF_FFFF << (32 - prefix_len);
+    std::net::Ipv4Addr::from(mask_bits)
 }

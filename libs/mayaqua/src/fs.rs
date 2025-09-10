@@ -40,7 +40,7 @@ pub fn write_all_atomic<P: AsRef<Path>>(path: P, data: &[u8]) -> Result<()> {
 }
 
 /// Set file permissions to user read/write only (best-effort, Unix only)
-pub fn set_user_rw_only<P: AsRef<Path>>(path: P) {
+pub fn set_user_rw_only<P: AsRef<Path>>(_path: P) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

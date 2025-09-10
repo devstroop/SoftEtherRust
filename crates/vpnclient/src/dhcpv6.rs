@@ -119,7 +119,17 @@ impl DhcpV6Client {
         Ok(eth)
     }
 
-    pub fn send_frame(&self, frame: Vec<u8>) { if !self.dp.send_frame(frame) { warn!("DHCPv6 frame send failed (no link)"); } }
+    pub fn send_frame(&self, frame: Vec<u8>) -> bool { 
+        let success = self.dp.send_frame(frame.clone());
+        if !success { 
+            let summary = self.dp.summary();
+            warn!("DHCPv6 frame send failed: links={} tx_capable={} (total_tx={})", 
+                  summary.total_links, 
+                  summary.c2s_links + summary.both_links,
+                  summary.total_tx); 
+        }
+        success
+    }
 
     pub async fn wait_for(&mut self, ty: MT, deadline: Instant) -> Result<Option<dhcproto::v6::Message>> {
         use dhcproto::v6::Decoder;

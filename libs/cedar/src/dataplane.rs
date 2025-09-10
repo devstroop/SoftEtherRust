@@ -1,4 +1,4 @@
-use log::{debug, warn};
+use log::{debug, info, warn};
 use native_tls::TlsStream;
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
@@ -245,7 +245,13 @@ impl DataPlane {
                 })
                 .collect();
             if elig.is_empty() {
-                if let Some(cb)=&self.event_cb { cb(293, "dataplane tx failure: no eligible links".into()); }
+                if let Some(cb)=&self.event_cb { 
+                    cb(293, format!("dataplane tx failure: no eligible links (total={} c2s={} s2c={} both={})", 
+                       g.links.len(), 
+                       g.links.values().filter(|l| matches!(l.direction, LinkDirection::ClientToServer)).count(),
+                       g.links.values().filter(|l| matches!(l.direction, LinkDirection::ServerToClient)).count(),
+                       g.links.values().filter(|l| matches!(l.direction, LinkDirection::Both)).count())); 
+                }
                 return false;
             }
             if g.half_connection {
@@ -303,12 +309,12 @@ impl DataPlane {
             g.next_id
         };
         let rx_handle = tokio::task::spawn_blocking(move || {
-            debug!("dataplane: Starting RX loop for link_id={}", link_id_for_debug);
+            info!("🚀 DataPlane RX task started for link_id={}", link_id_for_debug);
             // limit hexdump logs to avoid noise
             let mut debug_hexdump_budget: usize = 8;
             loop {
                 // Helper: read big-endian u32
-                let read_u32_be = |guard: &mut TlsStream<TcpStream>| -> std::io::Result<u32> {
+                let _read_u32_be = |guard: &mut TlsStream<TcpStream>| -> std::io::Result<u32> {
                     let mut b = [0u8; 4];
                     if let Err(e) = guard.read_exact(&mut b) {
                         // Treat timeout / wouldblock as transient; sleep briefly and continue
@@ -324,9 +330,21 @@ impl DataPlane {
                     Ok(u32::from_be_bytes(b))
                 };
                 // Parse message: either KEEP_ALIVE ([0xffffffff][len][bytes]) or data batch ([count][len][frame] * count)
+                // Protocol uses BIG-ENDIAN for numeric fields (confirmed by working Go implementation).
                 let mut frames: Vec<Vec<u8>> = Vec::new();
                 {
                     let mut guard = tls_for_rx.lock().unwrap();
+                    // Helper for BE decoding (matching Go implementation)
+                    let read_u32_be = |guard: &mut TlsStream<TcpStream>| -> std::io::Result<u32> {
+                        let mut b = [0u8; 4];
+                        if let Err(e) = guard.read_exact(&mut b) {
+                            if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut {
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                                return Err(e);
+                            } else { return Err(e); }
+                        }
+                        Ok(u32::from_be_bytes(b))
+                    };
                     let first = match read_u32_be(&mut guard) {
                         Ok(v) => v,
                         Err(e) => {
@@ -381,7 +399,7 @@ impl DataPlane {
                         continue;
                     } else {
                         let count = first;
-                        debug!("dataplane: RX batch count={count} (link dir={direction:?})");
+                        info!("📦 DataPlane: RX batch count={count} (link dir={direction:?})");
                         if count == 0 {
                             continue;
                         }
@@ -420,6 +438,7 @@ impl DataPlane {
                             }
                             frames.push(buf);
                         }
+                        info!("📥 DataPlane: Received {} frames from VPN tunnel", frames.len());
                     }
                 }
                 // Optional: log interesting L2 types (e.g., DHCP) for diagnostics
@@ -445,13 +464,13 @@ impl DataPlane {
                 // Forward to adapter sink and tap (if any)
                 let adapter_tx_opt = { inner_for_rx.lock().unwrap().adapter_rx_tx.clone() };
                 if let Some(ext) = adapter_tx_opt {
-                    debug!("DataPlane link RX: forwarding {} frames to adapter sink", frames.len());
+                    info!("🔄 DataPlane link RX: forwarding {} frames to adapter sink", frames.len());
                     for f in &frames {
                         let _ = ext.send(f.clone());
                     }
                 } else {
                     if !frames.is_empty() {
-                        debug!("DataPlane link RX: no adapter sink configured - {} frames dropped", frames.len());
+                        warn!("⚠️  DataPlane link RX: no adapter sink configured - {} frames dropped", frames.len());
                     }
                 }
                 let tap_tx_opt = { inner_for_rx.lock().unwrap().tap_rx_tx.clone() };
@@ -476,10 +495,10 @@ impl DataPlane {
                 let tls_for_tx2 = tls_for_tx.clone();
                 let res = tokio::task::spawn_blocking(move || {
                     let mut guard = tls_for_tx2.lock().unwrap();
-                    // Write count=1
+                    // Write count=1 (big-endian per Go implementation)
                     let count_be = 1u32.to_be_bytes();
                     guard.write_all(&count_be)?;
-                    // Write frame length
+                    // Write frame length (big-endian)
                     let len_be = (len as u32).to_be_bytes();
                     guard.write_all(&len_be)?;
                     // Write frame payload

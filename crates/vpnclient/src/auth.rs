@@ -12,6 +12,80 @@ use cedar::{AuthType, ClientAuth, ClientOption};
 use super::VpnClient;
 
 impl VpnClient {
+    /// Helper to build a password-based login pack mimicking Kotlin & C reference clients.
+    /// Expects: already performed watermark/hello so `secure_pwd` (SecurePassword) computed from server random.
+    pub(crate) fn build_password_login_pack(
+        &self,
+        client_auth: &cedar::ClientAuth,
+        client_option: &cedar::ClientOption,
+        secure_pwd: Option<&[u8;20]>,
+        ticket: bool,
+    ) -> anyhow::Result<mayaqua::Pack> {
+        use cedar::constants::CEDAR_SIGNATURE_STR;
+        let mut p = mayaqua::Pack::new();
+        // Toggle for emitting duplicate CamelCase variants of fields (legacy / debugging)
+        let dup = std::env::var("SE_DUPLICATE_LOGIN_FIELDS").ok().as_deref() == Some("1");
+        // Canonical lowercase method (server StrCmpi) + fields
+        p.add_str("method", "login")?;
+        p.add_int("version", cedar::SOFTETHER_VER)?;
+        p.add_int("build", cedar::SOFTETHER_BUILD)?;
+        p.add_str("client_str", CLIENT_STRING)?;
+        p.add_str("hubname", &client_option.hubname)?;
+        p.add_str("username", &client_auth.username)?;
+        p.add_str("protocol", CEDAR_SIGNATURE_STR)?;
+        p.add_int("max_connection", client_option.max_connection)?;
+        p.add_int("use_compress", client_option.use_compress as u32)?;
+        p.add_int("half_connection", client_option.half_connection as u32)?;
+        // Explicit encryption flag (always 1 over TLS) – send both snake and CamelCase variants
+        p.add_int("use_encrypt", 1)?;
+        if dup { p.add_int("UseEncrypt", 1).ok(); }
+        // Secure password or ticket handling
+        if ticket {
+            // Ticket auth: server expects ticket data (20 bytes). Add both forms.
+            p.add_int("authtype", 99)?;
+            p.add_data("ticket", client_auth.hashed_password.to_vec())?;
+            if dup { p.add_data("Ticket", client_auth.hashed_password.to_vec()).ok(); }
+        } else {
+            p.add_int("authtype", 1)?;
+            if let Some(sp) = secure_pwd { p.add_data("secure_password", sp.to_vec())?; if dup { p.add_data("SecurePassword", sp.to_vec()).ok(); } }
+        }
+        // Client / product metadata (duplicate in CamelCase for compatibility)
+        let cid = self.config.connection.client_id.unwrap_or_else(|| rand::rng().next_u32());
+        p.add_int("client_id", cid)?; if dup { p.add_int("ClientId", cid).ok(); }
+        let mut unique = [0u8; 20]; rand::rng().fill_bytes(&mut unique);
+        p.add_data("unique_id", unique.to_vec())?; if dup { p.add_data("UniqueId", unique.to_vec()).ok(); }
+        // Random PenCore blob (0..1000 bytes like Kotlin) – add only CamelCase; server tolerant
+        let pen_size = (rand::rng().next_u32() as usize) % 1000;
+        if pen_size > 0 { let mut pen = vec![0u8; pen_size]; rand::rng().fill_bytes(&mut pen); p.add_data("PenCore", pen).ok(); }
+        // Duplicate commonly camel-cased fields expected by property packs (optional)
+        if dup {
+            p.add_str("HubName", &client_option.hubname).ok();
+            p.add_str("UserName", &client_auth.username).ok();
+            p.add_int("MaxConnection", client_option.max_connection).ok();
+            p.add_int("UseCompress", client_option.use_compress as u32).ok();
+            p.add_int("HalfConnection", client_option.half_connection as u32).ok();
+        }
+        // Placeholder UDP flags (align Kotlin when disabled). Only advertise disabled explicitly; future: gate by config.
+        // If config enables UDP acceleration, emit full set of negotiation fields similar to Kotlin client.
+    if self.config.connection.udp_acceleration {
+            p.add_int("use_udp_acceleration", 1).ok();
+            p.add_int("UseUdpAcceleration", 1).ok(); // camel for legacy if dup
+            p.add_int("udp_acceleration_version", 2).ok();
+            p.add_int("udp_acceleration_max_version", 2).ok();
+            // Local UDP endpoint discovery (placeholder 0.0.0.0 if not yet bound)
+            // Later we can integrate real socket bind from UdpAccelerator
+            p.add_int("udp_acceleration_client_ip", 0).ok();
+            p.add_int("udp_acceleration_client_port", 0).ok();
+            p.add_int("udp_acceleration_support_fast_disconnect_detect", 1).ok();
+            // Generate a v2 client key (32 bytes like ChaCha20-Poly1305 key) placeholder random
+            let mut key_v2 = [0u8; 32]; rand::rng().fill_bytes(&mut key_v2);
+            p.add_data("udp_acceleration_client_key_v2", key_v2.to_vec()).ok();
+        } else {
+            p.add_int("UseUdpAcceleration", 0)?; // keep previous explicit disabled flag
+        }
+        // Note: environment info appended afterwards in perform_authentication.
+        Ok(p)
+    }
     pub fn create_client_auth(&self) -> Result<ClientAuth> {
         if let Some(ticket) = self.redirect_ticket {
             return ClientAuth::new_ticket(&self.config.username, &ticket)
@@ -114,54 +188,20 @@ impl VpnClient {
             client_auth.username, self.config.hub_name
         );
 
-        // Build auth pack
+        // Build auth pack (unified path for password & ticket); other auth types fallback to cedar builder then augmented for parity
         let mut auth_pack = if matches!(client_auth.auth_type, AuthType::Password) {
-            use cedar::constants::CEDAR_SIGNATURE_STR;
-            let mut p = mayaqua::Pack::new();
-            p.add_str("method", "login")?;
-            p.add_int("version", cedar::SOFTETHER_VER)?;
-            p.add_int("build", cedar::SOFTETHER_BUILD)?;
-            p.add_str("client_str", CLIENT_STRING)?;
-            p.add_str("hubname", &client_option.hubname)?;
-            p.add_str("username", &client_auth.username)?;
-            p.add_str("protocol", CEDAR_SIGNATURE_STR)?;
-            p.add_int("max_connection", client_option.max_connection)?;
-            p.add_int("use_compress", 0)?;
-            p.add_int("half_connection", client_option.half_connection as u32)?;
-            p.add_int("authtype", 1)?;
-            if let Some(sp) = secure_pwd.as_ref() {
-                p.add_data("secure_password", sp.to_vec())?;
-            }
-            let cid = self.config.connection.client_id.unwrap_or(123);
-            p.add_int("client_id", cid)?;
-            let mut unique = [0u8; 20];
-            rand::rng().fill_bytes(&mut unique);
-            p.add_data("unique_id", unique.to_vec())?;
-            p
+            self.build_password_login_pack(client_auth, client_option, secure_pwd.as_ref(), false)?
         } else if matches!(client_auth.auth_type, AuthType::Ticket) {
-            use cedar::constants::CEDAR_SIGNATURE_STR;
-            let mut p = mayaqua::Pack::new();
-            p.add_str("method", "login")?;
-            p.add_int("version", cedar::SOFTETHER_VER)?;
-            p.add_int("build", cedar::SOFTETHER_BUILD)?;
-            p.add_str("client_str", CLIENT_STRING)?;
-            p.add_str("hubname", &client_option.hubname)?;
-            p.add_str("username", &client_auth.username)?;
-            p.add_str("protocol", CEDAR_SIGNATURE_STR)?;
-            p.add_int("max_connection", client_option.max_connection)?;
-            p.add_int("use_compress", 0)?;
-            p.add_int("half_connection", client_option.half_connection as u32)?;
-            p.add_int("authtype", 99)?;
-            p.add_data("ticket", client_auth.hashed_password.to_vec())?;
-            let cid = self.config.connection.client_id.unwrap_or(123);
-            p.add_int("client_id", cid)?;
-            let mut unique = [0u8; 20];
-            rand::rng().fill_bytes(&mut unique);
-            p.add_data("unique_id", unique.to_vec())?;
-            p
+            self.build_password_login_pack(client_auth, client_option, None, true)?
         } else {
-            cedar::handshake::build_login_pack(client_option, client_auth)
-                .context("Failed to build cedar login pack")?
+            let mut base = cedar::handshake::build_login_pack(client_option, client_auth)
+                .context("Failed to build cedar login pack")?;
+            // Parity augmentation (camel-case duplicates + UseEncrypt + PenCore)
+            base.add_int("UseEncrypt", 1).ok();
+            base.add_int("use_encrypt", 1).ok();
+            let pen_size = (rand::rng().next_u32() as usize) % 1000;
+            if pen_size > 0 { let mut pen = vec![0u8; pen_size]; rand::rng().fill_bytes(&mut pen); base.add_data("PenCore", pen).ok(); }
+            base
         };
 
         // Environment info
@@ -411,5 +451,27 @@ impl VpnClient {
                 info!("Captured redirect ticket for re-auth");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+    use crate::shared_config::{ClientConfig as SharedConfig, IpVersionPreference};
+
+    #[test]
+    fn test_unified_login_pack_contains_canonical_fields() {
+        let hashed = [0x11u8;20];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&hashed);
+        let cfg = SharedConfig { server:"example.com".into(), port:443, hub:"DEFAULT".into(), username:"user1".into(), password:None, password_hash:Some(b64), skip_tls_verify:true, use_compress:false, max_connections:1, nat_traversal:None, udp_acceleration:None, static_ip:None, ip_version:IpVersionPreference::Auto, require_static_ip:false };
+        let client = VpnClient::from_shared_config(cfg).expect("client create");
+        let auth = client.create_client_auth().expect("auth");
+        let opt = client.create_client_option().expect("opt");
+        let fake = [0x22u8;20];
+        let pack = client.build_password_login_pack(&auth, &opt, Some(&fake), false).expect("pack");
+        assert_eq!(pack.get_str("method").unwrap().to_ascii_lowercase(), "login");
+        assert!(pack.get_data("SecurePassword").is_ok() || pack.get_data("secure_password").is_ok());
+        assert!(pack.get_int("UseEncrypt").is_ok() || pack.get_int("use_encrypt").is_ok());
     }
 }

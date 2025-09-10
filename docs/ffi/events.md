@@ -34,6 +34,12 @@ Delivered via `softether_client_set_event_callback(h, cb, user)` as `(level, cod
   - 298: DHCP send (info)
     - Message examples: "dhcp discover sent ...", "dhcp request sent ..."
   - 299: DHCP acquisition attempt (info)
+  - 2995: DHCP links ready (info)
+    - Emitted when dataplane links become available for DHCP
+  - 2996: DHCP no links warning (warn)
+    - Emitted when no dataplane links are available after waiting
+  - 2997: DHCP frame send failed (warn)
+    - Emitted when DHCP frame transmission fails
   - 2998: DHCP no-traffic observed within window (info)
     - Emitted if no DHCP frames are seen on RX during the discover window; indicates likely framing mismatch.
   - 2999: DHCP decode error (info, throttled)

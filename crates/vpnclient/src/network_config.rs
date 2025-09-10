@@ -1,8 +1,9 @@
 use anyhow::Result;
-use std::net::{IpAddr, Ipv4Addr};
-use tracing::{info, warn};
+use std::net::Ipv4Addr;
 
-use crate::types::{mask_to_prefix, NetworkSettings};
+use crate::types::NetworkSettings;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use crate::types::mask_to_prefix;
 use mayaqua::Pack;
 
 use super::VpnClient;
@@ -83,28 +84,25 @@ impl VpnClient {
 impl VpnClient {
     /// Apply parsed network settings to a platform virtual adapter (macOS / Linux only for now)
     pub(super) async fn apply_network_settings(&mut self) -> Result<()> {
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
-            return Ok(());
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            let euid = unsafe { libc::geteuid() };
-            if euid != 0 {
-                warn!("Insufficient privileges to create utun (need root). Run with sudo.");
+            #[cfg(target_os = "macos")]
+            {
+                let euid = unsafe { libc::geteuid() };
+                if euid != 0 {
+                    info!("Insufficient privileges to create utun (need root). Run with sudo.");
+                }
             }
-        }
 
-        let ns = match &self.network_settings {
-            Some(n) => n.clone(),
-            None => return Ok(()),
-        };
+            let ns = match &self.network_settings {
+                Some(n) => n.clone(),
+                None => return Ok(()),
+            };
 
-        let no_routing = ns
-            .policies
-            .iter()
-            .any(|(k, v)| k.to_ascii_lowercase().contains("norouting") && *v != 0);
+            let no_routing = ns
+                .policies
+                .iter()
+                .any(|(k, v)| k.to_ascii_lowercase().contains("norouting") && *v != 0);
 
         let ipv4 = ns.assigned_ipv4;
         let mask = ns
@@ -622,5 +620,11 @@ impl VpnClient {
             self.applied_resources = applied;
         }
         Ok(())
+        }
+        
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            Ok(())
+        }
     }
 }
