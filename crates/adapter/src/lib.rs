@@ -19,6 +19,8 @@ use tokio::process::Command;
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(target_os = "macos")]
 use tokio::task;
+#[cfg(target_os = "macos")]
+use std::alloc::{alloc, dealloc, Layout};
 
 /// Virtual network adapter for VPN connections
 /// 
@@ -379,19 +381,21 @@ impl VirtualAdapter {
                 warn!("Failed to set BPF buffer length, continuing");
             }
 
+            // Bind BPF to the peer interface (like Go implementation)
+            let peer_name = format!("feth{}", 1024);
+            // Small delay to ensure interface is ready
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let peer_name_c = std::ffi::CString::new(peer_name.clone()).unwrap();
+            if libc::ioctl(fd, 0x8020426c, peer_name_c.as_ptr() as *const libc::c_void) < 0 { // BIOCSETIF
+                libc::close(fd);
+                anyhow::bail!("Failed to bind BPF to interface {}", peer_name);
+            }
+
             // Set immediate mode
             let immediate = 1u32;
             if libc::ioctl(fd, 0x80044270, &immediate) < 0 { // BIOCIMMEDIATE
                 libc::close(fd);
                 anyhow::bail!("Failed to set BPF immediate mode");
-            }
-
-            // Bind BPF to the peer interface (like Go implementation)
-            let peer_name = format!("feth{}", 1024);
-            // Small delay to ensure interface is ready
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            if libc::ioctl(fd, 0x8020426c, peer_name.as_ptr() as *const libc::c_void) < 0 { // BIOCSETIF
-                anyhow::bail!("Failed to bind BPF to interface {}", peer_name);
             }
 
             // Set header complete
@@ -520,26 +524,37 @@ impl AdapterIo {
                     return Ok(None);
                 }
             }
-            // Ready to read
-            let mut buf = vec![0u8; 65536];
-            let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            // Ready to read, use aligned buffer
+            let layout = Layout::from_size_align(65536, 8).unwrap();
+            let buf_ptr = unsafe { alloc(layout) };
+            if buf_ptr.is_null() {
+                return Err(anyhow::anyhow!("Failed to allocate aligned buffer"));
+            }
+            let n = unsafe { libc::read(fd, buf_ptr as *mut libc::c_void, 65536) };
             if n < 0 {
+                unsafe { dealloc(buf_ptr, layout); }
                 return Err(anyhow::anyhow!(
                     "BPF read error: {}",
                     std::io::Error::last_os_error()
                 ));
             }
             if n == 0 {
+                unsafe { dealloc(buf_ptr, layout); }
                 return Ok(None);
             }
             // Skip BPF header (18 bytes on macOS)
             const BPF_HDR_LEN: usize = 18;
             if n < BPF_HDR_LEN as isize {
+                unsafe { dealloc(buf_ptr, layout); }
                 return Ok(None);
             }
             let frame_len = n as usize - BPF_HDR_LEN;
-            buf.truncate(frame_len);
-            Ok(Some(buf))
+            let mut frame = vec![0u8; frame_len];
+            unsafe {
+                std::ptr::copy_nonoverlapping(buf_ptr.add(BPF_HDR_LEN), frame.as_mut_ptr(), frame_len);
+                dealloc(buf_ptr, layout);
+            }
+            Ok(Some(frame))
         })
         .await
         .map_err(|e| anyhow::anyhow!("join error: {}", e))?

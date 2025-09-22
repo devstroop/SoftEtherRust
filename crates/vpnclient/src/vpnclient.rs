@@ -96,7 +96,6 @@ pub struct VpnClient {
     sni_host: Option<String>,
     // Connection state tracking and keep-alive
     state: ConnectionState,
-    last_noop_sent: u64,
     // Server-reported timeout (ms) for HTTP keep-alive / control channel guidance
     #[allow(dead_code)]
     server_timeout_ms: Option<u32>,
@@ -217,7 +216,6 @@ impl VpnClient {
             endpoints_rr,
             sni_host: None,
             state: ConnectionState::Idle,
-            last_noop_sent: 0,
             server_timeout_ms: None,
             bridge_ready: false,
             dhcp_spawned: false,
@@ -748,7 +746,6 @@ enum ConnectionState {
     Idle,
     Connecting,
     Established,
-    Disconnecting,
 }
 
 impl From<ConnectionState> for ClientState {
@@ -757,7 +754,6 @@ impl From<ConnectionState> for ClientState {
             ConnectionState::Idle => ClientState::Idle,
             ConnectionState::Connecting => ClientState::Connecting,
             ConnectionState::Established => ClientState::Established,
-            ConnectionState::Disconnecting => ClientState::Disconnecting,
         }
     }
 }
@@ -785,7 +781,6 @@ impl VpnClient {
                 ConnectionState::Idle => 100,
                 ConnectionState::Connecting => 101,
                 ConnectionState::Established => 102,
-                ConnectionState::Disconnecting => 103,
             };
             self.emit_event(EventLevel::Info, code, format!("state: {s:?}"));
         }
