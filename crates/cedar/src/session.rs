@@ -136,6 +136,9 @@ pub struct Session {
     pub vlan_id: u32,
     pub ipc_mac_address: [u8; 6],
 
+    // NAT traversal mode
+    pub force_nat_traversal: bool,
+
     // Encryption keys
     pub udp_send_key: [u8; 16],
     pub udp_recv_key: [u8; 16],
@@ -205,6 +208,8 @@ impl Session {
 
             vlan_id: 0,
             ipc_mac_address: [0u8; 6],
+
+            force_nat_traversal: false,
 
             udp_send_key: [0u8; 16],
             udp_recv_key: [0u8; 16],

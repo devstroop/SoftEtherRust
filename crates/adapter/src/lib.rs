@@ -1,47 +1,64 @@
-//! Virtual network adapter management (crate)
+//! Virtual network adapter management for SoftEther VPN client
+//!
+//! This crate provides platform-specific virtual network adapter implementations
+//! for VPN connections. On macOS, it uses feth interfaces with NDRV for writing
+//! and BPF for reading. On Linux, it uses TUN interfaces. On Windows, it uses TAP.
+//!
+//! The adapter handles:
+//! - Interface creation and destruction
+//! - IP address and route configuration
+//! - Packet I/O operations for bridging with VPN sessions
 
 use anyhow::Result;
-use log::{debug, info};
+use log::{debug, info, warn};
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use tokio::process::Command;
 
 #[cfg(target_os = "macos")]
-use tun::Device as _; // bring trait for name()
-
-#[cfg(target_os = "macos")]
-use std::io::{Read, Write};
-#[cfg(target_os = "macos")]
-use std::os::fd::AsRawFd;
-#[cfg(target_os = "macos")]
-use std::sync::{Arc, Mutex};
+use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(target_os = "macos")]
 use tokio::task;
 
 /// Virtual network adapter for VPN connections
+/// 
+/// Provides a unified interface for creating and managing virtual network interfaces
+/// across different platforms. Handles interface lifecycle, network configuration,
+/// and packet I/O operations.
 pub struct VirtualAdapter {
     name: String,
     mac_address: Option<String>,
     is_created: bool,
     #[cfg(target_os = "macos")]
-    dev: Option<Arc<Mutex<tun::platform::Device>>>,
+    ndrv_fd: Option<std::os::fd::OwnedFd>,
+    #[cfg(target_os = "macos")]
+    bpf_fd: Option<std::os::fd::OwnedFd>,
 }
 
 impl VirtualAdapter {
-    /// Create a new virtual adapter
+    /// Create a new virtual adapter instance
+    /// 
+    /// # Arguments
+    /// * `name` - Interface name (e.g., "feth0", "tun0")
+    /// * `mac_address` - Optional MAC address string (e.g., "00:11:22:33:44:55")
     pub fn new(name: String, mac_address: Option<String>) -> Self {
         Self {
             name,
             mac_address,
             is_created: false,
             #[cfg(target_os = "macos")]
-            dev: None,
+            ndrv_fd: None,
+            #[cfg(target_os = "macos")]
+            bpf_fd: None,
         }
     }
 
-    /// Create the virtual adapter
+    /// Create the virtual adapter interface
+    /// 
+    /// Creates the platform-specific virtual network interface and initializes
+    /// the necessary file descriptors for packet I/O operations.
     pub async fn create(&mut self) -> Result<()> {
-        info!("Creating virtual adapter: {}", self.name);
+        debug!("Creating virtual adapter: {}", self.name);
 
         #[cfg(target_os = "macos")]
         {
@@ -61,12 +78,14 @@ impl VirtualAdapter {
         Ok(())
     }
 
-    /// Destroy the virtual adapter
+    /// Destroy the virtual adapter interface
+    /// 
+    /// Cleans up the virtual interface and closes any open file descriptors.
     pub async fn destroy(&mut self) -> Result<()> {
         if !self.is_created {
             return Ok(());
         }
-        info!("Destroying virtual adapter: {}", self.name);
+        debug!("Destroying virtual adapter: {}", self.name);
         #[cfg(target_os = "macos")]
         {
             self.destroy_macos().await?;
@@ -88,21 +107,29 @@ impl VirtualAdapter {
     pub fn is_created(&self) -> bool {
         self.is_created
     }
+    
     /// Get the adapter name
     pub fn name(&self) -> &str {
         &self.name
     }
+    
     /// Get the MAC address
     pub fn mac_address(&self) -> Option<&String> {
         self.mac_address.as_ref()
     }
 
     /// Set IP address and netmask
+    /// 
+    /// Configures the IPv4 address and subnet mask on the virtual interface.
+    /// 
+    /// # Arguments
+    /// * `ip` - IP address string (e.g., "192.168.1.100")
+    /// * `netmask` - Netmask string (e.g., "255.255.255.0")
     pub async fn set_ip_address(&self, ip: &str, netmask: &str) -> Result<()> {
         if !self.is_created {
             anyhow::bail!("Adapter not created");
         }
-        info!("Setting IP address {}/{} on {}", ip, netmask, self.name);
+        debug!("Setting IP address {}/{} on {}", ip, netmask, self.name);
         #[cfg(target_os = "macos")]
         {
             self.set_ip_address_macos(ip, netmask).await?;
@@ -119,11 +146,18 @@ impl VirtualAdapter {
     }
 
     /// Add a route through this adapter
+    /// 
+    /// Adds a routing table entry that directs traffic to the specified destination
+    /// through this virtual adapter.
+    /// 
+    /// # Arguments
+    /// * `destination` - Destination network (e.g., "192.168.1.0/24" or "0.0.0.0/0")
+    /// * `gateway` - Gateway IP address
     pub async fn add_route(&self, destination: &str, gateway: &str) -> Result<()> {
         if !self.is_created {
             anyhow::bail!("Adapter not created");
         }
-        info!(
+        debug!(
             "Adding route {} via {} on {}",
             destination, gateway, self.name
         );
@@ -141,41 +175,265 @@ impl VirtualAdapter {
         }
         Ok(())
     }
+
+    /// Get a cloneable I/O handle for reading/writing frames on this utun device
+    #[cfg(target_os = "macos")]
+    pub fn io_handle(&self) -> Result<AdapterIo> {
+        if !self.is_created {
+            anyhow::bail!("Adapter not created");
+        }
+        // For non-macOS, not supported
+        #[cfg(not(target_os = "macos"))]
+        anyhow::bail!("Direct I/O not supported on this platform");
+        #[cfg(target_os = "macos")]
+        {
+            let ndrv_owned = self.ndrv_fd.as_ref().ok_or_else(|| anyhow::anyhow!("NDRV fd not initialized"))?.try_clone()?;
+            let bpf_owned = self.bpf_fd.as_ref().ok_or_else(|| anyhow::anyhow!("BPF fd not initialized"))?.try_clone()?;
+            Ok(AdapterIo {
+                name: self.name.clone(),
+                ndrv_fd: ndrv_owned,
+                bpf_fd: bpf_owned,
+            })
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
 impl VirtualAdapter {
+    /// Create macOS feth interface pair with NDRV and BPF setup
+    /// 
+    /// Creates paired feth interfaces, sets up NDRV socket for writing packets
+    /// to the network interface, and BPF device for reading packets from it.
+    /// This follows the same approach as the Go implementation.
     async fn create_macos(&mut self) -> Result<()> {
-        // Create utun using tun crate (SystemConfiguration/kern.control semantics)
-        let config = tun::Configuration::default();
-        // Let kernel pick the utunN name; we'll read it after open. Don't set address/netmask here on macOS.
-        let dev =
-            tun::create(&config).map_err(|e| anyhow::anyhow!("Failed to create utun: {}", e))?;
-        let name = dev.name().ok().unwrap_or_else(|| "utun".to_string());
-        self.name = name;
-        // Bring interface up and set default MTU 1500
+        // For LocalBridge mode, we need Ethernet-level interface like feth
+        // Create feth interface pair like Go implementation
+        let feth_name = "feth0".to_string();
+        let peer_name = format!("feth{}", 1024); // Use a fixed peer for simplicity
+
+        // Destroy existing if any
         let _ = Command::new("ifconfig")
-            .arg(&self.name)
-            .arg("up")
+            .arg(&feth_name)
+            .arg("destroy")
             .output()
             .await;
         let _ = Command::new("ifconfig")
-            .arg(&self.name)
+            .arg(&peer_name)
+            .arg("destroy")
+            .output()
+            .await;
+
+        // Create feth interface
+        let output = Command::new("ifconfig")
+            .arg(&feth_name)
+            .arg("create")
+            .output()
+            .await?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "Failed to create feth interface: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        // Create peer
+        let output = Command::new("ifconfig")
+            .arg(&peer_name)
+            .arg("create")
+            .output()
+            .await?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "Failed to create feth peer: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        // Peer them
+        let output = Command::new("ifconfig")
+            .arg(&feth_name)
+            .arg("peer")
+            .arg(&peer_name)
+            .output()
+            .await?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "Failed to peer feth interfaces: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        // Set MAC address if provided
+        if let Some(mac) = &self.mac_address {
+            let output = Command::new("ifconfig")
+                .arg(&feth_name)
+                .arg("lladdr")
+                .arg(mac)
+                .output()
+                .await?;
+            if !output.status.success() {
+                warn!(
+                    "Failed to set MAC address: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+
+        // Bring up interfaces
+        let output = Command::new("ifconfig")
+            .arg(&feth_name)
+            .arg("up")
+            .output()
+            .await?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "Failed to bring up feth: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let output = Command::new("ifconfig")
+            .arg(&peer_name)
+            .arg("up")
+            .output()
+            .await?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "Failed to bring up feth peer: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        // Small delay to let interfaces settle
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        // Set MTU
+        let _ = Command::new("ifconfig")
+            .arg(&feth_name)
             .arg("mtu")
             .arg("1500")
             .output()
             .await;
-        self.dev = Some(Arc::new(Mutex::new(dev)));
-        self.is_created = true;
-        info!("Created utun interface: {}", self.name);
+
+        // Create NDRV socket for writing
+        let ndrv_fd = unsafe {
+            let fd = libc::socket(27, libc::SOCK_RAW, 0); // AF_NDRV = 27
+            if fd < 0 {
+                anyhow::bail!("Failed to create NDRV socket");
+            }
+
+            // Make non-blocking
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+                libc::close(fd);
+                anyhow::bail!("Failed to set NDRV socket non-blocking");
+            }
+
+            // Bind to peer
+            let mut sockaddr = [0u8; 18];
+            sockaddr[0] = 18; // len
+            sockaddr[1] = 27; // family
+            let name_bytes = peer_name.as_bytes();
+            for (i, &b) in name_bytes.iter().enumerate() {
+                if i < 16 {
+                    sockaddr[2 + i] = b;
+                }
+            }
+            // Null terminate
+            if name_bytes.len() < 16 {
+                sockaddr[2 + name_bytes.len()] = 0;
+            }
+
+            if libc::bind(fd, sockaddr.as_ptr() as *const libc::sockaddr, 18) < 0 {
+                libc::close(fd);
+                anyhow::bail!("Failed to bind NDRV socket");
+            }
+
+            // Connect to peer
+            if libc::connect(fd, sockaddr.as_ptr() as *const libc::sockaddr, 18) < 0 {
+                libc::close(fd);
+                anyhow::bail!("Failed to connect NDRV socket");
+            }
+
+            std::os::fd::OwnedFd::from_raw_fd(fd)
+        };
+
+        // Open BPF device and bind to peer_name
+        let bpf_fd = unsafe {
+            // Find available BPF device
+            let mut fd = -1;
+            for i in 0..64 {
+                let path = format!("/dev/bpf{}", i);
+                let c_path = std::ffi::CString::new(path).unwrap();
+                fd = libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK);
+                if fd >= 0 {
+                    break;
+                }
+            }
+            if fd < 0 {
+                anyhow::bail!("No available BPF device");
+            }
+
+            // Set buffer length (optional)
+            let buflen = 131072u32;
+            if libc::ioctl(fd, 0x80044266, &buflen) < 0 { // BIOCSBLEN
+                warn!("Failed to set BPF buffer length, continuing");
+            }
+
+            // Set immediate mode
+            let immediate = 1u32;
+            if libc::ioctl(fd, 0x80044270, &immediate) < 0 { // BIOCIMMEDIATE
+                libc::close(fd);
+                anyhow::bail!("Failed to set BPF immediate mode");
+            }
+
+            // Bind BPF to the peer interface (like Go implementation)
+            let peer_name = format!("feth{}", 1024);
+            // Small delay to ensure interface is ready
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            if libc::ioctl(fd, 0x8020426c, peer_name.as_ptr() as *const libc::c_void) < 0 { // BIOCSETIF
+                anyhow::bail!("Failed to bind BPF to interface {}", peer_name);
+            }
+
+            // Set header complete
+            let hdr_cmpl = 1u32;
+            if libc::ioctl(fd, 0x80044275, &hdr_cmpl) < 0 { // BIOCSHDRCMPLT
+                libc::close(fd);
+                anyhow::bail!("Failed to set BPF header complete");
+            }
+
+            // Set promiscuous mode (optional)
+            let promisc = 1u32;
+            if libc::ioctl(fd, 0x2000426d, &promisc) < 0 { // BIOCPROMISC
+                warn!("Failed to set BPF promiscuous mode, continuing");
+            }
+
+            std::os::fd::OwnedFd::from_raw_fd(fd)
+        };
+
+        self.ndrv_fd = Some(ndrv_fd);
+        self.bpf_fd = Some(bpf_fd);
+
+        // Update self.name to the actual interface name
+        self.name = feth_name;
+        info!("Created feth interface: {}", self.name);
         Ok(())
     }
+    /// Destroy macOS feth interfaces and close file descriptors
     async fn destroy_macos(&mut self) -> Result<()> {
-        // Drop the device; kernel will reclaim utun
-        self.dev = None;
+        // Close NDRV and BPF fds
+        self.ndrv_fd = None;
+        self.bpf_fd = None;
+
+        // Destroy feth interfaces
+        let peer_name = format!("feth{}", 1024);
         let _ = Command::new("ifconfig")
             .arg(&self.name)
-            .arg("down")
+            .arg("destroy")
+            .output()
+            .await;
+        let _ = Command::new("ifconfig")
+            .arg(&peer_name)
+            .arg("destroy")
             .output()
             .await;
         self.is_created = false;
@@ -217,44 +475,34 @@ impl VirtualAdapter {
         }
         Ok(())
     }
-
-    /// Get a cloneable I/O handle for reading/writing frames on this utun device
-    pub fn io_handle(&self) -> Result<AdapterIo> {
-        if !self.is_created {
-            anyhow::bail!("Adapter not created");
-        }
-        let inner = self
-            .dev
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Device not initialized"))?
-            .clone();
-        Ok(AdapterIo {
-            name: self.name.clone(),
-            inner,
-        })
-    }
 }
 
 #[cfg(target_os = "macos")]
-#[derive(Clone)]
+/// Adapter I/O handle for packet reading and writing
+/// 
+/// Provides async packet I/O operations for virtual network adapters.
+/// On macOS, uses NDRV for writing and BPF for reading.
 pub struct AdapterIo {
     name: String,
-    inner: Arc<Mutex<tun::platform::Device>>,
+    ndrv_fd: std::os::fd::OwnedFd,
+    bpf_fd: std::os::fd::OwnedFd,
 }
 
 #[cfg(target_os = "macos")]
 impl AdapterIo {
+    /// Get the adapter name
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Read a single frame from the utun device with a small timeout so it can be canceled.
-    /// Returns Ok(Some(frame)) when data is available, Ok(None) on timeout (no data), or Err on hard errors.
-    pub async fn read(&self) -> Result<Option<Vec<u8>>> {
-        let inner = self.inner.clone();
+    /// Read a single Ethernet frame from the BPF device
+    /// 
+    /// Returns the next available Ethernet frame, or None if no data is available
+    /// within the timeout period. Uses blocking I/O in a dedicated thread.
+    pub async fn read_frame(&self) -> Result<Option<Vec<u8>>> {
+        let fd = self.bpf_fd.as_raw_fd();
         task::spawn_blocking(move || {
             // Poll the file descriptor with ~100ms timeout to avoid indefinite blocking
-            let fd = { inner.lock().unwrap().as_raw_fd() };
             unsafe {
                 let mut fds = libc::pollfd {
                     fd,
@@ -264,7 +512,7 @@ impl AdapterIo {
                 let rc = libc::poll(&mut fds as *mut libc::pollfd, 1, 100);
                 if rc < 0 {
                     return Err(anyhow::anyhow!(
-                        "utun poll error: {}",
+                        "BPF poll error: {}",
                         std::io::Error::last_os_error()
                     ));
                 } else if rc == 0 {
@@ -274,26 +522,48 @@ impl AdapterIo {
             }
             // Ready to read
             let mut buf = vec![0u8; 65536];
-            let n = {
-                let mut dev = inner.lock().unwrap();
-                dev.read(&mut buf)
-                    .map_err(|e| anyhow::anyhow!("utun read error: {}", e))?
-            };
-            buf.truncate(n);
+            let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if n < 0 {
+                return Err(anyhow::anyhow!(
+                    "BPF read error: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            if n == 0 {
+                return Ok(None);
+            }
+            // Skip BPF header (18 bytes on macOS)
+            const BPF_HDR_LEN: usize = 18;
+            if n < BPF_HDR_LEN as isize {
+                return Ok(None);
+            }
+            let frame_len = n as usize - BPF_HDR_LEN;
+            buf.truncate(frame_len);
             Ok(Some(buf))
         })
         .await
         .map_err(|e| anyhow::anyhow!("join error: {}", e))?
     }
 
-    /// Write a single frame to the utun device (blocking in a dedicated thread)
-    pub async fn write(&self, data: &[u8]) -> Result<()> {
-        let inner = self.inner.clone();
+    /// Write a single Ethernet frame to the NDRV device
+    /// 
+    /// Sends an Ethernet frame to the network interface using the NDRV socket.
+    /// Uses blocking I/O in a dedicated thread.
+    pub async fn write_frame(&self, data: &[u8]) -> Result<()> {
+        let fd = self.ndrv_fd.as_raw_fd();
         let payload = data.to_vec();
         task::spawn_blocking(move || {
-            let mut dev = inner.lock().unwrap();
-            dev.write_all(&payload)
-                .map_err(|e| anyhow::anyhow!("utun write error: {}", e))
+            let n = unsafe { libc::write(fd, payload.as_ptr() as *const libc::c_void, payload.len()) };
+            if n < 0 {
+                return Err(anyhow::anyhow!(
+                    "NDRV write error: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            if n as usize != payload.len() {
+                return Err(anyhow::anyhow!("NDRV write incomplete"));
+            }
+            Ok(())
         })
         .await
         .map_err(|e| anyhow::anyhow!("join error: {}", e))??;
@@ -450,7 +720,6 @@ impl VirtualAdapter {
             .arg("ip")
             .arg("set")
             .arg("address")
-            .arg(&self.name)
             .arg("static")
             .arg(ip)
             .arg(netmask)

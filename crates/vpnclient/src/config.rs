@@ -112,6 +112,10 @@ pub struct ConnectionConfig {
     /// Optional client_id for servers that require a specific client build id
     #[serde(default)]
     pub client_id: Option<u32>,
+
+    /// Enable NAT traversal (SecureNAT mode when true, LocalBridge when false)
+    #[serde(default)]
+    pub nat_traversal: bool,
 }
 
 /// HTTP proxy configuration
@@ -232,6 +236,7 @@ impl Default for ConnectionConfig {
             apply_dns: false,
             half_connection: false,
             client_id: None,
+            nat_traversal: false,
         }
     }
 }

@@ -45,6 +45,10 @@ impl SessionManager {
     pub fn mark_established(&self) {
         self.inner.lock().unwrap().state = EngineState::Established;
     }
+
+    pub fn mark_disconnected(&self) {
+        self.inner.lock().unwrap().state = EngineState::Idle;
+    }
 }
 
 #[async_trait]

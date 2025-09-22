@@ -35,6 +35,9 @@ pub struct ClientConfig {
     pub use_encrypt: bool,
     pub max_connections: u32,
     pub udp_port: Option<u16>,
+    /// Enable NAT traversal (SecureNAT mode when true, LocalBridge when false)
+    #[serde(default)]
+    pub nat_traversal: bool,
 }
 
 impl Default for ClientConfig {
@@ -51,6 +54,7 @@ impl Default for ClientConfig {
             use_encrypt: true,
             max_connections: 1,
             udp_port: None,
+            nat_traversal: false,
         }
     }
 }

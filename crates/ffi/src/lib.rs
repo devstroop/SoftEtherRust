@@ -37,6 +37,8 @@ struct FfiConfig {
     use_encrypt: bool,
     #[serde(default = "default_max_conn")]
     max_connections: u32,
+    #[serde(default)]
+    nat_traversal: bool,
 }
 
 fn default_true() -> bool {
@@ -180,6 +182,7 @@ fn make_shared_config(c: FfiConfig) -> SharedConfig {
         use_encrypt: c.use_encrypt,
         max_connections: c.max_connections,
         udp_port: None,
+        nat_traversal: c.nat_traversal,
     }
 }
 

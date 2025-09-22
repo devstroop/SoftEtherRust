@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::net::Ipv4Addr;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::types::{mask_to_prefix, NetworkSettings};
 // use crate::types::network_settings_from_lease; // DHCP lease reflection handled elsewhere
@@ -116,7 +116,7 @@ mod linux {
 mod macos {
     // use super::*;
     use tokio::process::Command;
-    use tracing::info;
+    use tracing::{info, warn};
 
     #[derive(Clone)]
     pub(super) struct IfaceInfo {
@@ -126,6 +126,7 @@ mod macos {
     }
 
     pub(super) async fn monitor_darwin_interfaces(names: &[String]) {
+        info!("Monitoring DHCP on interfaces: {}", names.join(","));
         use tokio::time::{sleep, Duration, Instant};
         let cleaned: Vec<String> = names.iter().filter(|n| !n.is_empty()).cloned().collect();
         if cleaned.is_empty() {
@@ -159,16 +160,23 @@ mod macos {
     }
 
     pub(super) async fn invoke_dhcp_by_name(iface: &str) -> anyhow::Result<()> {
-        let _ = Command::new("ipconfig")
+        info!("Invoking DHCP on {}", iface);
+        let output = Command::new("ipconfig")
             .arg("set")
             .arg(iface)
-            .arg("DHCP")
+            .arg("dhcp")
             .output()
             .await?;
+        if output.status.success() {
+            info!("DHCP invocation succeeded on {}", iface);
+        } else {
+            warn!("DHCP invocation failed on {}: {}", iface, String::from_utf8_lossy(&output.stderr));
+        }
         Ok(())
     }
 
     pub(super) async fn kick_dhcp_until_ip(iface: &str, timeout: std::time::Duration) {
+        info!("Starting DHCP kick on {}", iface);
         use tokio::time::{sleep, Duration, Instant};
         let deadline = Instant::now() + timeout;
         let mut last_kick = Instant::now();
@@ -296,7 +304,34 @@ pub(crate) async fn kick_dhcp_until_ip(iface: &str, timeout: std::time::Duration
 }
 
 impl VpnClient {
-    /// Apply parsed network settings to a platform virtual adapter (macOS / Linux only for now)
+    /// Apply parsed network settings to a platform virtual adapter
+    ///
+    /// This method configures the virtual network interface with IP address, routes, DNS servers,
+    /// and other network settings received from the VPN server or obtained via DHCP.
+    ///
+    /// Process Flow:
+    ///   1. Check for server-provided network settings
+    ///   2. Create virtual adapter if needed
+    ///   3. Apply IP address and subnet mask
+    ///   4. Configure default routes (unless NoRouting policy)
+    ///   5. Set DNS servers
+    ///   6. Configure MTU and start monitoring
+    ///
+    /// Platform Support:
+    ///   - macOS: Uses networksetup for DNS, ifconfig for MTU
+    ///   - Linux: Uses ip command for network configuration
+    ///   - Other platforms: Skipped
+    ///
+    /// Policies:
+    ///   - Respects 'NoRouting' policy to avoid default route changes
+    ///   - Applies DNS settings based on configuration
+    ///
+    /// DHCP Fallback:
+    ///   - Spawns system DHCP when no server IP provided
+    ///   - Monitors interface for IP acquisition
+    ///
+    /// Returns:
+    ///   - Result<()>: Success or error during network configuration
     pub(super) async fn apply_network_settings(&mut self) -> Result<()> {
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
@@ -311,6 +346,9 @@ impl VpnClient {
             }
         }
 
+        debug!("Applying network settings, ns is_some: {}", self.network_settings.is_some());
+        debug!("bridge_ready: {}, dhcp_spawned: {}", self.bridge_ready, self.dhcp_spawned);
+
         let ns = match &self.network_settings {
             Some(n) => n.clone(),
             None => {
@@ -318,7 +356,10 @@ impl VpnClient {
                 {
                     if self.adapter.is_none() {
                         let name = self.config.client.interface_name.clone();
-                        self.adapter = Some(adapter::VirtualAdapter::new(name, None));
+                        let mac = self.generate_adapter_mac(&name);
+                        let mac_str = format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+                        self.adapter = Some(adapter::VirtualAdapter::new(name, Some(mac_str)));
                         if let Some(adp) = &mut self.adapter {
                             adp.create().await?;
                         }
@@ -327,6 +368,7 @@ impl VpnClient {
                 #[cfg(all(target_os = "macos", feature = "adapter"))]
                 {
                     if self.bridge_ready && !self.dhcp_spawned {
+                        debug!("Spawning DHCP tasks for no ns case");
                         if let Some(adp) = &self.adapter {
                             let ifname = adp.name().to_string();
                             let ifname2 = ifname.clone();
@@ -373,6 +415,7 @@ impl VpnClient {
                 #[cfg(all(target_os = "macos", feature = "adapter"))]
                 {
                     if self.bridge_ready && !self.dhcp_spawned {
+                        debug!("Spawning DHCP tasks for has ns but no ip case");
                         let ifname = adapter.name().to_string();
                         let ifname2 = ifname.clone();
                         let h1 = tokio::spawn(async move {
@@ -400,8 +443,8 @@ impl VpnClient {
             .unwrap_or_else(|| Ipv4Addr::new(255, 255, 255, 255));
 
         if no_routing {
-            info!("Server policy 'NoRouting' detected; skipping default route changes");
-            info!("[INFO] network_settings_applying (passive)");
+            debug!("Server policy 'NoRouting' detected; skipping default route changes");
+            debug!("[DEBUG] network_settings_applying (passive)");
         } else {
             info!("[INFO] network_settings_applying");
         }
@@ -413,7 +456,7 @@ impl VpnClient {
 
         let cidr = mask_to_prefix(mask);
         #[cfg(feature = "adapter")]
-        info!("Interface {}: {}/{}", adapter.name(), ip, cidr);
+        debug!("Interface {}: {}/{}", adapter.name(), ip, cidr);
 
         if !no_routing {
             if let Some(gw) = ns.gateway {
@@ -425,12 +468,12 @@ impl VpnClient {
                         warn!("Failed to add default route: {}", e);
                         e
                     });
-                info!("Add IPv4 default route");
+                debug!("Add IPv4 default route");
             }
         }
 
         let net = std::net::Ipv4Addr::from(u32::from(ip) & u32::from(mask));
-        info!("Include route: {}/{}", net, cidr);
+        debug!("Include route: {}/{}", net, cidr);
 
         #[cfg(target_os = "macos")]
         {
@@ -457,8 +500,8 @@ impl VpnClient {
                 .output()
                 .await;
         }
-        info!("MTU set to 1500");
-        info!("[INFO] connected");
+        debug!("MTU set to 1500");
+        debug!("[DEBUG] connected");
 
         if !ns.dns_servers.is_empty() {
             #[cfg(target_os = "linux")]
@@ -537,20 +580,20 @@ impl VpnClient {
                             args
                         );
                         let out = Command::new("bash").arg("-c").arg(&cmd).output().await?;
-                        if !out.status.success() {
+                        if out.status.success() {
+                            debug!("Applied DNS servers to service '{}'", svc);
+                        } else {
                             warn!(
                                 "Failed to apply macOS DNS: {}",
                                 String::from_utf8_lossy(&out.stderr)
                             );
-                        } else {
-                            info!("Applied DNS servers to service '{}'", svc);
                         }
                     } else {
-                        info!("(macOS) DNS servers suggested: {} (manual apply with: networksetup -setdnsservers <ServiceName> <servers> )", ns.dns_servers.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "));
+                        debug!("(macOS) DNS servers suggested: {} (manual apply with: networksetup -setdnsservers <ServiceName> <servers> )", ns.dns_servers.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "));
                     }
                 } else {
-                    info!("(macOS) DNS servers suggested: {} (manual apply with: networksetup -setdnsservers <ServiceName> <servers> )", ns.dns_servers.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "));
-                }
+                    debug!("(macOS) DNS servers suggested: {} (manual apply with: networksetup -setdnsservers <ServiceName> <servers> )", ns.dns_servers.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "));
+                    }
             }
         }
 
