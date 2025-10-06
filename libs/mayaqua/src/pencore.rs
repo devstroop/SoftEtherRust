@@ -18,16 +18,16 @@ impl Pencore {
         // Pencore is just random data, no specific format to parse
         // Just verify it's not too large (sanity check)
         const MAX_PENCORE_SIZE: usize = 1024 * 1024; // 1MB max
-        
+
         if data.len() > MAX_PENCORE_SIZE {
             return Err(Error::ProtocolError);
         }
-        
+
         Ok(Self {
             data: data.to_vec(),
         })
     }
-    
+
     /// Validate the pencore data
     /// Since it's dummy data, validation is minimal
     pub fn validate(&self) -> Result<()> {
@@ -35,20 +35,20 @@ impl Pencore {
         if self.data.is_empty() {
             return Err(Error::ProtocolError);
         }
-        
+
         Ok(())
     }
-    
+
     /// Get the raw data
     pub fn data(&self) -> &[u8] {
         &self.data
     }
-    
+
     /// Get the size of pencore data
     pub fn len(&self) -> usize {
         self.data.len()
     }
-    
+
     /// Check if pencore is empty
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
@@ -58,7 +58,7 @@ impl Pencore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_pencore_parse() {
         let data = vec![1, 2, 3, 4, 5];
@@ -66,21 +66,21 @@ mod tests {
         assert_eq!(pencore.len(), 5);
         assert_eq!(pencore.data(), &[1, 2, 3, 4, 5]);
     }
-    
+
     #[test]
     fn test_pencore_validate() {
         let data = vec![0; 100];
         let pencore = Pencore::parse(&data).unwrap();
         assert!(pencore.validate().is_ok());
     }
-    
+
     #[test]
     fn test_pencore_empty() {
         let data = vec![];
         let pencore = Pencore::parse(&data).unwrap();
         assert!(pencore.validate().is_err());
     }
-    
+
     #[test]
     fn test_pencore_too_large() {
         let data = vec![0; 2 * 1024 * 1024]; // 2MB

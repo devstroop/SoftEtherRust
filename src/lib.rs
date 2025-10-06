@@ -15,8 +15,8 @@ pub mod types;
 pub mod vpnclient;
 
 // Re-export main types
-pub use vpnclient::VpnClient;
 pub use config::VpnConfig;
+pub use vpnclient::VpnClient;
 
 // Client version constants
 pub const CLIENT_VERSION: u32 = 500;
@@ -68,7 +68,7 @@ pub type Result<T> = std::result::Result<T, ConfigError>;
 // Shared config format (simple JSON format for CLI)
 pub mod shared_config {
     use serde::{Deserialize, Serialize};
-    
+
     /// Simple client configuration format (JSON)
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ClientConfig {
@@ -94,16 +94,22 @@ pub mod shared_config {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub udp_port: Option<u16>,
     }
-    
-    fn default_port() -> u16 { 443 }
-    fn default_true() -> bool { true }
-    fn default_max_connections() -> u32 { 1 }
-    
+
+    fn default_port() -> u16 {
+        443
+    }
+    fn default_true() -> bool {
+        true
+    }
+    fn default_max_connections() -> u32 {
+        1
+    }
+
     pub mod io {
         use super::*;
         use anyhow::Result;
         use std::path::Path;
-        
+
         pub fn load_json<P: AsRef<Path>>(path: P) -> Result<ClientConfig> {
             let data = std::fs::read_to_string(path)?;
             let config: ClientConfig = serde_json::from_str(&data)?;

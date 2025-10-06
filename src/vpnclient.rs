@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 use cedar::constants::{MAX_RETRY_INTERVAL_MS, MIN_RETRY_INTERVAL_MS};
-use cedar::{ConnectionManager, ConnectionPool, DataPlane, EngineConfig, SessionManager};
 use cedar::{ClientAuth, ClientOption};
+use cedar::{ConnectionManager, ConnectionPool, DataPlane, EngineConfig, SessionManager};
 #[cfg(target_os = "ios")]
 use rand::RngCore;
 use std::hash::Hasher;
@@ -37,9 +37,9 @@ use crate::config::{AuthConfig, VpnConfig};
 use crate::dhcp::DhcpClient;
 use crate::dhcp::Lease as DhcpLease;
 use crate::network::SecureConnection;
+use crate::shared_config;
 #[cfg(feature = "adapter")]
 use adapter::VirtualAdapter;
-use crate::shared_config;
 // use mayaqua::get_tick64; // moved to connection module
 use mayaqua::crypto::softether_password_hash; // SHA-0(password + UPPER(username))
                                               // use std::net::Ipv4Addr; // only used in network module
@@ -103,9 +103,9 @@ pub struct VpnClient {
     event_tx: Option<mpsc::UnboundedSender<ClientEvent>>,
 }
 
-use crate::types::{mask_to_prefix, settings_json_with_kind};
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use crate::types::network_settings_from_lease;
+use crate::types::{mask_to_prefix, settings_json_with_kind};
 use crate::types::{ClientEvent, ClientState, EventLevel, NetworkSettings};
 
 impl VpnClient {
@@ -273,7 +273,8 @@ impl VpnClient {
             let session = self.create_session(&client_auth, &client_option)?;
 
             // Set up dataplane and complete initialization
-            self.setup_dataplane_and_session(session, connection).await?;
+            self.setup_dataplane_and_session(session, connection)
+                .await?;
 
             // Handle mode-specific logic
             if self.session.as_ref().unwrap().force_nat_traversal {
@@ -354,7 +355,11 @@ impl VpnClient {
     }
 
     /// Create and configure session with authentication
-    fn create_session(&self, client_auth: &ClientAuth, client_option: &ClientOption) -> Result<Session> {
+    fn create_session(
+        &self,
+        client_auth: &ClientAuth,
+        client_option: &ClientOption,
+    ) -> Result<Session> {
         let session_config = SessionConfig {
             timeout: self.config.connection.timeout,
             max_connection: self.config.connection.max_connections,
@@ -377,7 +382,11 @@ impl VpnClient {
     }
 
     /// Set up dataplane and complete session initialization
-    async fn setup_dataplane_and_session(&mut self, mut session: Session, connection: SecureConnection) -> Result<()> {
+    async fn setup_dataplane_and_session(
+        &mut self,
+        mut session: Session,
+        connection: SecureConnection,
+    ) -> Result<()> {
         session.start().await?;
         debug!(
             "[DEBUG] session_established (local) session_name={}",
@@ -466,14 +475,19 @@ impl VpnClient {
 
         // Generate MAC address for the adapter
         let mac = self.generate_adapter_mac("feth0");
-        let mac_str = format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        let mac_str = format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        );
 
         // Create adapter and start bridging
         if let Err(e) = self.start_adapter_and_bridge(Some(mac_str)).await {
             warn!("Failed to start adapter bridging: {}", e);
         }
-        info!("start_adapter_and_bridge done, bridge_ready: {}", self.bridge_ready);
+        info!(
+            "start_adapter_and_bridge done, bridge_ready: {}",
+            self.bridge_ready
+        );
 
         // Attempt DHCP over tunnel if adapter exists
         if self.adapter.is_some() {
@@ -646,7 +660,10 @@ impl VpnClient {
     }
 
     /// Spawn system DHCP fallback task
-    fn spawn_system_dhcp_fallback(&mut self, ifname: &str) -> Option<tokio::sync::oneshot::Sender<()>> {
+    fn spawn_system_dhcp_fallback(
+        &mut self,
+        ifname: &str,
+    ) -> Option<tokio::sync::oneshot::Sender<()>> {
         #[cfg(target_os = "macos")]
         {
             let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
@@ -683,7 +700,8 @@ impl VpnClient {
 
             if let Some(ref ns2) = self.network_settings {
                 if !ns2.dns_servers.is_empty() {
-                    let mut service_name: Option<String> = self.config.client.macos_dns_service_name.clone();
+                    let mut service_name: Option<String> =
+                        self.config.client.macos_dns_service_name.clone();
                     if service_name.is_none() {
                         // Try to detect service name
                         let list = Command::new("bash")
@@ -732,7 +750,6 @@ impl VpnClient {
             }
         }
     }
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -32,7 +32,10 @@ impl VpnClient {
     ///
     /// Returns:
     ///   - Result<()>: Success or error during adapter/bridge setup
-    pub(crate) async fn start_adapter_and_bridge(&mut self, mac_address: Option<String>) -> Result<()> {
+    pub(crate) async fn start_adapter_and_bridge(
+        &mut self,
+        mac_address: Option<String>,
+    ) -> Result<()> {
         #[cfg(not(feature = "adapter"))]
         {
             // No adapter bridging when the adapter feature is disabled
@@ -55,18 +58,27 @@ impl VpnClient {
 
         // Channel for adapter -> dataplane
         let (adapter_to_dp_tx, adapter_to_dp_rx) = tokio::sync::mpsc::unbounded_channel();
-        self.dataplane.as_ref().unwrap().set_adapter_tx(adapter_to_dp_rx);
+        self.dataplane
+            .as_ref()
+            .unwrap()
+            .set_adapter_tx(adapter_to_dp_rx);
 
         // Channel for dataplane -> adapter
         let (dp_to_adapter_tx, mut dp_to_adapter_rx) = tokio::sync::mpsc::unbounded_channel();
-        self.dataplane.as_ref().unwrap().set_adapter_rx(dp_to_adapter_tx);
+        self.dataplane
+            .as_ref()
+            .unwrap()
+            .set_adapter_rx(dp_to_adapter_tx);
 
         let task1 = tokio::spawn(async move {
             let io = io_handle1;
             loop {
                 match io.read_frame().await {
                     Ok(Some(frame)) => {
-                        debug!("Adapter bridge: read frame from adapter, len={}", frame.len());
+                        debug!(
+                            "Adapter bridge: read frame from adapter, len={}",
+                            frame.len()
+                        );
                         let _ = adapter_to_dp_tx.send(frame);
                     }
                     Ok(None) => continue,
@@ -80,12 +92,18 @@ impl VpnClient {
 
         let task2 = tokio::spawn(async move {
             while let Some(frame) = dp_to_adapter_rx.recv().await {
-                debug!("Adapter bridge: received frame from dataplane, len={}", frame.len());
+                debug!(
+                    "Adapter bridge: received frame from dataplane, len={}",
+                    frame.len()
+                );
                 if let Err(e) = io_handle2.write_frame(&frame).await {
                     warn!("Failed to write frame to adapter: {}", e);
                     break;
                 } else {
-                    debug!("Adapter bridge: wrote frame to adapter, len={}", frame.len());
+                    debug!(
+                        "Adapter bridge: wrote frame to adapter, len={}",
+                        frame.len()
+                    );
                 }
             }
         });

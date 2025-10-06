@@ -305,7 +305,7 @@ mod tests {
 
         // Convert result to base64 to compare with known good value
         use base64::prelude::*;
-    let actual_b64 = BASE64_STANDARD.encode(result);
+        let actual_b64 = BASE64_STANDARD.encode(result);
 
         println!("Password hash for devstroop111222+DEVSTROOP:");
         println!("Expected: {}", expected_b64);

@@ -16,14 +16,14 @@ use log::{debug, info, warn};
 use tokio::process::Command;
 
 #[cfg(target_os = "macos")]
+use std::alloc::{alloc, dealloc, Layout};
+#[cfg(target_os = "macos")]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(target_os = "macos")]
 use tokio::task;
-#[cfg(target_os = "macos")]
-use std::alloc::{alloc, dealloc, Layout};
 
 /// Virtual network adapter for VPN connections
-/// 
+///
 /// Provides a unified interface for creating and managing virtual network interfaces
 /// across different platforms. Handles interface lifecycle, network configuration,
 /// and packet I/O operations.
@@ -39,7 +39,7 @@ pub struct VirtualAdapter {
 
 impl VirtualAdapter {
     /// Create a new virtual adapter instance
-    /// 
+    ///
     /// # Arguments
     /// * `name` - Interface name (e.g., "feth0", "tun0")
     /// * `mac_address` - Optional MAC address string (e.g., "00:11:22:33:44:55")
@@ -56,7 +56,7 @@ impl VirtualAdapter {
     }
 
     /// Create the virtual adapter interface
-    /// 
+    ///
     /// Creates the platform-specific virtual network interface and initializes
     /// the necessary file descriptors for packet I/O operations.
     pub async fn create(&mut self) -> Result<()> {
@@ -81,7 +81,7 @@ impl VirtualAdapter {
     }
 
     /// Destroy the virtual adapter interface
-    /// 
+    ///
     /// Cleans up the virtual interface and closes any open file descriptors.
     pub async fn destroy(&mut self) -> Result<()> {
         if !self.is_created {
@@ -109,21 +109,21 @@ impl VirtualAdapter {
     pub fn is_created(&self) -> bool {
         self.is_created
     }
-    
+
     /// Get the adapter name
     pub fn name(&self) -> &str {
         &self.name
     }
-    
+
     /// Get the MAC address
     pub fn mac_address(&self) -> Option<&String> {
         self.mac_address.as_ref()
     }
 
     /// Set IP address and netmask
-    /// 
+    ///
     /// Configures the IPv4 address and subnet mask on the virtual interface.
-    /// 
+    ///
     /// # Arguments
     /// * `ip` - IP address string (e.g., "192.168.1.100")
     /// * `netmask` - Netmask string (e.g., "255.255.255.0")
@@ -148,10 +148,10 @@ impl VirtualAdapter {
     }
 
     /// Add a route through this adapter
-    /// 
+    ///
     /// Adds a routing table entry that directs traffic to the specified destination
     /// through this virtual adapter.
-    /// 
+    ///
     /// # Arguments
     /// * `destination` - Destination network (e.g., "192.168.1.0/24" or "0.0.0.0/0")
     /// * `gateway` - Gateway IP address
@@ -189,8 +189,16 @@ impl VirtualAdapter {
         anyhow::bail!("Direct I/O not supported on this platform");
         #[cfg(target_os = "macos")]
         {
-            let ndrv_owned = self.ndrv_fd.as_ref().ok_or_else(|| anyhow::anyhow!("NDRV fd not initialized"))?.try_clone()?;
-            let bpf_owned = self.bpf_fd.as_ref().ok_or_else(|| anyhow::anyhow!("BPF fd not initialized"))?.try_clone()?;
+            let ndrv_owned = self
+                .ndrv_fd
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("NDRV fd not initialized"))?
+                .try_clone()?;
+            let bpf_owned = self
+                .bpf_fd
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("BPF fd not initialized"))?
+                .try_clone()?;
             Ok(AdapterIo {
                 name: self.name.clone(),
                 ndrv_fd: ndrv_owned,
@@ -203,7 +211,7 @@ impl VirtualAdapter {
 #[cfg(target_os = "macos")]
 impl VirtualAdapter {
     /// Create macOS feth interface pair with NDRV and BPF setup
-    /// 
+    ///
     /// Creates paired feth interfaces, sets up NDRV socket for writing packets
     /// to the network interface, and BPF device for reading packets from it.
     /// This follows the same approach as the Go implementation.
@@ -377,7 +385,8 @@ impl VirtualAdapter {
 
             // Set buffer length (optional)
             let buflen = 131072u32;
-            if libc::ioctl(fd, 0x80044266, &buflen) < 0 { // BIOCSBLEN
+            if libc::ioctl(fd, 0x80044266, &buflen) < 0 {
+                // BIOCSBLEN
                 warn!("Failed to set BPF buffer length, continuing");
             }
 
@@ -386,28 +395,32 @@ impl VirtualAdapter {
             // Small delay to ensure interface is ready
             std::thread::sleep(std::time::Duration::from_millis(10));
             let peer_name_c = std::ffi::CString::new(peer_name.clone()).unwrap();
-            if libc::ioctl(fd, 0x8020426c, peer_name_c.as_ptr() as *const libc::c_void) < 0 { // BIOCSETIF
+            if libc::ioctl(fd, 0x8020426c, peer_name_c.as_ptr() as *const libc::c_void) < 0 {
+                // BIOCSETIF
                 libc::close(fd);
                 anyhow::bail!("Failed to bind BPF to interface {}", peer_name);
             }
 
             // Set immediate mode
             let immediate = 1u32;
-            if libc::ioctl(fd, 0x80044270, &immediate) < 0 { // BIOCIMMEDIATE
+            if libc::ioctl(fd, 0x80044270, &immediate) < 0 {
+                // BIOCIMMEDIATE
                 libc::close(fd);
                 anyhow::bail!("Failed to set BPF immediate mode");
             }
 
             // Set header complete
             let hdr_cmpl = 1u32;
-            if libc::ioctl(fd, 0x80044275, &hdr_cmpl) < 0 { // BIOCSHDRCMPLT
+            if libc::ioctl(fd, 0x80044275, &hdr_cmpl) < 0 {
+                // BIOCSHDRCMPLT
                 libc::close(fd);
                 anyhow::bail!("Failed to set BPF header complete");
             }
 
             // Set promiscuous mode (optional)
             let promisc = 1u32;
-            if libc::ioctl(fd, 0x2000426d, &promisc) < 0 { // BIOCPROMISC
+            if libc::ioctl(fd, 0x2000426d, &promisc) < 0 {
+                // BIOCPROMISC
                 warn!("Failed to set BPF promiscuous mode, continuing");
             }
 
@@ -483,7 +496,7 @@ impl VirtualAdapter {
 
 #[cfg(target_os = "macos")]
 /// Adapter I/O handle for packet reading and writing
-/// 
+///
 /// Provides async packet I/O operations for virtual network adapters.
 /// On macOS, uses NDRV for writing and BPF for reading.
 pub struct AdapterIo {
@@ -500,7 +513,7 @@ impl AdapterIo {
     }
 
     /// Read a single Ethernet frame from the BPF device
-    /// 
+    ///
     /// Returns the next available Ethernet frame, or None if no data is available
     /// within the timeout period. Uses blocking I/O in a dedicated thread.
     pub async fn read_frame(&self) -> Result<Option<Vec<u8>>> {
@@ -532,26 +545,36 @@ impl AdapterIo {
             }
             let n = unsafe { libc::read(fd, buf_ptr as *mut libc::c_void, 65536) };
             if n < 0 {
-                unsafe { dealloc(buf_ptr, layout); }
+                unsafe {
+                    dealloc(buf_ptr, layout);
+                }
                 return Err(anyhow::anyhow!(
                     "BPF read error: {}",
                     std::io::Error::last_os_error()
                 ));
             }
             if n == 0 {
-                unsafe { dealloc(buf_ptr, layout); }
+                unsafe {
+                    dealloc(buf_ptr, layout);
+                }
                 return Ok(None);
             }
             // Skip BPF header (18 bytes on macOS)
             const BPF_HDR_LEN: usize = 18;
             if n < BPF_HDR_LEN as isize {
-                unsafe { dealloc(buf_ptr, layout); }
+                unsafe {
+                    dealloc(buf_ptr, layout);
+                }
                 return Ok(None);
             }
             let frame_len = n as usize - BPF_HDR_LEN;
             let mut frame = vec![0u8; frame_len];
             unsafe {
-                std::ptr::copy_nonoverlapping(buf_ptr.add(BPF_HDR_LEN), frame.as_mut_ptr(), frame_len);
+                std::ptr::copy_nonoverlapping(
+                    buf_ptr.add(BPF_HDR_LEN),
+                    frame.as_mut_ptr(),
+                    frame_len,
+                );
                 dealloc(buf_ptr, layout);
             }
             Ok(Some(frame))
@@ -561,14 +584,15 @@ impl AdapterIo {
     }
 
     /// Write a single Ethernet frame to the NDRV device
-    /// 
+    ///
     /// Sends an Ethernet frame to the network interface using the NDRV socket.
     /// Uses blocking I/O in a dedicated thread.
     pub async fn write_frame(&self, data: &[u8]) -> Result<()> {
         let fd = self.ndrv_fd.as_raw_fd();
         let payload = data.to_vec();
         task::spawn_blocking(move || {
-            let n = unsafe { libc::write(fd, payload.as_ptr() as *const libc::c_void, payload.len()) };
+            let n =
+                unsafe { libc::write(fd, payload.as_ptr() as *const libc::c_void, payload.len()) };
             if n < 0 {
                 return Err(anyhow::anyhow!(
                     "NDRV write error: {}",

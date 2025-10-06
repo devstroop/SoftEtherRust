@@ -170,7 +170,11 @@ mod macos {
         if output.status.success() {
             info!("DHCP invocation succeeded on {}", iface);
         } else {
-            warn!("DHCP invocation failed on {}: {}", iface, String::from_utf8_lossy(&output.stderr));
+            warn!(
+                "DHCP invocation failed on {}: {}",
+                iface,
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         Ok(())
     }
@@ -346,8 +350,14 @@ impl VpnClient {
             }
         }
 
-        debug!("Applying network settings, ns is_some: {}", self.network_settings.is_some());
-        debug!("bridge_ready: {}, dhcp_spawned: {}", self.bridge_ready, self.dhcp_spawned);
+        debug!(
+            "Applying network settings, ns is_some: {}",
+            self.network_settings.is_some()
+        );
+        debug!(
+            "bridge_ready: {}, dhcp_spawned: {}",
+            self.bridge_ready, self.dhcp_spawned
+        );
 
         let ns = match &self.network_settings {
             Some(n) => n.clone(),
@@ -357,8 +367,10 @@ impl VpnClient {
                     if self.adapter.is_none() {
                         let name = self.config.client.interface_name.clone();
                         let mac = self.generate_adapter_mac(&name);
-                        let mac_str = format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+                        let mac_str = format!(
+                            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                        );
                         self.adapter = Some(adapter::VirtualAdapter::new(name, Some(mac_str)));
                         if let Some(adp) = &mut self.adapter {
                             adp.create().await?;
@@ -593,7 +605,7 @@ impl VpnClient {
                     }
                 } else {
                     debug!("(macOS) DNS servers suggested: {} (manual apply with: networksetup -setdnsservers <ServiceName> <servers> )", ns.dns_servers.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "));
-                    }
+                }
             }
         }
 
