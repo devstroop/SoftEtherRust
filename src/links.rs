@@ -112,7 +112,9 @@ impl VpnClient {
                 debug!("Server split directions across connections (half-connected)");
             }
             // Hand off TLS stream to dataplane
-            let _ = conn.set_timeouts(None, None);
+            // Use 100ms timeout to prevent RX task from holding mutex lock indefinitely
+            let timeout = std::time::Duration::from_millis(100);
+            let _ = conn.set_timeouts(Some(timeout), Some(timeout));
             let tls = conn.into_tls_stream();
             let _ = dp.register_link(tls, direction as i32);
             break;
@@ -338,8 +340,9 @@ impl VpnClient {
                             }
                             // Register with the connection manager for global summary
                             let _bond_handle = mgr2.register_bond(direction as i32);
-                            // Disable timeouts so idle sockets are not closed by client side
-                            let _ = conn.set_timeouts(None, None);
+                            // Use 100ms timeout to prevent RX task from holding mutex lock indefinitely
+                            let timeout = std::time::Duration::from_millis(100);
+                            let _ = conn.set_timeouts(Some(timeout), Some(timeout));
                             // Hand off the TLS stream into dataplane/pool
                             let tls = conn.into_tls_stream();
                             if let Some(dp) = dp2.as_ref() {

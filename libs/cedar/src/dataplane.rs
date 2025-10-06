@@ -1,4 +1,4 @@
-use log::{debug, warn};
+use log::{debug, info, warn};
 use native_tls::TlsStream;
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
@@ -180,6 +180,7 @@ impl DataPlane {
     /// Set an optional external RX sink (e.g., virtual adapter) to receive frames coming from links.
     /// The provided sender will be cloned internally and used by all link RX workers.
     pub fn set_adapter_rx(&self, tx: mpsc::UnboundedSender<Vec<u8>>) {
+        info!("📡 Dataplane: set_adapter_rx called, registering adapter channel");
         let mut g = self.inner.lock().unwrap();
         g.adapter_rx_tx = Some(tx);
     }
@@ -190,6 +191,8 @@ impl DataPlane {
         let inner = self.inner.clone();
         let task = tokio::spawn(async move {
             while let Some(frame) = rx.recv().await {
+                debug!("📥 Dataplane received frame from adapter: {} bytes", frame.len());
+                
                 // Choose a TX-capable link to send this frame
                 let target_id = {
                     let mut g = inner.lock().unwrap();
@@ -233,12 +236,13 @@ impl DataPlane {
                         g.links.get(&id).map(|l| l.writer_tx.clone())
                     };
                     if let Some(w) = writer {
+                        debug!("📤 Sending frame to link id={} ({} bytes)", id, frame.len());
                         let _ = w.send(frame);
                     } else {
                         warn!("dataplane: no writer for selected link id={id} (adapter TX)");
                     }
                 } else {
-                    warn!("dataplane: no active links for adapter TX frame (dropping)");
+                    warn!("dataplane: no active links for adapter TX frame (dropping {} bytes)", frame.len());
                 }
             }
         });
@@ -430,6 +434,9 @@ impl DataPlane {
                     }
                 }
                 // Optional: log interesting L2 types (e.g., DHCP) for diagnostics
+                if !frames.is_empty() {
+                    debug!("📨 Link RX: received {} frame(s) from VPN server", frames.len());
+                }
                 for f in &frames {
                     if f.len() >= 42 {
                         let ethertype = u16::from_be_bytes([f[12], f[13]]);
@@ -443,7 +450,7 @@ impl DataPlane {
                                 if (src_port == 67 || src_port == 68)
                                     || (dst_port == 67 || dst_port == 68)
                                 {
-                                    debug!("dataplane: DHCP packet observed ({src_port} -> {dst_port})");
+                                    info!("📬 Link RX: DHCP packet received ({src_port} -> {dst_port}, {} bytes)", f.len());
                                 }
                             }
                         }
@@ -452,8 +459,15 @@ impl DataPlane {
                 // Forward to adapter sink and tap (if any)
                 let adapter_tx_opt = { inner_for_rx.lock().unwrap().adapter_rx_tx.clone() };
                 if let Some(ext) = adapter_tx_opt {
+                    debug!("📨 Link RX: forwarding {} frame(s) to adapter", frames.len());
                     for f in &frames {
-                        let _ = ext.send(f.clone());
+                        if let Err(e) = ext.send(f.clone()) {
+                            warn!("📨 Link RX: failed to send frame to adapter: {}", e);
+                        }
+                    }
+                } else {
+                    if !frames.is_empty() {
+                        warn!("📨 Link RX: adapter channel not set, dropping {} frame(s)", frames.len());
                     }
                 }
                 let tap_tx_opt = { inner_for_rx.lock().unwrap().tap_rx_tx.clone() };
@@ -474,6 +488,7 @@ impl DataPlane {
         let tx_handle = tokio::spawn(async move {
             while let Some(frame) = writer_rx.recv().await {
                 let len = frame.len();
+                debug!("📤 Link writer: received frame from channel ({} bytes), writing to TLS", len);
                 let tls_for_tx2 = tls_for_tx.clone();
                 let res = tokio::task::spawn_blocking(move || {
                     let mut guard = tls_for_tx2.lock().unwrap();
@@ -484,11 +499,14 @@ impl DataPlane {
                     let len_be = (len as u32).to_be_bytes();
                     guard.write_all(&len_be)?;
                     // Write frame payload
-                    guard.write_all(&frame)
+                    guard.write_all(&frame)?;
+                    // CRITICAL: Flush to ensure data is sent immediately over the network
+                    guard.flush()
                 })
                 .await;
                 match res {
                     Ok(Ok(())) => {
+                        debug!("✅ Link writer: successfully wrote {} bytes to TLS", len);
                         let mut g = inner_for_tx.lock().unwrap();
                         g.total_tx += len as u64;
                     }

@@ -1,7 +1,8 @@
 //! SoftEther VPN Client Library
 
 pub mod adapter_bridge;
-pub mod auth;
+mod adapter_bridge_packets;
+mod auth;
 pub mod config;
 pub mod connection;
 pub mod dhcp;

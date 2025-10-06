@@ -82,6 +82,8 @@ pub struct VpnClient {
     pub(crate) aux_tasks: Vec<JoinHandle<()>>,
     // Server-provided session key (20 bytes) used for additional connections bonding
     pub(crate) server_session_key: Option<[u8; 20]>,
+    // Server-assigned session name (e.g., "SID-DEVSTROOP-37") used for session identification
+    pub(crate) server_session_name: Option<String>,
     // Directions recorded for additional links (0: both or RX/TX per server; 1: client->server, 2: server->client per SoftEther)
     pub(crate) aux_directions: std::sync::Arc<std::sync::Mutex<Vec<i32>>>,
     // Round-robin endpoint list (hosts) to spread additional links across farm IPs
@@ -206,6 +208,7 @@ impl VpnClient {
             server_negotiated_max_connections: None,
             aux_tasks: Vec::new(),
             server_session_key: None,
+            server_session_name: None,
             aux_directions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             endpoints_rr,
             sni_host: None,
@@ -370,8 +373,12 @@ impl VpnClient {
             qos: false,
         };
 
+        // Use server-assigned session name if available, otherwise generate one
+        let session_name = self.server_session_name.clone()
+            .unwrap_or_else(|| format!("SoftEtherRustClient_{}", uuid::Uuid::new_v4()));
+
         let mut session = Session::new(
-            format!("SoftEtherRustClient_{}", uuid::Uuid::new_v4()),
+            session_name,
             client_option.clone(),
             client_auth.clone(),
             session_config,

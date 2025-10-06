@@ -270,12 +270,17 @@ impl VpnClient {
             }
         }
 
-        // Session info lines
-        if let Ok(session_name) = welcome_pack
+        // Session info lines - capture server-assigned session name
+        let server_session_name = welcome_pack
             .get_str("SessionName")
             .or_else(|_| welcome_pack.get_str("session_name"))
-        {
+            .ok()
+            .map(|s| s.to_string());
+        
+        if let Some(ref session_name) = server_session_name {
             info!("[INFO] session_established session_name={}", session_name);
+            // Store it for use by the session
+            self.server_session_name = Some(session_name.clone());
         }
         if let Ok(cn) = welcome_pack
             .get_str("ConnectionName")
