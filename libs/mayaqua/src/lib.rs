@@ -13,6 +13,7 @@ pub mod logging;
 pub mod memory;
 pub mod network;
 pub mod pack;
+pub mod pencore;
 pub mod platform;
 pub mod time;
 
@@ -20,6 +21,7 @@ pub mod time;
 pub use error::{Error, Result};
 pub use http::{HttpRequest, HttpResponse};
 pub use pack::{Element, Pack, Value, ValueType};
+pub use pencore::Pencore;
 pub use time::{get_tick64, Tick64};
 
 // Core constants from C implementation - Platform-dependent sizes

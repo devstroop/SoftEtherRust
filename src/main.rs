@@ -2,10 +2,9 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use config as shared_config;
 use tracing::{error, info};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-use vpnclient::{VpnClient, DEFAULT_CONFIG_FILE};
+use vpnclient::{shared_config, VpnClient, DEFAULT_CONFIG_FILE};
 
 #[derive(Parser)]
 #[command(name = "vpnclient")]

@@ -193,7 +193,7 @@ fn default_max_connections() -> u32 {
     DEFAULT_MAX_CONNECTIONS
 }
 fn default_timeout() -> u32 {
-    DEFAULT_TIMEOUT
+    10000
 }
 fn default_true() -> bool {
     true

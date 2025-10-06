@@ -168,7 +168,7 @@ impl VpnClient {
         // Environment info
         let os_name = std::env::consts::OS;
         let os_ver = std::env::var("RUST_OS_VERSION").unwrap_or_default();
-        let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| super::local_hostname());
+        let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| crate::vpnclient::local_hostname());
         let product_name = CLIENT_STRING;
         let product_ver = CLIENT_VERSION;
         let product_build = CLIENT_BUILD;

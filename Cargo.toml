@@ -1,15 +1,45 @@
 [workspace]
 members = [
-    "crates/mayaqua",
-    "crates/vpnclient",
-    "crates/cedar",
-    "crates/config",
-    "crates/pencore",
-    "crates/adapter",
-    # FFI crates
-    "crates/ffi"
+    "libs/mayaqua",
+    "libs/cedar",
+    "libs/adapter",
 ]
 resolver = "2"
+
+# Root package is the vpnclient binary
+[package]
+name = "vpnclient"
+version = "0.1.0"
+edition = "2021"
+authors = ["SoftEther VPN Rust Team"]
+license = "Apache-2.0"
+
+[[bin]]
+name = "vpnclient"
+path = "src/main.rs"
+
+[dependencies]
+mayaqua = { path = "libs/mayaqua" }
+cedar = { path = "libs/cedar" }
+adapter = { path = "libs/adapter", optional = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-log = { workspace = true }
+anyhow = "1.0"
+clap = { version = "4.0", features = ["derive"] }
+base64 = { workspace = true }
+rand = { workspace = true }
+uuid = { workspace = true }
+native-tls = "0.2"
+x509-parser = "0.16"
+libc = "0.2"
+
+[features]
+default = ["adapter"]
+adapter = ["dep:adapter"]
 
 [workspace.package]
 version = "0.1.0"

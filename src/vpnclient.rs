@@ -1,10 +1,4 @@
 //! Main VPN client implementation
-mod adapter_bridge;
-mod auth;
-mod connection;
-mod links;
-mod network_config;
-mod policy;
 
 use anyhow::Result;
 use cedar::constants::{MAX_RETRY_INTERVAL_MS, MIN_RETRY_INTERVAL_MS};
@@ -13,9 +7,9 @@ use cedar::{ClientAuth, ClientOption};
 #[cfg(target_os = "ios")]
 use rand::RngCore;
 use std::hash::Hasher;
-use tracing::{debug, info, warn}; // for fill_bytes in iOS DHCP path
+use tracing::{debug, info, warn};
 #[cfg(unix)]
-fn local_hostname() -> String {
+pub(crate) fn local_hostname() -> String {
     use std::ffi::CStr;
     let mut buf = [0u8; 256];
     unsafe {
@@ -28,7 +22,7 @@ fn local_hostname() -> String {
     "unknown".to_string()
 }
 #[cfg(not(unix))]
-fn local_hostname() -> String {
+pub(crate) fn local_hostname() -> String {
     "unknown".to_string()
 }
 use cedar::{Session, SessionConfig};
@@ -45,7 +39,7 @@ use crate::dhcp::Lease as DhcpLease;
 use crate::network::SecureConnection;
 #[cfg(feature = "adapter")]
 use adapter::VirtualAdapter;
-use config as shared_config;
+use crate::shared_config;
 // use mayaqua::get_tick64; // moved to connection module
 use mayaqua::crypto::softether_password_hash; // SHA-0(password + UPPER(username))
                                               // use std::net::Ipv4Addr; // only used in network module
@@ -66,43 +60,43 @@ use mayaqua::crypto::softether_password_hash; // SHA-0(password + UPPER(username
 ///   - Multiple clients can be created for concurrent connections
 ///   - Internal components handle their own thread safety
 pub struct VpnClient {
-    config: VpnConfig,
-    connection: Option<SecureConnection>,
-    session: Option<Session>,
-    session_manager: SessionManager,
+    pub(crate) config: VpnConfig,
+    pub(crate) connection: Option<SecureConnection>,
+    pub(crate) session: Option<Session>,
+    pub(crate) session_manager: SessionManager,
     #[allow(dead_code)]
-    connection_manager: ConnectionManager,
+    pub(crate) connection_manager: ConnectionManager,
     #[allow(dead_code)]
-    connection_pool: ConnectionPool,
-    dataplane: Option<DataPlane>,
-    is_connected: bool,
+    pub(crate) connection_pool: ConnectionPool,
+    pub(crate) dataplane: Option<DataPlane>,
+    pub(crate) is_connected: bool,
     pub redirect_ticket: Option<[u8; 20]>,
-    network_settings: Option<NetworkSettings>,
+    pub(crate) network_settings: Option<NetworkSettings>,
     #[cfg(feature = "adapter")]
-    adapter: Option<VirtualAdapter>,
+    pub(crate) adapter: Option<VirtualAdapter>,
     // Server policy constraints (best-effort parsed from welcome/auth)
-    server_policy_max_connections: Option<u32>,
+    pub(crate) server_policy_max_connections: Option<u32>,
     // Server-negotiated max_connection reported in welcome (often echo of requested <= policy)
-    server_negotiated_max_connections: Option<u32>,
+    pub(crate) server_negotiated_max_connections: Option<u32>,
     // Background tasks for auxiliary links (scaffold)
-    aux_tasks: Vec<JoinHandle<()>>,
+    pub(crate) aux_tasks: Vec<JoinHandle<()>>,
     // Server-provided session key (20 bytes) used for additional connections bonding
-    server_session_key: Option<[u8; 20]>,
+    pub(crate) server_session_key: Option<[u8; 20]>,
     // Directions recorded for additional links (0: both or RX/TX per server; 1: client->server, 2: server->client per SoftEther)
-    aux_directions: std::sync::Arc<std::sync::Mutex<Vec<i32>>>,
+    pub(crate) aux_directions: std::sync::Arc<std::sync::Mutex<Vec<i32>>>,
     // Round-robin endpoint list (hosts) to spread additional links across farm IPs
-    endpoints_rr: Vec<String>,
+    pub(crate) endpoints_rr: Vec<String>,
     // TLS SNI host to use for certificate verification when connecting to an IP after redirect
-    sni_host: Option<String>,
+    pub(crate) sni_host: Option<String>,
     // Connection state tracking and keep-alive
-    state: ConnectionState,
+    pub(crate) state: ConnectionState,
     // Server-reported timeout (ms) for HTTP keep-alive / control channel guidance
     #[allow(dead_code)]
-    server_timeout_ms: Option<u32>,
+    pub(crate) server_timeout_ms: Option<u32>,
     // True once adapter<->dataplane bridging is fully set up
-    bridge_ready: bool,
+    pub(crate) bridge_ready: bool,
     // Prevent duplicate DHCP/monitor spawning across code paths
-    dhcp_spawned: bool,
+    pub(crate) dhcp_spawned: bool,
     // Optional state notification channel for embedders/FFI
     state_tx: Option<mpsc::UnboundedSender<ClientState>>,
     // Optional event channel for embedders/FFI
@@ -116,7 +110,7 @@ use crate::types::{ClientEvent, ClientState, EventLevel, NetworkSettings};
 
 impl VpnClient {
     /// Best-effort mapping of common SoftEther error codes to names for logs
-    fn softether_err_name(code: i64) -> &'static str {
+    pub(crate) fn softether_err_name(code: i64) -> &'static str {
         match code {
             0 => "ERR_NO_ERROR",
             1 => "ERR_INTERNAL_ERROR",
@@ -633,7 +627,7 @@ impl VpnClient {
     ///   - Unicast (first bit of first byte cleared)
     ///   - Deterministic based on interface name hash
     ///   - Unique per interface to avoid conflicts
-    fn generate_adapter_mac(&self, ifname: &str) -> [u8; 6] {
+    pub(crate) fn generate_adapter_mac(&self, ifname: &str) -> [u8; 6] {
         let mut mac = [0u8; 6];
         let mut h = std::collections::hash_map::DefaultHasher::new();
         use std::hash::Hash;
@@ -664,7 +658,7 @@ impl VpnClient {
                 let delay = Duration::from_millis(kick_after);
                 let timed_out = tokio::time::timeout(delay, &mut cancel_rx).await.is_err();
                 if timed_out {
-                    crate::vpnclient::network_config::kick_dhcp_until_ip(
+                    crate::network_config::kick_dhcp_until_ip(
                         &ifname_kick,
                         Duration::from_millis(kick_timeout),
                     )
@@ -759,7 +753,7 @@ impl From<ConnectionState> for ClientState {
 }
 
 impl VpnClient {
-    fn emit_settings_snapshot(&self) {
+    pub(crate) fn emit_settings_snapshot(&self) {
         if let Some(tx) = &self.event_tx {
             let s = settings_json_with_kind(self.get_network_settings().as_ref(), true);
             let _ = tx.send(ClientEvent {
