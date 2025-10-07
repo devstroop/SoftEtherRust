@@ -13,10 +13,14 @@ use super::VpnClient;
 
 impl VpnClient {
     pub fn create_client_auth(&self) -> Result<ClientAuth> {
+        // Use ticket auth after redirect if ticket was captured
         if let Some(ticket) = self.redirect_ticket {
+            info!("🎫 Using TICKET AUTH after redirect (authtype=99)");
+            info!("   Ticket bytes: {:?}", &ticket[..]);
             return ClientAuth::new_ticket(&self.config.username, &ticket)
                 .context("Failed to create ticket auth");
         }
+        info!("🔑 Using PASSWORD AUTH (authtype=1)");
         match &self.config.auth {
             AuthConfig::Anonymous => Ok(ClientAuth::new_anonymous()),
             AuthConfig::Password { hashed_password } => {
@@ -260,11 +264,26 @@ impl VpnClient {
                     let port = welcome_pack
                         .get_int("Port")
                         .unwrap_or(self.config.port as u32) as u16;
+                    
+                    // Check if server sent a ticket
+                    let has_ticket = welcome_pack.get_data("Ticket")
+                        .or_else(|_| welcome_pack.get_data("ticket"))
+                        .is_ok();
+                    debug!("🔍 Redirect packet analysis: has_ticket={}, capturing anyway", has_ticket);
+                    
                     self.capture_redirect_ticket(&welcome_pack);
                     warn!(
                         "Server requested redirection to {}:{} (cluster)",
                         ipv4, port
                     );
+                    
+                    // CRITICAL: Send empty pack acknowledgment before disconnecting (matches C code)
+                    // C code: p = NewPack(); HttpClientSend(s, p); FreePack(p);
+                    let ack_pack = mayaqua::Pack::new();
+                    if let Err(e) = connection.upload_auth(ack_pack) {
+                        debug!("Failed to send redirect ack (non-fatal): {}", e);
+                    }
+                    
                     return Ok(Some((ipv4.to_string(), port)));
                 }
             }

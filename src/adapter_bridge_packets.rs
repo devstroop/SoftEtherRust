@@ -189,10 +189,11 @@ pub async fn generate_next_packet(state: &mut PacketGeneratorState) -> Option<Ve
     trace!("generate_next_packet: state={:?}, time_since_start={:?}, time_since_state_change={:?}", 
         state.dhcp_state, time_since_start, time_since_state_change);
     
-    // Stage 1: Send DHCP DISCOVER immediately (matches Zig's SSTP Connect order)
-    // Zig sends: DHCP → IPv6 NA → IPv6 RS → GARP
-    if state.dhcp_state == DhcpState::Init && time_since_start >= Duration::from_millis(100) {
-        info!("📡 Sending DHCP DISCOVER #1 (xid={:#x})", state.dhcp_xid);
+    // Stage 1: Send DHCP DISCOVER INSTANTLY (matches Zig's "Triggered session" behavior)
+    // Critical: Bridge needs to learn MAC immediately after session establishment!
+    // Zig sends: DHCP → IPv6 NA → IPv6 RS → GARP all instantly to populate bridge MAC table
+    if state.dhcp_state == DhcpState::Init {
+        info!("📡 Sending DHCP DISCOVER #1 (xid={:#x}) - INSTANT to trigger bridge learning", state.dhcp_xid);
         state.dhcp_state = DhcpState::DiscoverSent;
         state.last_state_change = now;
         state.last_dhcp_send = now;
@@ -211,27 +212,26 @@ pub async fn generate_next_packet(state: &mut PacketGeneratorState) -> Option<Ve
         }
     }
     
-    // Stage 2: Send IPv6 Neighbor Advertisement after DHCP (if no OFFER yet)
-    if state.dhcp_state == DhcpState::DiscoverSent && 
-       state.dhcp_retry_count == 0 && 
-       time_since_state_change >= Duration::from_millis(100) {
-        debug!("📡 Sending IPv6 Neighbor Advertisement");
+    // Stage 2: Send IPv6 Neighbor Advertisement INSTANTLY after DHCP
+    // Bridge learning: All packets must be sent instantly to populate MAC table
+    if state.dhcp_state == DhcpState::DiscoverSent && state.dhcp_retry_count == 0 {
+        debug!("📡 Sending IPv6 Neighbor Advertisement - INSTANT");
         state.dhcp_state = DhcpState::Ipv6NaSent;
         state.last_state_change = now;
         return Some(build_neighbor_advertisement(state.our_mac));
     }
     
-    // Stage 3: Send IPv6 Router Solicitation
-    if state.dhcp_state == DhcpState::Ipv6NaSent && time_since_state_change >= Duration::from_millis(100) {
-        debug!("📡 Sending IPv6 Router Solicitation");
+    // Stage 3: Send IPv6 Router Solicitation INSTANTLY
+    if state.dhcp_state == DhcpState::Ipv6NaSent {
+        debug!("📡 Sending IPv6 Router Solicitation - INSTANT");
         state.dhcp_state = DhcpState::Ipv6RsSent;
         state.last_state_change = now;
         return Some(build_router_solicitation(state.our_mac));
     }
     
-    // Stage 4: Send Gratuitous ARP last
-    if state.dhcp_state == DhcpState::Ipv6RsSent && time_since_state_change >= Duration::from_millis(100) {
-        info!("📡 Sending Gratuitous ARP with 0.0.0.0 to register MAC in bridge");
+    // Stage 4: Send Gratuitous ARP INSTANTLY to complete MAC learning
+    if state.dhcp_state == DhcpState::Ipv6RsSent {
+        info!("📡 Sending Gratuitous ARP with 0.0.0.0 - INSTANT to complete bridge MAC learning");
         state.dhcp_state = DhcpState::ArpAnnounceSent;
         state.last_state_change = now;
         return Some(build_gratuitous_arp(state.our_mac, [0, 0, 0, 0]));

@@ -490,32 +490,41 @@ impl DataPlane {
                 let len = frame.len();
                 debug!("📤 Link writer: received frame from channel ({} bytes), writing to TLS", len);
                 let tls_for_tx2 = tls_for_tx.clone();
-                let res = tokio::task::spawn_blocking(move || {
-                    let mut guard = tls_for_tx2.lock().unwrap();
-                    // Write count=1
-                    let count_be = 1u32.to_be_bytes();
-                    guard.write_all(&count_be)?;
-                    // Write frame length
-                    let len_be = (len as u32).to_be_bytes();
-                    guard.write_all(&len_be)?;
-                    // Write frame payload
-                    guard.write_all(&frame)?;
-                    // CRITICAL: Flush to ensure data is sent immediately over the network
-                    guard.flush()
-                })
-                .await;
+                
+                // Add timeout to prevent deadlock on flush
+                let res = tokio::time::timeout(
+                    tokio::time::Duration::from_secs(5),
+                    tokio::task::spawn_blocking(move || {
+                        let mut guard = tls_for_tx2.lock().unwrap();
+                        // Write count=1
+                        let count_be = 1u32.to_be_bytes();
+                        guard.write_all(&count_be)?;
+                        // Write frame length
+                        let len_be = (len as u32).to_be_bytes();
+                        guard.write_all(&len_be)?;
+                        // Write frame payload
+                        guard.write_all(&frame)?;
+                        // CRITICAL: Flush to ensure data is sent immediately over the network
+                        guard.flush()
+                    })
+                ).await;
+                
                 match res {
-                    Ok(Ok(())) => {
+                    Ok(Ok(Ok(()))) => {
                         debug!("✅ Link writer: successfully wrote {} bytes to TLS", len);
                         let mut g = inner_for_tx.lock().unwrap();
                         g.total_tx += len as u64;
                     }
-                    Ok(Err(e)) => {
-                        debug!("dataplane: TX exit: {e}");
+                    Ok(Ok(Err(e))) => {
+                        warn!("dataplane: TX write error: {e}");
                         break;
                     }
-                    Err(e) => {
-                        warn!("dataplane: TX join error: {e}");
+                    Ok(Err(e)) => {
+                        warn!("dataplane: TX spawn error: {e}");
+                        break;
+                    }
+                    Err(_) => {
+                        warn!("dataplane: TX timeout after 5s - connection may be stuck");
                         break;
                     }
                 }

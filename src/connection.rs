@@ -11,6 +11,7 @@ impl VpnClient {
     pub(super) async fn establish_connection(&self) -> Result<SecureConnection> {
         let timeout_duration = Duration::from_secs(self.config.connection.timeout as u64);
 
+        eprintln!("🔌 Connecting to {}:{}", self.config.host, self.config.port);
         let connection = SecureConnection::connect(
             &self.config.host,
             self.config.port,
@@ -18,6 +19,7 @@ impl VpnClient {
             timeout_duration,
             self.sni_host.as_deref(),
         )?;
+        eprintln!("✅ Connected to {}:{}", self.config.host, self.config.port);
 
         Ok(connection)
     }

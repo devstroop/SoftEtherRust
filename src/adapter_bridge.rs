@@ -127,6 +127,14 @@ impl VpnClient {
             // Task 1: Proactive packet generator (DHCP, ARP, keep-alive)
             // This mimics Zig's MacOsTunGetNextPacket() behavior
             let task1 = tokio::spawn(async move {
+                // CRITICAL: Wait for session to fully transition to tunneling mode
+                // before sending any packets. Without this delay, the TLS stream
+                // may not be ready, causing TX to hang and RX to fail.
+                // This matches Zig's StartTunnelingMode() behavior.
+                info!("⏳ Waiting for session to fully establish before sending packets...");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                info!("✅ Session ready, starting packet generation");
+                
                 let mut state = PacketGeneratorState {
                     dhcp_state: DhcpState::Init,
                     last_state_change: Instant::now(),
@@ -184,6 +192,23 @@ impl VpnClient {
                     }
                     
                     if let Some(packet) = generate_next_packet(&mut state).await {
+                        // Debug frame details before sending
+                        if packet.len() >= 14 {
+                            let ethertype = u16::from_be_bytes([packet[12], packet[13]]);
+                            let frame_type = match ethertype {
+                                0x0800 => "IPv4",
+                                0x0806 => "ARP",
+                                0x86DD => "IPv6",
+                                _ => "Other",
+                            };
+                            info!(
+                                "📤 Link TX (generated): {} frame to VPN (len={}, dst={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, src={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, type=0x{:04x})",
+                                frame_type, packet.len(),
+                                packet[0], packet[1], packet[2], packet[3], packet[4], packet[5],
+                                packet[6], packet[7], packet[8], packet[9], packet[10], packet[11],
+                                ethertype
+                            );
+                        }
                         debug!("📤 Generated packet: {} bytes, sending to dataplane", packet.len());
                         if let Err(e) = adapter_to_dp_tx.send(packet) {
                             warn!("Failed to send packet to dataplane: {}", e);
@@ -207,6 +232,23 @@ impl VpnClient {
                             // Convert IP → Ethernet
                             match adapter_lock.translator_mut().ip_to_ethernet(&ip_packet) {
                                 Ok(eth_frame) => {
+                                    // Debug frame details before sending
+                                    if eth_frame.len() >= 14 {
+                                        let ethertype = u16::from_be_bytes([eth_frame[12], eth_frame[13]]);
+                                        let frame_type = match ethertype {
+                                            0x0800 => "IPv4",
+                                            0x0806 => "ARP",
+                                            0x86DD => "IPv6",
+                                            _ => "Other",
+                                        };
+                                        info!(
+                                            "📤 Link TX: {} frame to VPN (len={}, dst={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, src={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, type=0x{:04x})",
+                                            frame_type, eth_frame.len(),
+                                            eth_frame[0], eth_frame[1], eth_frame[2], eth_frame[3], eth_frame[4], eth_frame[5],
+                                            eth_frame[6], eth_frame[7], eth_frame[8], eth_frame[9], eth_frame[10], eth_frame[11],
+                                            ethertype
+                                        );
+                                    }
                                     debug!(
                                         "Adapter bridge: converted to Ethernet frame, len={}",
                                         eth_frame.len()
@@ -235,6 +277,23 @@ impl VpnClient {
             let task3 = tokio::spawn(async move {
                 info!("🔄 Task3 (VPN→utun) started, waiting for Ethernet frames from dataplane");
                 while let Some(eth_frame) = dp_to_adapter_rx.recv().await {
+                    // Debug frame details
+                    if eth_frame.len() >= 14 {
+                        let ethertype = u16::from_be_bytes([eth_frame[12], eth_frame[13]]);
+                        let frame_type = match ethertype {
+                            0x0800 => "IPv4",
+                            0x0806 => "ARP",
+                            0x86DD => "IPv6",
+                            _ => "Other",
+                        };
+                        info!(
+                            "📬 Link RX: {} frame from VPN (len={}, dst={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, src={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, type=0x{:04x})",
+                            frame_type, eth_frame.len(),
+                            eth_frame[0], eth_frame[1], eth_frame[2], eth_frame[3], eth_frame[4], eth_frame[5],
+                            eth_frame[6], eth_frame[7], eth_frame[8], eth_frame[9], eth_frame[10], eth_frame[11],
+                            ethertype
+                        );
+                    }
                     info!(
                         "📨 Task3: received Ethernet frame from dataplane, len={} bytes",
                         eth_frame.len()

@@ -297,8 +297,9 @@ impl VpnClient {
         if !self.endpoints_rr.iter().any(|h| h == &new_host) {
             self.endpoints_rr.push(new_host.clone());
         }
-        self.config.host = new_host;
+        self.config.host = new_host.clone();
         self.config.port = new_port;
+        debug!("🔧 Config updated: host={}, port={}", self.config.host, self.config.port);
         info!(
             "Redirecting to {}:{} (attempt {})",
             self.config.host, self.config.port, redirect_count

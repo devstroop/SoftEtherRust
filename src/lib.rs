@@ -19,10 +19,11 @@ pub mod vpnclient;
 pub use config::VpnConfig;
 pub use vpnclient::VpnClient;
 
-// Client version constants
-pub const CLIENT_VERSION: u32 = 500;
-pub const CLIENT_BUILD: u32 = 9999;
-pub const CLIENT_STRING: &str = "SoftEther VPN Client (Rust)";
+// Client version constants - MUST match Zig to get proper server policies!
+// Server applies different policies based on client identification
+pub const CLIENT_VERSION: u32 = 444;
+pub const CLIENT_BUILD: u32 = 9807;
+pub const CLIENT_STRING: &str = "SoftEther VPN Client";
 
 // Default configuration constants
 pub const DEFAULT_CONFIG_FILE: &str = "config.json";
