@@ -169,9 +169,10 @@ impl VpnClient {
         v.connection.use_encryption = cc.use_encrypt;
         // respect TLS verification toggle
         v.connection.skip_tls_verify = cc.skip_tls_verify;
-        // Set NAT traversal mode
-        v.connection.nat_traversal = cc.nat_traversal;
-        // udp_port not wired in legacy config yet; reserved for future use
+        // Set SecureNAT mode (false=LocalBridge/L2, true=SecureNAT/L3)
+        v.connection.secure_nat = cc.secure_nat;
+        // Set UDP acceleration (uses UDP ports 67/68 when enabled)
+        v.connection.udp_acceleration = cc.udp_acceleration;
         Self::new(v)
     }
     /// Create a new VPN client with the given configuration
@@ -284,7 +285,7 @@ impl VpnClient {
                 .await?;
 
             // Handle mode-specific logic
-            if self.session.as_ref().unwrap().force_nat_traversal {
+            if self.session.as_ref().unwrap().force_secure_nat {
                 return self.handle_secure_nat_mode().await;
             } else {
                 return self.handle_local_bridge_mode().await;
@@ -388,7 +389,7 @@ impl VpnClient {
             client_auth.clone(),
             session_config,
         )?;
-        session.force_nat_traversal = self.config.connection.nat_traversal;
+        session.force_secure_nat = self.config.connection.secure_nat;
 
         Ok(session)
     }

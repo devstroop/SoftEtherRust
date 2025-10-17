@@ -136,8 +136,10 @@ pub struct Session {
     pub vlan_id: u32,
     pub ipc_mac_address: [u8; 6],
 
-    // NAT traversal mode
-    pub force_nat_traversal: bool,
+    /// SecureNAT mode:
+    /// - false (default): LocalBridge mode - server sends L2 Ethernet frames
+    /// - true: SecureNAT mode - server sends L3 IP packets (NAT traversal)
+    pub force_secure_nat: bool,
 
     // Encryption keys
     pub udp_send_key: [u8; 16],
@@ -209,7 +211,7 @@ impl Session {
             vlan_id: 0,
             ipc_mac_address: [0u8; 6],
 
-            force_nat_traversal: false,
+            force_secure_nat: false,
 
             udp_send_key: [0u8; 16],
             udp_recv_key: [0u8; 16],

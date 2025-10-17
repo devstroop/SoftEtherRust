@@ -8,6 +8,6 @@
   "use_compress": true,
   "use_encrypt": true,
   "max_connections": 2,
-  "nat_traversal": true,
-  "udp_port": null
+  "secure_nat": false,
+  "udp_acceleration": false
 }

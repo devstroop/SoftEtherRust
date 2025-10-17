@@ -39,23 +39,13 @@ impl VpnClient {
             let _ = conn.initial_hello()?;
             // Build and send additional_connect pack
             let mut p = Pack::new();
+            // Match C implementation: PackAdditionalConnect + PackAddClientVersion
+            // Only session_key and client version - NO use_encrypt/compress/etc.
             p.add_str("method", "additional_connect")?;
             p.add_data("session_key", sk.to_vec())?;
             p.add_str("client_str", CLIENT_STRING)?;
             p.add_int("client_ver", CLIENT_VERSION)?;
             p.add_int("client_build", CLIENT_BUILD)?;
-            p.add_int("use_encrypt", 1)?;
-            // Force-disable compression on data link; our dataplane doesn't implement bulk compression
-            p.add_int("use_compress", 0)?;
-            p.add_int(
-                "half_connection",
-                if self.config.connection.half_connection {
-                    1
-                } else {
-                    0
-                },
-            )?;
-            p.add_int("qos", 0)?;
             let resp = conn.send_pack(&p)?;
             // Handle redirect on additional_connect
             let rflag = resp
@@ -111,10 +101,30 @@ impl VpnClient {
             if direction == 1 || direction == 2 {
                 debug!("Server split directions across connections (half-connected)");
             }
+            
+            // CRITICAL: Check if server is actually ready to receive data
+            // Try to read with a short timeout to see if server sends anything first
+            debug!("🔍 Checking if server sends initial data on data link...");
+            let mut test_buf = [0u8; 4];
+            let tls_ref = conn.tls_stream_ref();
+            match tls_ref.get_ref().peek(&mut test_buf) {
+                Ok(0) => {
+                    debug!("⚠️  Server peek returned 0 bytes (socket closed?)");
+                }
+                Ok(n) => {
+                    debug!("✅ Server has {} bytes waiting to be read (good sign)", n);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    debug!("⚠️  No data from server yet (WouldBlock) - server may not be reading our packets");
+                }
+                Err(e) => {
+                    debug!("⚠️  Server peek error: {} - may indicate connection issue", e);
+                }
+            }
+            
             // Hand off TLS stream to dataplane
-            // Use 100ms timeout to prevent RX task from holding mutex lock indefinitely
-            let timeout = std::time::Duration::from_millis(100);
-            let _ = conn.set_timeouts(Some(timeout), Some(timeout));
+            // DO NOT set timeout - dataplane RX task needs true blocking I/O
+            // The socket was already configured for blocking mode in network.rs
             let tls = conn.into_tls_stream();
             let _ = dp.register_link(tls, direction as i32);
             break;
@@ -340,9 +350,8 @@ impl VpnClient {
                             }
                             // Register with the connection manager for global summary
                             let _bond_handle = mgr2.register_bond(direction as i32);
-                            // Use 100ms timeout to prevent RX task from holding mutex lock indefinitely
-                            let timeout = std::time::Duration::from_millis(100);
-                            let _ = conn.set_timeouts(Some(timeout), Some(timeout));
+                            // DO NOT set timeout - dataplane RX tasks need true blocking I/O
+                            // The socket was already configured for blocking mode in network.rs
                             // Hand off the TLS stream into dataplane/pool
                             let tls = conn.into_tls_stream();
                             if let Some(dp) = dp2.as_ref() {

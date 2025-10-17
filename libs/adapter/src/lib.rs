@@ -58,7 +58,7 @@ impl VirtualAdapter {
         let translator_opts = TranslatorOptions {
             our_mac,
             learn_ip: true,
-            verbose: false,
+            verbose: true,
         };
         
         Self {

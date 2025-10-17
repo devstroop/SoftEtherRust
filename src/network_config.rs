@@ -364,7 +364,8 @@ impl VpnClient {
             None => {
                 #[cfg(feature = "adapter")]
                 {
-                    if self.adapter.is_none() {
+                    if self.adapter.is_none() && !self.bridge_ready {
+                        // Only create adapter if bridge hasn't already created one
                         let name = self.config.client.interface_name.clone();
                         let mac = self.generate_adapter_mac(&name);
                         let mac_str = format!(
@@ -411,7 +412,9 @@ impl VpnClient {
             .any(|(k, v)| k.to_ascii_lowercase().contains("norouting") && *v != 0);
 
         #[cfg(feature = "adapter")]
-        if self.adapter.is_none() {
+        if self.adapter.is_none() && !self.bridge_ready {
+            // Only create adapter if bridge hasn't already created one
+            // (bridge takes ownership and moves it into Arc<Mutex<>>)
             let name = self.config.client.interface_name.clone();
             self.adapter = Some(adapter::VirtualAdapter::new(name, None));
             if let Some(adp) = &mut self.adapter {
@@ -419,7 +422,13 @@ impl VpnClient {
             }
         }
         #[cfg(feature = "adapter")]
-        let adapter = self.adapter.as_ref().unwrap();
+        let adapter = if self.bridge_ready {
+            // If bridge is active, it owns the adapter - skip adapter-based config
+            debug!("Bridge owns adapter, skipping adapter-based network config");
+            return Ok(());
+        } else {
+            self.adapter.as_ref().unwrap()
+        };
 
         let ip = match ns.assigned_ipv4 {
             Some(i) => i,

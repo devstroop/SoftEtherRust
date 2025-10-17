@@ -1,6 +1,6 @@
 //! Configuration management for SoftEther VPN client
 
-use crate::{DEFAULT_HUB, DEFAULT_MAX_CONNECTIONS, DEFAULT_PORT, DEFAULT_TIMEOUT};
+use crate::{DEFAULT_HUB, DEFAULT_MAX_CONNECTIONS, DEFAULT_PORT};
 use anyhow::{Context, Result};
 use base64::prelude::*;
 use cedar::AuthType;
@@ -87,8 +87,8 @@ pub struct ConnectionConfig {
     #[serde(default = "default_true")]
     pub use_encryption: bool,
 
-    /// Enable UDP acceleration
-    #[serde(default = "default_true")]
+    /// Enable UDP acceleration (uses UDP ports 67/68 when enabled)
+    #[serde(default)]
     pub udp_acceleration: bool,
 
     /// Skip TLS certificate verification (insecure)
@@ -113,9 +113,11 @@ pub struct ConnectionConfig {
     #[serde(default)]
     pub client_id: Option<u32>,
 
-    /// Enable NAT traversal (SecureNAT mode when true, LocalBridge when false)
+    /// SecureNAT mode: when false (default), uses LocalBridge mode with L2 Ethernet frames.
+    /// When true, uses SecureNAT mode with L3 IP packets (NAT traversal).
+    /// Default: false (LocalBridge mode for better compatibility)
     #[serde(default)]
-    pub nat_traversal: bool,
+    pub secure_nat: bool,
 }
 
 /// HTTP proxy configuration
@@ -230,13 +232,13 @@ impl Default for ConnectionConfig {
             timeout: default_timeout(),
             use_compression: true,
             use_encryption: true,
-            udp_acceleration: true,
+            udp_acceleration: false,
             skip_tls_verify: false,
             proxy: None,
             apply_dns: false,
             half_connection: false,
             client_id: None,
-            nat_traversal: false,
+            secure_nat: false,
         }
     }
 }

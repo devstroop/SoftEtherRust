@@ -58,7 +58,7 @@ impl VpnClient {
     pub(crate) fn create_client_option(&self) -> Result<ClientOption> {
         let mut option =
             ClientOption::new(&self.config.host, self.config.port, &self.config.hub_name)?
-                .with_compression(false)
+                .with_compression(self.config.connection.use_compression)
                 .with_udp_acceleration(self.config.connection.udp_acceleration)
                 .with_max_connections(self.config.connection.max_connections);
         if self.config.connection.half_connection {
@@ -117,27 +117,40 @@ impl VpnClient {
             client_auth.username, self.config.hub_name
         );
 
-        // Build auth pack
+        // Build auth pack - MUST match C implementation field order!
         let mut auth_pack = if matches!(client_auth.auth_type, AuthType::Password) {
             use cedar::constants::CEDAR_SIGNATURE_STR;
             let mut p = mayaqua::Pack::new();
+            // 1. Method
             p.add_str("method", "login")?;
-            p.add_int("version", cedar::SOFTETHER_VER)?;
-            p.add_int("build", cedar::SOFTETHER_BUILD)?;
-            p.add_str("client_str", CLIENT_STRING)?;
+            // 2. Hub and username
             p.add_str("hubname", &client_option.hubname)?;
             p.add_str("username", &client_auth.username)?;
-            p.add_str("protocol", CEDAR_SIGNATURE_STR)?;
-            p.add_int("max_connection", client_option.max_connection)?;
-            p.add_int("use_encrypt", client_option.use_encrypt as u32)?;
-            p.add_int("use_compress", 0)?;
-            p.add_int("half_connection", client_option.half_connection as u32)?;
-            p.add_int("authtype", 1)?;
+            // 3. Auth type and credentials
+            p.add_int("authtype", 1)?; // CLIENT_AUTHTYPE_PASSWORD
             if let Some(sp) = secure_pwd.as_ref() {
                 p.add_data("secure_password", sp.to_vec())?;
             }
+            // 4. Client version info (PackAddClientVersion equivalent)
+            p.add_int("client_ver", cedar::SOFTETHER_VER)?;
+            p.add_int("client_build", cedar::SOFTETHER_BUILD)?;
+            p.add_str("client_str", CLIENT_STRING)?;
+            // 5. Protocol
+            p.add_str("protocol", CEDAR_SIGNATURE_STR)?;
+            // 6. Hello (client string again)
+            p.add_str("hello", CLIENT_STRING)?;
+            // 7. Version/build again
+            p.add_int("version", cedar::SOFTETHER_VER)?;
+            p.add_int("build", cedar::SOFTETHER_BUILD)?;
+            // 8. Client ID
             let cid = self.config.connection.client_id.unwrap_or(123);
             p.add_int("client_id", cid)?;
+            // 9. Connection options
+            p.add_int("max_connection", client_option.max_connection)?;
+            p.add_int("use_encrypt", client_option.use_encrypt as u32)?;
+            p.add_int("use_compress", client_option.use_compress as u32)?;
+            p.add_int("half_connection", client_option.half_connection as u32)?;
+            // 10. Unique ID
             let mut unique = [0u8; 20];
             rand::rng().fill_bytes(&mut unique);
             p.add_data("unique_id", unique.to_vec())?;
@@ -145,21 +158,34 @@ impl VpnClient {
         } else if matches!(client_auth.auth_type, AuthType::Ticket) {
             use cedar::constants::CEDAR_SIGNATURE_STR;
             let mut p = mayaqua::Pack::new();
+            // 1. Method
             p.add_str("method", "login")?;
-            p.add_int("version", cedar::SOFTETHER_VER)?;
-            p.add_int("build", cedar::SOFTETHER_BUILD)?;
-            p.add_str("client_str", CLIENT_STRING)?;
+            // 2. Hub and username
             p.add_str("hubname", &client_option.hubname)?;
             p.add_str("username", &client_auth.username)?;
-            p.add_str("protocol", CEDAR_SIGNATURE_STR)?;
-            p.add_int("max_connection", client_option.max_connection)?;
-            p.add_int("use_encrypt", client_option.use_encrypt as u32)?;
-            p.add_int("use_compress", 0)?;
-            p.add_int("half_connection", client_option.half_connection as u32)?;
-            p.add_int("authtype", 99)?;
+            // 3. Auth type and credentials
+            p.add_int("authtype", 99)?; // AUTHTYPE_TICKET
             p.add_data("ticket", client_auth.hashed_password.to_vec())?;
+            // 4. Client version info (PackAddClientVersion equivalent)
+            p.add_int("client_ver", cedar::SOFTETHER_VER)?;
+            p.add_int("client_build", cedar::SOFTETHER_BUILD)?;
+            p.add_str("client_str", CLIENT_STRING)?;
+            // 5. Protocol
+            p.add_str("protocol", CEDAR_SIGNATURE_STR)?;
+            // 6. Hello (client string again)
+            p.add_str("hello", CLIENT_STRING)?;
+            // 7. Version/build again
+            p.add_int("version", cedar::SOFTETHER_VER)?;
+            p.add_int("build", cedar::SOFTETHER_BUILD)?;
+            // 8. Client ID
             let cid = self.config.connection.client_id.unwrap_or(123);
             p.add_int("client_id", cid)?;
+            // 9. Connection options
+            p.add_int("max_connection", client_option.max_connection)?;
+            p.add_int("use_encrypt", client_option.use_encrypt as u32)?;
+            p.add_int("use_compress", client_option.use_compress as u32)?;
+            p.add_int("half_connection", client_option.half_connection as u32)?;
+            // 10. Unique ID
             let mut unique = [0u8; 20];
             rand::rng().fill_bytes(&mut unique);
             p.add_data("unique_id", unique.to_vec())?;

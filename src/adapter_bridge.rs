@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tracing::{debug, info, warn, trace};
+use tracing::{debug, info, warn};
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "adapter")]
@@ -104,6 +104,7 @@ impl VpnClient {
                 self.adapter.take().unwrap()
             ));
             let adapter1 = adapter.clone();
+            let adapter_for_arp = adapter.clone(); // Clone for ARP checking
             let adapter2 = adapter.clone();
 
             // Channel for adapter -> dataplane (IP → Ethernet)
@@ -158,6 +159,57 @@ impl VpnClient {
                 loop {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     
+                    // Send proactive ARP request to learn gateway MAC
+                    if state.dhcp_state == DhcpState::Configured && 
+                       state.need_gateway_arp && 
+                       state.gateway_mac.is_none() &&
+                       state.gateway_ip.is_some() &&
+                       state.our_ip.is_some() {
+                        
+                        // Send ARP request every 1 second until gateway MAC learned
+                        if state.last_dhcp_send.elapsed() > Duration::from_secs(1) {
+                            let gateway_ip = state.gateway_ip.unwrap();
+                            let our_ip_arr = state.our_ip.unwrap();
+                            let our_ip = std::net::Ipv4Addr::new(our_ip_arr[0], our_ip_arr[1], our_ip_arr[2], our_ip_arr[3]);
+                            let gateway_ipv4 = std::net::Ipv4Addr::new(gateway_ip[0], gateway_ip[1], gateway_ip[2], gateway_ip[3]);
+                            
+                            // Build ARP request frame (42 bytes: 14 Ethernet + 28 ARP)
+                            let mut arp_frame = vec![0u8; 42];
+                            
+                            // Ethernet header: broadcast destination
+                            arp_frame[0..6].copy_from_slice(&[0xFF; 6]);
+                            arp_frame[6..12].copy_from_slice(&our_mac);
+                            arp_frame[12..14].copy_from_slice(&0x0806u16.to_be_bytes()); // ARP
+                            
+                            // ARP header
+                            arp_frame[14..16].copy_from_slice(&0x0001u16.to_be_bytes()); // Hardware: Ethernet
+                            arp_frame[16..18].copy_from_slice(&0x0800u16.to_be_bytes()); // Protocol: IPv4
+                            arp_frame[18] = 6; // Hardware size
+                            arp_frame[19] = 4; // Protocol size
+                            arp_frame[20..22].copy_from_slice(&0x0001u16.to_be_bytes()); // Operation: Request
+                            arp_frame[22..28].copy_from_slice(&our_mac); // Sender MAC
+                            arp_frame[28..32].copy_from_slice(&our_ip.octets()); // Sender IP
+                            arp_frame[32..38].copy_from_slice(&[0x00; 6]); // Target MAC (unknown)
+                            arp_frame[38..42].copy_from_slice(&gateway_ipv4.octets()); // Target IP
+                            
+                            info!("📡 Sending ARP request: Who has {}? Tell {}", gateway_ipv4, our_ip);
+                            if let Err(e) = adapter_to_dp_tx.send(arp_frame) {
+                                warn!("Failed to send ARP request: {}", e);
+                            }
+                            state.last_dhcp_send = Instant::now();
+                        }
+                        
+                        // Check if translator learned gateway MAC
+                        let adapter_lock = adapter_for_arp.lock().await;
+                        if let Some((__gw_ip, gw_mac)) = adapter_lock.translator().gateway_info() {
+                            info!("✅ Gateway MAC learned from translator: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                                gw_mac[0], gw_mac[1], gw_mac[2], gw_mac[3], gw_mac[4], gw_mac[5]);
+                            state.gateway_mac = Some(gw_mac);
+                            state.need_gateway_arp = false;
+                        }
+                        drop(adapter_lock);
+                    }
+                    
                     // Check for DHCP responses from Task3
                     while let Ok(response) = dhcp_response_rx.try_recv() {
                         use crate::adapter_bridge_packets::DhcpResponse;
@@ -180,6 +232,13 @@ impl VpnClient {
                                 state.need_gateway_arp = true;
                                 state.dhcp_state = DhcpState::Configured;
                                 state.last_state_change = Instant::now();
+                                
+                                // Set gateway IP on translator for MAC learning
+                                let gateway_ipv4 = std::net::Ipv4Addr::new(router[0], router[1], router[2], router[3]);
+                                let mut adapter_lock = adapter_for_arp.lock().await;
+                                adapter_lock.translator_mut().set_gateway_ip(gateway_ipv4);
+                                drop(adapter_lock);
+                                info!("🎯 Gateway IP configured on translator: {}", gateway_ipv4);
                                 
                                 if dns1[0] != 0 || dns1[1] != 0 || dns1[2] != 0 || dns1[3] != 0 {
                                     info!("🌐 DNS1: {}.{}.{}.{}", dns1[0], dns1[1], dns1[2], dns1[3]);

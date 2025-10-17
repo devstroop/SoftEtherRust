@@ -91,10 +91,12 @@ pub mod shared_config {
         pub max_connections: u32,
         #[serde(default)]
         pub skip_tls_verify: bool,
+        /// SecureNAT mode: when false (default), uses LocalBridge with L2 Ethernet frames.
+        /// When true, uses SecureNAT with L3 IP packets (NAT traversal).
         #[serde(default)]
-        pub nat_traversal: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub udp_port: Option<u16>,
+        pub secure_nat: bool,
+        #[serde(default)]
+        pub udp_acceleration: bool,
     }
 
     fn default_port() -> u16 {

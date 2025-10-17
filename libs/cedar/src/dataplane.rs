@@ -333,15 +333,8 @@ impl DataPlane {
                     let first = match read_u32_be(&mut guard) {
                         Ok(v) => v,
                         Err(e) => {
-                            // For transient errors, continue; for others, exit quietly (link closed)
-                            if e.kind() == std::io::ErrorKind::WouldBlock
-                                || e.kind() == std::io::ErrorKind::TimedOut
-                            {
-                                continue;
-                            } else {
-                                debug!("dataplane: RX exit: {e}");
-                                return;
-                            }
+                            debug!("dataplane: RX exit: {e}");
+                            return;
                         }
                     };
                     if first == u32::MAX {
@@ -490,40 +483,34 @@ impl DataPlane {
                 debug!("📤 Link writer: received frame from channel ({} bytes), writing to TLS", len);
                 let tls_for_tx2 = tls_for_tx.clone();
                 
-                // Add timeout to prevent deadlock on flush
-                let res = tokio::time::timeout(
-                    tokio::time::Duration::from_secs(5),
-                    tokio::task::spawn_blocking(move || {
-                        let mut guard = tls_for_tx2.lock().unwrap();
-                        // Write count=1
-                        let count_be = 1u32.to_be_bytes();
-                        guard.write_all(&count_be)?;
-                        // Write frame length
-                        let len_be = (len as u32).to_be_bytes();
-                        guard.write_all(&len_be)?;
-                        // Write frame payload
-                        guard.write_all(&frame)?;
-                        // CRITICAL: Flush to ensure data is sent immediately over the network
-                        guard.flush()
-                    })
-                ).await;
+                // Use spawn_blocking for writes - no timeout to allow TCP flow control
+                // The TCP stack will handle backpressure naturally
+                let res = tokio::task::spawn_blocking(move || {
+                    let mut guard = tls_for_tx2.lock().unwrap();
+                    // Write count=1
+                    let count_be = 1u32.to_be_bytes();
+                    guard.write_all(&count_be)?;
+                    // Write frame length
+                    let len_be = (len as u32).to_be_bytes();
+                    guard.write_all(&len_be)?;
+                    // Write frame payload
+                    guard.write_all(&frame)?;
+                    // CRITICAL: Flush to ensure data is sent immediately over the network
+                    guard.flush()
+                }).await;
                 
                 match res {
-                    Ok(Ok(Ok(()))) => {
+                    Ok(Ok(())) => {
                         debug!("✅ Link writer: successfully wrote {} bytes to TLS", len);
                         let mut g = inner_for_tx.lock().unwrap();
                         g.total_tx += len as u64;
                     }
-                    Ok(Ok(Err(e))) => {
+                    Ok(Err(e)) => {
                         warn!("dataplane: TX write error: {e}");
                         break;
                     }
-                    Ok(Err(e)) => {
+                    Err(e) => {
                         warn!("dataplane: TX spawn error: {e}");
-                        break;
-                    }
-                    Err(_) => {
-                        warn!("dataplane: TX timeout after 5s - connection may be stuck");
                         break;
                     }
                 }
@@ -548,11 +535,15 @@ impl DataPlane {
                     buf.extend_from_slice(&MAGIC.to_be_bytes());
                     buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
                     buf.extend_from_slice(payload);
-                    guard.write_all(&buf)
+                    guard.write_all(&buf)?;
+                    // CRITICAL: Flush to ensure keepalive is sent immediately
+                    guard.flush()
                 })
                 .await;
                 match res {
-                    Ok(Ok(())) => { /* ok */ }
+                    Ok(Ok(())) => {
+                        debug!("dataplane: keepalive TX sent successfully");
+                    }
                     Ok(Err(e)) => {
                         debug!("dataplane: keepalive TX exit: {e}");
                         break;

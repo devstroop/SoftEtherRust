@@ -45,6 +45,11 @@ async fn main() -> Result<()> {
         .or_else(|_| EnvFilter::try_new(default_level.clone()))
         .unwrap_or_else(|_| EnvFilter::new(fallback));
 
+    // Bridge log crate to tracing BEFORE initializing tracing_subscriber
+    // This must happen first to avoid "logger already initialized" errors
+    tracing_log::LogTracer::init()
+        .map_err(|e| anyhow::anyhow!("Failed to initialize log bridge: {}", e))?;
+    
     tracing_subscriber::registry()
         .with(env_filter)
         .with(fmt::layer().with_target(true).without_time())

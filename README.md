@@ -28,8 +28,8 @@ Create `config.json`:
   "use_compress": true,
   "use_encrypt": true,
   "max_connections": 1,
-  "skip_tls_verify": true,
-  "nat_traversal": false
+  "skip_tls_verify": false,
+  "secure_nat": false
 }
 ```
 

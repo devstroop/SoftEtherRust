@@ -100,6 +100,14 @@ impl L2L3Translator {
         self.our_ip
     }
     
+    /// Get both gateway IP and MAC (if learned)
+    pub fn gateway_info(&self) -> Option<(Ipv4Addr, [u8; 6])> {
+        match (self.gateway_ip, self.gateway_mac) {
+            (Some(ip), Some(mac)) => Some((ip, mac)),
+            _ => None,
+        }
+    }
+    
     /// Get statistics
     pub fn stats(&self) -> TranslatorStats {
         TranslatorStats {
