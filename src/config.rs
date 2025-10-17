@@ -182,6 +182,22 @@ pub struct ClientConfig {
     /// macOS: total duration to keep kicking DHCP (ms)
     #[serde(default = "default_dhcp_kick_timeout_ms")]
     pub dhcp_kick_timeout_ms: u64,
+
+    /// Static IPv4 address (optional, used as fallback if DHCP times out)
+    #[serde(default)]
+    pub static_ipv4: Option<String>,
+
+    /// Static IPv4 netmask (optional, default: 255.255.255.0)
+    #[serde(default)]
+    pub static_ipv4_netmask: Option<String>,
+
+    /// Static IPv4 gateway (optional, default: first IP in subnet)
+    #[serde(default)]
+    pub static_ipv4_gateway: Option<String>,
+
+    /// DHCP timeout in seconds (after which we fall back to static IP if configured)
+    #[serde(default = "default_dhcp_timeout_secs")]
+    pub dhcp_timeout_secs: u64,
 }
 
 // Default value functions
@@ -224,6 +240,9 @@ fn default_dhcp_fallback_after_ms() -> u64 {
 fn default_dhcp_kick_timeout_ms() -> u64 {
     20000
 }
+fn default_dhcp_timeout_secs() -> u64 {
+    20 // Timeout after 20 seconds and fall back to static IP
+}
 
 impl Default for ConnectionConfig {
     fn default() -> Self {
@@ -257,6 +276,10 @@ impl Default for ClientConfig {
             dhcp_jitter_pct: default_dhcp_jitter_pct(),
             dhcp_fallback_after_ms: default_dhcp_fallback_after_ms(),
             dhcp_kick_timeout_ms: default_dhcp_kick_timeout_ms(),
+            static_ipv4: None,
+            static_ipv4_netmask: None,
+            static_ipv4_gateway: None,
+            dhcp_timeout_secs: default_dhcp_timeout_secs(),
         }
     }
 }

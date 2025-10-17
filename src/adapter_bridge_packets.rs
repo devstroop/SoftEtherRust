@@ -11,6 +11,7 @@ pub enum DhcpResponse {
     Offer {
         yiaddr: [u8; 4],
         server_id: [u8; 4],
+        gateway_mac: [u8; 6],  // ✅ Extract gateway MAC from Ethernet source (Zig does this!)
     },
     Ack {
         yiaddr: [u8; 4],
@@ -18,6 +19,7 @@ pub enum DhcpResponse {
         router: [u8; 4],
         dns1: [u8; 4],
         dns2: [u8; 4],
+        gateway_mac: [u8; 6],  // ✅ Extract gateway MAC from Ethernet source (Zig does this!)
     },
 }
 
@@ -198,24 +200,40 @@ pub fn parse_dhcp_response(eth_frame: &[u8]) -> Option<DhcpResponse> {
         pos += 2 + opt_len;
     }
     
+    // ✅ CRITICAL FIX: Extract gateway MAC from Ethernet source MAC (bytes 6-11)
+    // This is what Zig does: memcpy(gateway_mac, eth_frame + 6, 6)
+    // The DHCP response comes from the gateway, so its source MAC IS the gateway MAC!
+    let gateway_mac = [
+        eth_frame[6],
+        eth_frame[7],
+        eth_frame[8],
+        eth_frame[9],
+        eth_frame[10],
+        eth_frame[11],
+    ];
+    
     match msg_type {
         Some(2) => { // DHCP OFFER
-            info!("🎉 DHCP OFFER parsed! IP={}.{}.{}.{}, server={:?}", 
-                yiaddr[0], yiaddr[1], yiaddr[2], yiaddr[3], server_id);
+            info!("🎉 DHCP OFFER parsed! IP={}.{}.{}.{}, server={:?}, gateway_mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", 
+                yiaddr[0], yiaddr[1], yiaddr[2], yiaddr[3], server_id,
+                gateway_mac[0], gateway_mac[1], gateway_mac[2], gateway_mac[3], gateway_mac[4], gateway_mac[5]);
             Some(DhcpResponse::Offer {
                 yiaddr,
                 server_id: server_id.unwrap_or([0, 0, 0, 0]),
+                gateway_mac,
             })
         }
         Some(5) => { // DHCP ACK
-            info!("🎉 DHCP ACK parsed! IP={}.{}.{}.{}, mask={:?}, router={:?}, dns1={:?}, dns2={:?}", 
-                yiaddr[0], yiaddr[1], yiaddr[2], yiaddr[3], mask, router, dns1, dns2);
+            info!("🎉 DHCP ACK parsed! IP={}.{}.{}.{}, mask={:?}, router={:?}, gateway_mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", 
+                yiaddr[0], yiaddr[1], yiaddr[2], yiaddr[3], mask, router,
+                gateway_mac[0], gateway_mac[1], gateway_mac[2], gateway_mac[3], gateway_mac[4], gateway_mac[5]);
             Some(DhcpResponse::Ack {
                 yiaddr,
                 mask: mask.unwrap_or([255, 255, 0, 0]),
                 router: router.unwrap_or([0, 0, 0, 0]),
                 dns1: dns1.unwrap_or([0, 0, 0, 0]),
                 dns2: dns2.unwrap_or([0, 0, 0, 0]),
+                gateway_mac,
             })
         }
         _ => {
@@ -375,128 +393,162 @@ fn build_arp_request(src_mac: [u8; 6], src_ip: [u8; 4], target_ip: [u8; 4]) -> V
 }
 
 /// Build DHCP DISCOVER packet
+/// ⚠️ CRITICAL: Must match Zig's BuildDhcpDiscover() structure EXACTLY (342 bytes)!
+/// SoftEther server is picky about DHCP packet structure.
 fn build_dhcp_discover(src_mac: [u8; 6], xid: u32) -> Vec<u8> {
-    let mut packet = Vec::with_capacity(342);
+    let mut packet = Vec::with_capacity(1024);
     
     // Ethernet header (14 bytes)
     packet.extend_from_slice(&[0xff; 6]); // Broadcast
     packet.extend_from_slice(&src_mac);
     packet.extend_from_slice(&[0x08, 0x00]); // IPv4
     
-    // IPv4 header (20 bytes)
+    // IPv4 header (20 bytes) - will set total length later
+    let ip_header_start = packet.len();
     packet.push(0x45); // Version 4, Header length 5
     packet.push(0x00); // DSCP/ECN
-    let total_len = 20 + 8 + 240 + 64; // IP + UDP + BOOTP + options
-    packet.extend_from_slice(&(total_len as u16).to_be_bytes());
+    let ip_total_len_pos = packet.len();
+    packet.extend_from_slice(&[0x00, 0x00]); // Placeholder for total length
     packet.extend_from_slice(&[0x00, 0x00]); // Identification
     packet.extend_from_slice(&[0x00, 0x00]); // Flags + Fragment offset
     packet.push(64); // TTL
     packet.push(17); // Protocol: UDP
+    let ip_checksum_pos = packet.len();
     packet.extend_from_slice(&[0x00, 0x00]); // Checksum (calculate later)
     packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // Source IP: 0.0.0.0
     packet.extend_from_slice(&[0xff, 0xff, 0xff, 0xff]); // Dest IP: broadcast
     
-    // Calculate IP checksum
-    let ip_start = 14;
-    let checksum = calculate_ip_checksum(&packet[ip_start..ip_start+20]);
-    packet[ip_start+10] = (checksum >> 8) as u8;
-    packet[ip_start+11] = (checksum & 0xff) as u8;
-    
-    // UDP header (8 bytes)
-    packet.extend_from_slice(&[0x00, 0x44]); // Source port: 68
-    packet.extend_from_slice(&[0x00, 0x43]); // Dest port: 67
-    let udp_len = 8 + 240 + 64;
-    packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
+    // UDP header (8 bytes) - will set length later
+    let udp_header_start = packet.len();
+    packet.extend_from_slice(&[0x00, 0x44]); // Source port: 68 (DHCP client)
+    packet.extend_from_slice(&[0x00, 0x43]); // Dest port: 67 (DHCP server)
+    let udp_len_pos = packet.len();
+    packet.extend_from_slice(&[0x00, 0x00]); // Placeholder for UDP length
     packet.extend_from_slice(&[0x00, 0x00]); // Checksum (optional)
     
-    // BOOTP header (240 bytes)
+    // BOOTP/DHCP header (240 bytes minimum)
     packet.push(0x01); // op: BOOTREQUEST
     packet.push(0x01); // htype: Ethernet
-    packet.push(0x06); // hlen
-    packet.push(0x00); // hops
-    packet.extend_from_slice(&xid.to_be_bytes()); // Transaction ID
+    packet.push(0x06); // hlen: 6
+    packet.push(0x00); // hops: 0
+    packet.extend_from_slice(&xid.to_be_bytes()); // Transaction ID (4 bytes)
     packet.extend_from_slice(&[0x00, 0x00]); // secs
     packet.extend_from_slice(&[0x80, 0x00]); // flags: broadcast
     packet.extend_from_slice(&[0x00; 4]); // ciaddr
     packet.extend_from_slice(&[0x00; 4]); // yiaddr
     packet.extend_from_slice(&[0x00; 4]); // siaddr
     packet.extend_from_slice(&[0x00; 4]); // giaddr
-    packet.extend_from_slice(&src_mac); // chaddr (client MAC)
-    packet.extend_from_slice(&[0x00; 10]); // chaddr padding
-    packet.extend_from_slice(&[0x00; 64]); // sname
-    packet.extend_from_slice(&[0x00; 128]); // file
+    packet.extend_from_slice(&src_mac); // chaddr (client MAC, 6 bytes)
+    packet.extend_from_slice(&[0x00; 10]); // chaddr padding (10 bytes)
+    packet.extend_from_slice(&[0x00; 64]); // sname (64 bytes)
+    packet.extend_from_slice(&[0x00; 128]); // file (128 bytes)
     
-    // DHCP options
+    // DHCP options (magic cookie + options)
     packet.extend_from_slice(&[0x63, 0x82, 0x53, 0x63]); // Magic cookie
     
     // Option 53: DHCP Message Type = DISCOVER (1)
     packet.extend_from_slice(&[53, 1, 1]);
     
-    // Option 55: Parameter Request List
-    packet.extend_from_slice(&[55, 4, 1, 3, 6, 15]); // Subnet, Router, DNS, Domain
+    // Option 55: Parameter Request List (subnet, router, DNS, domain)
+    packet.extend_from_slice(&[55, 4, 1, 3, 6, 15]);
     
     // Option 255: End
     packet.push(255);
     
+    // ⚠️ CRITICAL: Pad to match Zig's 342-byte packet size!
+    // Zig BuildDhcpDiscover produces 342 bytes total.
+    // Current size: 14 (Eth) + 20 (IP) + 8 (UDP) + 240 (BOOTP) + 14 (options) = 296
+    // Need: 342 - 296 = 46 bytes of padding after END option
+    for _ in 0..46 {
+        packet.push(0x00); // Pad with zeros
+    }
+    
+    // Update lengths
+    let total_packet_size = packet.len();
+    let ip_total_len = (total_packet_size - ip_header_start) as u16;
+    let udp_len = (total_packet_size - udp_header_start) as u16;
+    
+    packet[ip_total_len_pos..ip_total_len_pos+2].copy_from_slice(&ip_total_len.to_be_bytes());
+    packet[udp_len_pos..udp_len_pos+2].copy_from_slice(&udp_len.to_be_bytes());
+    
+    // Calculate IP checksum
+    let checksum = calculate_ip_checksum(&packet[ip_header_start..ip_header_start+20]);
+    packet[ip_checksum_pos..ip_checksum_pos+2].copy_from_slice(&checksum.to_be_bytes());
+    
+    debug!("🔧 Built DHCP DISCOVER: {} bytes total (should be ~342 like Zig)", packet.len());
     packet
 }
 
-/// Build DHCP REQUEST packet
+/// Build DHCP REQUEST packet (must match Zig's C code structure)
 fn build_dhcp_request(src_mac: [u8; 6], xid: u32, requested_ip: [u8; 4], server_ip: [u8; 4]) -> Vec<u8> {
-    let mut packet = Vec::with_capacity(342);
+    let mut packet = Vec::with_capacity(512);
     
-    // Ethernet header
-    packet.extend_from_slice(&[0xff; 6]);
+    // Ethernet header (14 bytes)
+    packet.extend_from_slice(&[0xff; 6]); // Broadcast dst
     packet.extend_from_slice(&src_mac);
-    packet.extend_from_slice(&[0x08, 0x00]);
+    packet.extend_from_slice(&[0x08, 0x00]); // IPv4
     
-    // IPv4 header
-    packet.push(0x45);
-    packet.push(0x00);
-    let total_len = 20 + 8 + 240 + 80;
-    packet.extend_from_slice(&(total_len as u16).to_be_bytes());
-    packet.extend_from_slice(&[0x00, 0x00]);
-    packet.extend_from_slice(&[0x00, 0x00]);
-    packet.push(64);
-    packet.push(17);
-    packet.extend_from_slice(&[0x00, 0x00]); // Checksum
-    packet.extend_from_slice(&[0x00; 4]); // Source
-    packet.extend_from_slice(&[0xff; 4]); // Dest
+    // IPv4 header (20 bytes)
+    let ip_header_start = 14;
+    packet.push(0x45); // Version 4, IHL 5
+    packet.push(0x00); // DSCP/ECN
+    let ip_total_len_pos = packet.len();
+    packet.extend_from_slice(&[0x00, 0x00]); // Placeholder for total length
+    packet.extend_from_slice(&[0x00, 0x00]); // Identification
+    packet.extend_from_slice(&[0x00, 0x00]); // Flags + Fragment offset
+    packet.push(64); // TTL
+    packet.push(17); // Protocol: UDP
+    let ip_checksum_pos = packet.len();
+    packet.extend_from_slice(&[0x00, 0x00]); // Checksum (calculate later)
+    packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // Source IP: 0.0.0.0
+    packet.extend_from_slice(&[0xff, 0xff, 0xff, 0xff]); // Dest IP: broadcast
     
-    let ip_start = 14;
-    let checksum = calculate_ip_checksum(&packet[ip_start..ip_start+20]);
-    packet[ip_start+10] = (checksum >> 8) as u8;
-    packet[ip_start+11] = (checksum & 0xff) as u8;
+    // UDP header (8 bytes)
+    let udp_header_start = packet.len();
+    packet.extend_from_slice(&[0x00, 0x44]); // Source port 68
+    packet.extend_from_slice(&[0x00, 0x43]); // Dest port 67
+    let udp_len_pos = packet.len();
+    packet.extend_from_slice(&[0x00, 0x00]); // Placeholder for UDP length
+    packet.extend_from_slice(&[0x00, 0x00]); // Checksum (optional for UDP)
     
-    // UDP header
-    packet.extend_from_slice(&[0x00, 0x44]);
-    packet.extend_from_slice(&[0x00, 0x43]);
-    let udp_len = 8 + 240 + 80;
-    packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
-    packet.extend_from_slice(&[0x00, 0x00]);
-    
-    // BOOTP header
-    packet.push(0x01);
-    packet.push(0x01);
-    packet.push(0x06);
-    packet.push(0x00);
-    packet.extend_from_slice(&xid.to_be_bytes());
-    packet.extend_from_slice(&[0x00, 0x00]);
-    packet.extend_from_slice(&[0x80, 0x00]);
-    packet.extend_from_slice(&[0x00; 16]);
-    packet.extend_from_slice(&src_mac);
-    packet.extend_from_slice(&[0x00; 10]);
-    packet.extend_from_slice(&[0x00; 192]);
+    // BOOTP header (236 bytes)
+    packet.push(0x01); // op: BOOTREQUEST
+    packet.push(0x01); // htype: Ethernet
+    packet.push(0x06); // hlen: 6
+    packet.push(0x00); // hops: 0
+    packet.extend_from_slice(&xid.to_be_bytes()); // Transaction ID (4 bytes)
+    packet.extend_from_slice(&[0x00, 0x00]); // secs
+    packet.extend_from_slice(&[0x80, 0x00]); // flags: broadcast
+    packet.extend_from_slice(&[0x00; 4]); // ciaddr
+    packet.extend_from_slice(&[0x00; 4]); // yiaddr
+    packet.extend_from_slice(&[0x00; 4]); // siaddr
+    packet.extend_from_slice(&[0x00; 4]); // giaddr
+    packet.extend_from_slice(&src_mac); // chaddr (client MAC, 6 bytes)
+    packet.extend_from_slice(&[0x00; 10]); // chaddr padding (10 bytes)
+    packet.extend_from_slice(&[0x00; 64]); // sname (64 bytes)
+    packet.extend_from_slice(&[0x00; 128]); // file (128 bytes)
     
     // DHCP options
-    packet.extend_from_slice(&[0x63, 0x82, 0x53, 0x63]);
-    packet.extend_from_slice(&[53, 1, 3]); // DHCP REQUEST
-    packet.extend_from_slice(&[50, 4]); // Requested IP
+    packet.extend_from_slice(&[0x63, 0x82, 0x53, 0x63]); // Magic cookie
+    packet.extend_from_slice(&[53, 1, 3]); // Option 53: DHCP REQUEST (Message Type = 3)
+    packet.extend_from_slice(&[50, 4]); // Option 50: Requested IP Address
     packet.extend_from_slice(&requested_ip);
-    packet.extend_from_slice(&[54, 4]); // Server identifier
+    packet.extend_from_slice(&[54, 4]); // Option 54: Server Identifier
     packet.extend_from_slice(&server_ip);
-    packet.extend_from_slice(&[55, 4, 1, 3, 6, 15]);
-    packet.push(255);
+    packet.extend_from_slice(&[55, 4, 1, 3, 6, 15]); // Option 55: Parameter Request List
+    packet.push(255); // Option 255: End
+    
+    // Update lengths
+    let total_packet_size = packet.len();
+    let ip_total_len = (total_packet_size - ip_header_start) as u16;
+    let udp_len = (total_packet_size - udp_header_start) as u16;
+    
+    packet[ip_total_len_pos..ip_total_len_pos+2].copy_from_slice(&ip_total_len.to_be_bytes());
+    packet[udp_len_pos..udp_len_pos+2].copy_from_slice(&udp_len.to_be_bytes());
+    
+    // Calculate IP checksum
+    let checksum = calculate_ip_checksum(&packet[ip_header_start..ip_header_start+20]);
+    packet[ip_checksum_pos..ip_checksum_pos+2].copy_from_slice(&checksum.to_be_bytes());
     
     packet
 }

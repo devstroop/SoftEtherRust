@@ -90,15 +90,18 @@ impl SecureConnection {
             debug!("TLS SNI set to '{}' (original host '{}')", sni_host, host);
         }
         
-        // CRITICAL: Remove read/write timeouts after connection is established
-        // The dataplane needs to continuously read without timing out
+        // CRITICAL: Configure socket for blocking I/O with no timeouts
+        // The dataplane RX thread needs to block until data is available
+        tls_stream.get_ref()
+            .set_nonblocking(false)
+            .context("Failed to set blocking mode")?;
         tls_stream.get_ref()
             .set_read_timeout(None)
             .context("Failed to clear read timeout")?;
         tls_stream.get_ref()
             .set_write_timeout(None)
             .context("Failed to clear write timeout")?;
-        debug!("Cleared socket timeouts for continuous packet forwarding");
+        debug!("Configured socket for blocking I/O (no timeouts)");
         
         // Log local address (ip:port) of the TCP socket for visibility
         if let Ok(sockaddr) = tls_stream.get_ref().local_addr() {
@@ -463,6 +466,11 @@ impl SecureConnection {
     /// Intended for future data-plane integration to hand off the bonded socket.
     pub fn into_tls_stream(self) -> TlsStream<TcpStream> {
         self.stream
+    }
+
+    /// Get a reference to the TLS stream for inspection before consuming
+    pub fn tls_stream_ref(&self) -> &TlsStream<TcpStream> {
+        &self.stream
     }
 
     /// Parse and validate the `pencore` field from server responses

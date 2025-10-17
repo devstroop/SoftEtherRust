@@ -90,6 +90,14 @@ impl L2L3Translator {
         self.gateway_ip = Some(gateway_ip);
     }
     
+    /// Set the gateway MAC address (learned from DHCP response)
+    /// This is what Zig does: zig_adapter_set_gateway_mac(ctx->zig_adapter, gateway_mac)
+    pub fn set_gateway_mac(&mut self, gateway_mac: [u8; 6]) {
+        debug!("Setting gateway MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            gateway_mac[0], gateway_mac[1], gateway_mac[2], gateway_mac[3], gateway_mac[4], gateway_mac[5]);
+        self.gateway_mac = Some(gateway_mac);
+    }
+    
     /// Get the learned gateway MAC address
     pub fn gateway_mac(&self) -> Option<[u8; 6]> {
         self.gateway_mac
@@ -138,6 +146,16 @@ impl L2L3Translator {
                     if self.options.verbose {
                         info!("🔍 Learned our IP: {}", src_ip);
                     }
+                    
+                    // If we don't have a gateway IP configured, guess it as .1 of our subnet
+                    if self.gateway_ip.is_none() {
+                        let octets = src_ip.octets();
+                        let gateway = Ipv4Addr::new(octets[0], octets[1], octets[2], 1);
+                        self.gateway_ip = Some(gateway);
+                        if self.options.verbose {
+                            info!("💡 Auto-configured gateway IP as: {}", gateway);
+                        }
+                    }
                 }
             }
         }
@@ -154,6 +172,14 @@ impl L2L3Translator {
                 
                 // Use learned gateway MAC if available, otherwise broadcast
                 dest_mac = self.gateway_mac.unwrap_or([0xFF; 6]);
+                
+                if self.gateway_mac.is_none() && self.options.verbose {
+                    debug!("⚠️ L3→L2: No gateway MAC learned yet, using broadcast");
+                } else if self.options.verbose {
+                    let gw = self.gateway_mac.unwrap();
+                    debug!("✅ L3→L2: Using learned gateway MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                        gw[0], gw[1], gw[2], gw[3], gw[4], gw[5]);
+                }
             }
             6 => {
                 // IPv6 packet
@@ -201,9 +227,23 @@ impl L2L3Translator {
         // Parse Ethernet header
         // [dest_mac(6)][src_mac(6)][ethertype(2)][payload]
         let _dest_mac = &eth_frame[0..6];
-        let _src_mac = &eth_frame[6..12];
+        let src_mac: [u8; 6] = eth_frame[6..12].try_into().unwrap();
         let ethertype = u16::from_be_bytes([eth_frame[12], eth_frame[13]]);
         let payload = &eth_frame[14..];
+        
+        // 🔥 CRITICAL FIX: Learn gateway MAC from FIRST incoming packet from VPN
+        // In LocalBridge mode, we must learn gateway MAC immediately from any IPv4 traffic
+        if self.gateway_mac.is_none() && ethertype == 0x0800 && payload.len() >= 20 {
+            let src_ip_bytes = [payload[12], payload[13], payload[14], payload[15]];
+            let src_ip = Ipv4Addr::from(src_ip_bytes);
+            
+            // Learn from any non-link-local IPv4 packet from VPN
+            if !src_ip.is_link_local() && !src_ip.is_broadcast() && !src_ip.is_multicast() {
+                self.gateway_mac = Some(src_mac);
+                info!("🎯 Learned gateway MAC from FIRST incoming packet: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} (src_ip={})",
+                    src_mac[0], src_mac[1], src_mac[2], src_mac[3], src_mac[4], src_mac[5], src_ip);
+            }
+        }
         
         match ethertype {
             0x0806 => {
@@ -215,6 +255,34 @@ impl L2L3Translator {
             0x0800 => {
                 // IPv4 packet - strip Ethernet header and return IP packet
                 self.packets_translated_l2_to_l3 += 1;
+                
+                // 🔥 CRITICAL FIX: Learn gateway MAC from ANY incoming IPv4 packet from VPN
+                // In LocalBridge mode, there's no ARP reply - we must learn MAC from traffic
+                if self.gateway_mac.is_none() && payload.len() >= 20 {
+                    let src_ip_bytes = [payload[12], payload[13], payload[14], payload[15]];
+                    let src_ip = Ipv4Addr::from(src_ip_bytes);
+                    
+                    // Learn MAC from any packet in our subnet (not from us, not link-local)
+                    if let Some(our_ip) = self.our_ip {
+                        if src_ip != our_ip && !src_ip.is_link_local() {
+                            // Check if source is in same subnet
+                            let our_octets = our_ip.octets();
+                            let src_octets = src_ip.octets();
+                            
+                            // Same /24 subnet check (conservative)
+                            if our_octets[0] == src_octets[0] && 
+                               our_octets[1] == src_octets[1] &&
+                               our_octets[2] == src_octets[2] {
+                                
+                                let src_mac: [u8; 6] = eth_frame[6..12].try_into().unwrap_or([0; 6]);
+                                self.gateway_mac = Some(src_mac);
+                                
+                                info!("🎯 Learned gateway MAC from incoming packet: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} (src_ip={})",
+                                    src_mac[0], src_mac[1], src_mac[2], src_mac[3], src_mac[4], src_mac[5], src_ip);
+                            }
+                        }
+                    }
+                }
                 
                 if self.options.verbose {
                     trace!(

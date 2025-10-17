@@ -97,6 +97,22 @@ pub mod shared_config {
         pub secure_nat: bool,
         #[serde(default)]
         pub udp_acceleration: bool,
+        #[serde(default)]
+        pub client: ClientOptions,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    pub struct ClientOptions {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub static_ipv4: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub static_ipv4_gateway: Option<String>,
+        #[serde(default = "default_dhcp_timeout")]
+        pub dhcp_timeout_secs: u64,
+    }
+
+    fn default_dhcp_timeout() -> u64 {
+        20
     }
 
     fn default_port() -> u16 {

@@ -39,6 +39,113 @@ pub struct PacketGeneratorState {
     pub connection_start: Instant,
 }
 
+/// Build a gratuitous ARP packet (announce our IP/MAC)
+fn build_gratuitous_arp(our_mac: [u8; 6], our_ip: [u8; 4]) -> Vec<u8> {
+    let mut packet = vec![0u8; 42];
+    
+    // Ethernet header
+    packet[0..6].copy_from_slice(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff]); // Broadcast dst
+    packet[6..12].copy_from_slice(&our_mac);                             // Our MAC src
+    packet[12..14].copy_from_slice(&[0x08, 0x06]);                       // EtherType: ARP
+    
+    // ARP header
+    packet[14..16].copy_from_slice(&[0x00, 0x01]);                       // Hardware type: Ethernet
+    packet[16..18].copy_from_slice(&[0x08, 0x00]);                       // Protocol type: IPv4
+    packet[18] = 6;                                                       // Hardware size
+    packet[19] = 4;                                                       // Protocol size
+    packet[20..22].copy_from_slice(&[0x00, 0x01]);                       // Opcode: Request (gratuitous)
+    packet[22..28].copy_from_slice(&our_mac);                            // Sender MAC
+    packet[28..32].copy_from_slice(&our_ip);                             // Sender IP
+    packet[32..38].copy_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // Target MAC (ignored)
+    packet[38..42].copy_from_slice(&our_ip);                             // Target IP (same as sender for GARP)
+    
+    packet
+}
+
+/// Build an ARP request packet for gateway MAC discovery
+fn build_gateway_arp_request(our_mac: [u8; 6], our_ip: [u8; 4], gateway_ip: [u8; 4]) -> Vec<u8> {
+    let mut packet = vec![0u8; 42];
+    
+    // Ethernet header
+    packet[0..6].copy_from_slice(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff]); // Broadcast dst
+    packet[6..12].copy_from_slice(&our_mac);                             // Our MAC src
+    packet[12..14].copy_from_slice(&[0x08, 0x06]);                       // EtherType: ARP
+    
+    // ARP header
+    packet[14..16].copy_from_slice(&[0x00, 0x01]);                       // Hardware type: Ethernet
+    packet[16..18].copy_from_slice(&[0x08, 0x00]);                       // Protocol type: IPv4
+    packet[18] = 6;                                                       // Hardware size
+    packet[19] = 4;                                                       // Protocol size
+    packet[20..22].copy_from_slice(&[0x00, 0x01]);                       // Opcode: Request
+    packet[22..28].copy_from_slice(&our_mac);                            // Sender MAC
+    packet[28..32].copy_from_slice(&our_ip);                             // Sender IP
+    packet[32..38].copy_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // Target MAC (unknown)
+    packet[38..42].copy_from_slice(&gateway_ip);                         // Target IP
+    
+    packet
+}
+
+/// Configure the network interface automatically
+#[cfg(target_os = "macos")]
+fn configure_interface_auto(dev_name: &str, our_ip: [u8; 4], gateway_ip: [u8; 4]) -> Result<()> {
+    use std::process::Command;
+    
+    let our_ip_str = format!("{}.{}.{}.{}", our_ip[0], our_ip[1], our_ip[2], our_ip[3]);
+    let gateway_ip_str = format!("{}.{}.{}.{}", gateway_ip[0], gateway_ip[1], gateway_ip[2], gateway_ip[3]);
+    
+    info!("🔧 Auto-configuring interface {} with IP {} (peer {})", dev_name, our_ip_str, gateway_ip_str);
+    
+    // ifconfig utunX <our_ip> <gateway_ip> up
+    let output = Command::new("ifconfig")
+        .arg(dev_name)
+        .arg(&our_ip_str)
+        .arg(&gateway_ip_str)
+        .arg("up")
+        .output()?;
+    
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!("⚠️ ifconfig failed: {}", stderr);
+        anyhow::bail!("ifconfig failed: {}", stderr);
+    }
+    
+    info!("✅ Interface {} configured", dev_name);
+    Ok(())
+}
+
+/// Add VPN routes automatically
+#[cfg(target_os = "macos")]
+fn configure_routes_auto(dev_name: &str, networks: &[(&str, &str)]) -> Result<()> {
+    use std::process::Command;
+    
+    info!("🛣️ Auto-configuring routes for interface {}", dev_name);
+    
+    for (network, netmask) in networks {
+        info!("  Adding route: {} netmask {} -> {}", network, netmask, dev_name);
+        
+        let output = Command::new("route")
+            .arg("add")
+            .arg("-net")
+            .arg(network)
+            .arg("-netmask")
+            .arg(netmask)
+            .arg("-interface")
+            .arg(dev_name)
+            .output()?;
+        
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // Don't fail if route already exists
+            if !stderr.contains("File exists") {
+                warn!("⚠️ route add failed: {}", stderr);
+            }
+        }
+    }
+    
+    info!("✅ Routes configured for {}", dev_name);
+    Ok(())
+}
+
 impl VpnClient {
     /// Start the virtual adapter and bi-directional bridging between the adapter and the session/dataplane
     ///
@@ -110,6 +217,7 @@ impl VpnClient {
             // Channel for adapter -> dataplane (IP → Ethernet)
             let (adapter_to_dp_tx, adapter_to_dp_rx) = tokio::sync::mpsc::unbounded_channel();
             let adapter_to_dp_tx_task2 = adapter_to_dp_tx.clone(); // Clone for task2
+            let adapter_to_dp_tx_task3 = adapter_to_dp_tx.clone(); // Clone for task3 (ARP replies)
             self.dataplane
                 .as_ref()
                 .unwrap()
@@ -153,11 +261,73 @@ impl VpnClient {
                     connection_start: Instant::now(),
                 };
                 
-                info!("🚀 Packet generator started with MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                    our_mac[0], our_mac[1], our_mac[2], our_mac[3], our_mac[4], our_mac[5]);
+                // Track interface configuration and periodic ARP
+                let mut last_iface_config: Option<Instant> = None;
+                let mut last_gratuitous_arp = Instant::now();
+                let mut gateway_arp_retry_count = 0;
+                let mut last_gateway_arp_request = Instant::now();
+                
+                // Get static IP config from environment variable or default
+                let static_ipv4 = std::env::var("VPN_STATIC_IP").ok();
+                let static_ipv4_gateway = std::env::var("VPN_STATIC_GATEWAY").ok();
+                let dhcp_timeout_secs = std::env::var("VPN_DHCP_TIMEOUT")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(20u64);
                 
                 loop {
                     tokio::time::sleep(Duration::from_millis(100)).await;
+                    
+                    // Check DHCP timeout and fall back to static IP if configured
+                    if state.dhcp_state != DhcpState::Configured && state.connection_start.elapsed() >= Duration::from_secs(dhcp_timeout_secs) && last_iface_config.is_none() {
+                        warn!("⏱️ DHCP timeout after {} seconds - checking for static IP fallback", dhcp_timeout_secs);
+                        
+                        if let (Some(static_ip_str), Some(static_gw_str)) = (&static_ipv4, &static_ipv4_gateway) {
+                            // Parse static IP configuration
+                            if let (Ok(static_ip_addr), Ok(static_gw_addr)) = (static_ip_str.parse::<std::net::Ipv4Addr>(), static_gw_str.parse::<std::net::Ipv4Addr>()) {
+                                let static_ip = static_ip_addr.octets();
+                                let static_gw = static_gw_addr.octets();
+                                
+                                info!("🔄 Falling back to static IP: {}.{}.{}.{} (gateway: {}.{}.{}.{})",
+                                    static_ip[0], static_ip[1], static_ip[2], static_ip[3],
+                                    static_gw[0], static_gw[1], static_gw[2], static_gw[3]);
+                                
+                                state.our_ip = Some(static_ip);
+                                state.gateway_ip = Some(static_gw);
+                                state.need_gateway_arp = true;
+                                state.dhcp_state = DhcpState::Configured;
+                                state.last_state_change = Instant::now();
+                                
+                                // Configure interface and routes
+                                let gateway_ipv4 = std::net::Ipv4Addr::new(static_gw[0], static_gw[1], static_gw[2], static_gw[3]);
+                                let mut adapter_lock = adapter_for_arp.lock().await;
+                                adapter_lock.translator_mut().set_gateway_ip(gateway_ipv4);
+                                let dev_name = adapter_lock.name().to_string();
+                                drop(adapter_lock);
+                                
+                                #[cfg(target_os = "macos")]
+                                {
+                                    if let Err(e) = configure_interface_auto(&dev_name, static_ip, static_gw) {
+                                        warn!("⚠️ Failed to auto-configure interface: {}", e);
+                                    } else {
+                                        let routes = [
+                                            ("10.21.0.0", "255.255.255.0"),
+                                            ("10.10.0.0", "255.255.0.0"),
+                                        ];
+                                        if let Err(e) = configure_routes_auto(&dev_name, &routes) {
+                                            warn!("⚠️ Failed to auto-configure routes: {}", e);
+                                        }
+                                        last_iface_config = Some(Instant::now());
+                                        info!("🎉 Static IP configuration complete!");
+                                    }
+                                }
+                            } else {
+                                warn!("⚠️ Failed to parse static IP configuration");
+                            }
+                        } else {
+                            warn!("⚠️ No static IP fallback configured - continuing with DHCP retries");
+                        }
+                    }
                     
                     // Send proactive ARP request to learn gateway MAC
                     if state.dhcp_state == DhcpState::Configured && 
@@ -214,31 +384,71 @@ impl VpnClient {
                     while let Ok(response) = dhcp_response_rx.try_recv() {
                         use crate::adapter_bridge_packets::DhcpResponse;
                         match response {
-                            DhcpResponse::Offer { yiaddr, server_id, .. } => {
-                                info!("📨 DHCP OFFER received: {}.{}.{}.{}", 
-                                    yiaddr[0], yiaddr[1], yiaddr[2], yiaddr[3]);
+                            DhcpResponse::Offer { yiaddr, server_id, gateway_mac } => {
+                                info!("📨 DHCP OFFER received: {}.{}.{}.{}, gateway_mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", 
+                                    yiaddr[0], yiaddr[1], yiaddr[2], yiaddr[3],
+                                    gateway_mac[0], gateway_mac[1], gateway_mac[2], gateway_mac[3], gateway_mac[4], gateway_mac[5]);
                                 state.offered_ip = Some(yiaddr);
                                 state.dhcp_server_ip = Some(server_id);
+                                state.gateway_mac = Some(gateway_mac);  // ✅ Learn gateway MAC from DHCP OFFER!
                                 state.dhcp_state = DhcpState::OfferReceived;
                                 state.last_state_change = Instant::now();
                             }
-                            DhcpResponse::Ack { yiaddr, mask, router, dns1, dns2 } => {
-                                info!("✅ DHCP ACK received: IP={}.{}.{}.{}, Mask={}.{}.{}.{}, Gateway={}.{}.{}.{}",
+                            DhcpResponse::Ack { yiaddr, mask, router, dns1, dns2, gateway_mac } => {
+                                // ⚠️ CRITICAL: If router is 0.0.0.0, use DHCP server IP as gateway (SoftEther standard)
+                                let actual_gateway = if router == [0, 0, 0, 0] && state.dhcp_server_ip.is_some() {
+                                    let server_ip = state.dhcp_server_ip.unwrap();
+                                    info!("🔧 Router option is 0.0.0.0, using DHCP server as gateway: {}.{}.{}.{}", 
+                                        server_ip[0], server_ip[1], server_ip[2], server_ip[3]);
+                                    server_ip
+                                } else {
+                                    router
+                                };
+                                
+                                info!("✅ DHCP ACK received: IP={}.{}.{}.{}, Mask={}.{}.{}.{}, Gateway={}.{}.{}.{}, MAC={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                                     yiaddr[0], yiaddr[1], yiaddr[2], yiaddr[3],
                                     mask[0], mask[1], mask[2], mask[3],
-                                    router[0], router[1], router[2], router[3]);
+                                    actual_gateway[0], actual_gateway[1], actual_gateway[2], actual_gateway[3],
+                                    gateway_mac[0], gateway_mac[1], gateway_mac[2], gateway_mac[3], gateway_mac[4], gateway_mac[5]);
                                 state.our_ip = Some(yiaddr);
-                                state.gateway_ip = Some(router);
-                                state.need_gateway_arp = true;
+                                state.gateway_ip = Some(actual_gateway);
+                                state.gateway_mac = Some(gateway_mac);  // ✅ Learn gateway MAC from DHCP ACK!
+                                state.need_gateway_arp = false;  // ✅ No ARP needed - we already have the MAC!
                                 state.dhcp_state = DhcpState::Configured;
                                 state.last_state_change = Instant::now();
                                 
-                                // Set gateway IP on translator for MAC learning
-                                let gateway_ipv4 = std::net::Ipv4Addr::new(router[0], router[1], router[2], router[3]);
+                                // ✅ CRITICAL FIX: Set gateway IP AND MAC on translator immediately
+                                // This is what Zig does: zig_adapter_set_gateway_mac(ctx->zig_adapter, gateway_mac)
+                                let gateway_ipv4 = std::net::Ipv4Addr::new(actual_gateway[0], actual_gateway[1], actual_gateway[2], actual_gateway[3]);
                                 let mut adapter_lock = adapter_for_arp.lock().await;
                                 adapter_lock.translator_mut().set_gateway_ip(gateway_ipv4);
+                                adapter_lock.translator_mut().set_gateway_mac(gateway_mac);  // ✅ Set MAC immediately!
+                                let dev_name = adapter_lock.name().to_string();
                                 drop(adapter_lock);
-                                info!("🎯 Gateway IP configured on translator: {}", gateway_ipv4);
+                                info!("🎯 Gateway configured on translator: IP={}, MAC={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                                    gateway_ipv4,
+                                    gateway_mac[0], gateway_mac[1], gateway_mac[2], gateway_mac[3], gateway_mac[4], gateway_mac[5]);
+                                
+                                // Auto-configure interface and routes (only once)
+                                if last_iface_config.is_none() {
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        if let Err(e) = configure_interface_auto(&dev_name, yiaddr, actual_gateway) {
+                                            warn!("⚠️ Failed to auto-configure interface: {}", e);
+                                        } else {
+                                            // Add routes for VPN networks
+                                            let routes = [
+                                                ("10.21.0.0", "255.255.255.0"),    // /24 network
+                                                ("10.10.0.0", "255.255.0.0"),      // /16 network
+                                            ];
+                                            if let Err(e) = configure_routes_auto(&dev_name, &routes) {
+                                                warn!("⚠️ Failed to auto-configure routes: {}", e);
+                                            }
+                                            last_iface_config = Some(Instant::now());
+                                            info!("🎉 Auto-configuration complete!");
+                                        }
+                                    }
+                                }
                                 
                                 if dns1[0] != 0 || dns1[1] != 0 || dns1[2] != 0 || dns1[3] != 0 {
                                     info!("🌐 DNS1: {}.{}.{}.{}", dns1[0], dns1[1], dns1[2], dns1[3]);
@@ -246,6 +456,34 @@ impl VpnClient {
                                 if dns2[0] != 0 || dns2[1] != 0 || dns2[2] != 0 || dns2[3] != 0 {
                                     info!("🌐 DNS2: {}.{}.{}.{}", dns2[0], dns2[1], dns2[2], dns2[3]);
                                 }
+                            }
+                        }
+                    }
+                    
+                    // Send periodic gratuitous ARP (every 10 seconds after IP configured)
+                    if state.our_ip.is_some() && last_gratuitous_arp.elapsed() >= Duration::from_secs(10) {
+                        let garp = build_gratuitous_arp(state.our_mac, state.our_ip.unwrap());
+                        info!("📡 Sending periodic Gratuitous ARP");
+                        if let Err(e) = adapter_to_dp_tx.send(garp) {
+                            warn!("Failed to send gratuitous ARP: {}", e);
+                        }
+                        last_gratuitous_arp = Instant::now();
+                    }
+                    
+                    // Send gateway ARP request if needed (retry every 3 seconds, max 5 attempts)
+                    if state.need_gateway_arp && state.gateway_mac.is_none() && gateway_arp_retry_count < 5 {
+                        if last_gateway_arp_request.elapsed() >= Duration::from_secs(3) {
+                            if let (Some(our_ip), Some(gateway_ip)) = (state.our_ip, state.gateway_ip) {
+                                let arp_req = build_gateway_arp_request(state.our_mac, our_ip, gateway_ip);
+                                gateway_arp_retry_count += 1;
+                                info!("📡 Sending Gateway ARP Request #{} for {}.{}.{}.{}", 
+                                    gateway_arp_retry_count,
+                                    gateway_ip[0], gateway_ip[1], gateway_ip[2], gateway_ip[3]
+                                );
+                                if let Err(e) = adapter_to_dp_tx.send(arp_req) {
+                                    warn!("Failed to send gateway ARP request: {}", e);
+                                }
+                                last_gateway_arp_request = Instant::now();
                             }
                         }
                     }
@@ -279,6 +517,7 @@ impl VpnClient {
 
             // Task 2: Read IP packets from utun, convert to Ethernet, send to VPN server
             let task2 = tokio::spawn(async move {
+                info!("🔄 Task2 (utun→VPN) started, reading IP packets from utun");
                 loop {
                     let mut adapter_lock = adapter1.lock().await;
                     match adapter_lock.read_ip_packet().await {
@@ -312,8 +551,17 @@ impl VpnClient {
                                         "Adapter bridge: converted to Ethernet frame, len={}",
                                         eth_frame.len()
                                     );
-                                    drop(adapter_lock); // Release lock before sending
+                                    
+                                    // Send the converted frame
                                     let _ = adapter_to_dp_tx_task2.send(eth_frame);
+                                    
+                                    // Check if there are queued ARP replies and send them
+                                    while let Some(arp_reply) = adapter_lock.translator_mut().pop_arp_reply() {
+                                        debug!("📤 Sending queued ARP reply, len={}", arp_reply.len());
+                                        let _ = adapter_to_dp_tx_task2.send(arp_reply);
+                                    }
+                                    
+                                    drop(adapter_lock); // Release lock
                                 }
                                 Err(e) => {
                                     warn!("Adapter bridge: failed to convert IP to Ethernet: {}", e);
@@ -321,6 +569,11 @@ impl VpnClient {
                             }
                         }
                         Ok(None) => {
+                            // Even if no IP packet, check for queued ARP replies
+                            while let Some(arp_reply) = adapter_lock.translator_mut().pop_arp_reply() {
+                                debug!("📤 Sending queued ARP reply (idle), len={}", arp_reply.len());
+                                let _ = adapter_to_dp_tx_task2.send(arp_reply);
+                            }
                             drop(adapter_lock);
                             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                         }
@@ -431,6 +684,15 @@ impl VpnClient {
                             warn!("Adapter bridge: failed to convert Ethernet to IP: {}", e);
                         }
                     }
+                    
+                    // ⚠️ CRITICAL FIX: Send any queued ARP replies back to VPN immediately!
+                    // This is essential for the gateway to learn our MAC address
+                    while let Some(arp_reply) = adapter_lock.translator_mut().pop_arp_reply() {
+                        debug!("📤 Sending queued ARP reply back to VPN, len={}", arp_reply.len());
+                        let _ = adapter_to_dp_tx_task3.send(arp_reply);
+                    }
+                    
+                    drop(adapter_lock);
                 }
             });
 

@@ -1,4 +1,5 @@
 use log::{debug, info, warn};
+use mayaqua::get_tick64;
 use native_tls::TlsStream;
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
@@ -36,6 +37,8 @@ pub struct DataPlane {
 
 struct Inner {
     half_connection: bool,
+    // Session state for updating last communication time
+    session_state: Arc<Mutex<crate::session::SessionState>>,
     // Session-facing channels
     #[allow(dead_code)]
     session_tx: mpsc::UnboundedSender<Vec<u8>>, // RX into session (currently unused)
@@ -92,11 +95,13 @@ impl DataPlane {
     /// Create a dataplane bound to the session's packet channels.
     /// Takes ownership of session.packet_rx (TX out of session) and clones session.packet_tx (RX into session).
     pub fn new(session: &mut Session, half_connection: bool) -> Option<Self> {
+        let session_state = session.state.clone();
         let session_tx = session.packet_tx.as_ref()?.clone();
-        let mut session_rx = session.packet_rx.take()?; // take ownership
+        let mut session_rx = session.packet_rx.take()?;
 
         let inner = Arc::new(Mutex::new(Inner {
             half_connection,
+            session_state,
             session_tx,
             adapter_rx_tx: None,
             tap_rx_tx: None,
@@ -352,6 +357,7 @@ impl DataPlane {
                             }
                         };
                         debug!("dataplane: RX keepalive sz={sz}");
+                        debug!("dataplane: RX keepalive sz={sz}");
                         if sz > 0 {
                             let mut tmp = vec![0u8; sz as usize];
                             if let Err(e) = guard.read_exact(&mut tmp) {
@@ -372,6 +378,15 @@ impl DataPlane {
                                 );
                                 debug_hexdump_budget -= 1;
                             }
+                        }
+                        // Release lock before updating session time
+                        drop(guard);
+                        // Update session last communication time on keepalive RX
+                        {
+                            let g = inner_for_rx.lock().unwrap();
+                            let mut state = g.session_state.lock().unwrap();
+                            state.last_comm_time = get_tick64();
+                            state.last_comm_time_for_dormant = state.last_comm_time;
                         }
                         // No frames in this iteration; continue
                         continue;
@@ -421,6 +436,13 @@ impl DataPlane {
                 // Optional: log interesting L2 types (e.g., DHCP) for diagnostics
                 if !frames.is_empty() {
                     debug!("📨 Link RX: received {} frame(s) from VPN server", frames.len());
+                    // Update session last communication time on data RX
+                    {
+                        let g = inner_for_rx.lock().unwrap();
+                        let mut state = g.session_state.lock().unwrap();
+                        state.last_comm_time = get_tick64();
+                        state.last_comm_time_for_dormant = state.last_comm_time;
+                    }
                 }
                 for f in &frames {
                     if f.len() >= 42 {
@@ -504,6 +526,12 @@ impl DataPlane {
                         debug!("✅ Link writer: successfully wrote {} bytes to TLS", len);
                         let mut g = inner_for_tx.lock().unwrap();
                         g.total_tx += len as u64;
+                        // Update session last communication time on data TX
+                        {
+                            let mut state = g.session_state.lock().unwrap();
+                            state.last_comm_time = get_tick64();
+                            state.last_comm_time_for_dormant = state.last_comm_time;
+                        }
                     }
                     Ok(Err(e)) => {
                         warn!("dataplane: TX write error: {e}");
@@ -519,6 +547,7 @@ impl DataPlane {
 
         // Keepalive task: periodically send a neutral keepalive on this link
         let tls_for_ka = tls_shared.clone();
+        let inner_for_ka = self.inner.clone();
         let ka_handle = tokio::spawn(async move {
             // Many implementations use a ~20s heartbeat when idle
             let mut ticker = interval(Duration::from_secs(20));
@@ -543,6 +572,13 @@ impl DataPlane {
                 match res {
                     Ok(Ok(())) => {
                         debug!("dataplane: keepalive TX sent successfully");
+                        // Update session last communication time on keepalive TX
+                        {
+                            let g = inner_for_ka.lock().unwrap();
+                            let mut state = g.session_state.lock().unwrap();
+                            state.last_comm_time = get_tick64();
+                            state.last_comm_time_for_dormant = state.last_comm_time;
+                        }
                     }
                     Ok(Err(e)) => {
                         debug!("dataplane: keepalive TX exit: {e}");
