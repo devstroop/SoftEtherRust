@@ -1,7 +1,5 @@
 use std::net::Ipv4Addr;
 
-use crate::dhcp::Lease as DhcpLease;
-
 /// Parsed network settings (assigned IP, DNS, policy flags) extracted from welcome/auth packs
 #[derive(Debug, Clone, Default)]
 pub struct NetworkSettings {
@@ -48,30 +46,7 @@ pub fn settings_json_with_kind(ns: Option<&NetworkSettings>, include_kind: bool)
     serde_json::to_string(&json).unwrap_or_else(|_| "{}".to_string())
 }
 
-/// Convert a DHCP lease into NetworkSettings (IP/mask/gateway/DNS)
-pub fn network_settings_from_lease(lease: &DhcpLease) -> NetworkSettings {
-    let ip = std::net::Ipv4Addr::new(
-        lease.yiaddr[0],
-        lease.yiaddr[1],
-        lease.yiaddr[2],
-        lease.yiaddr[3],
-    );
-    let mut ns = NetworkSettings {
-        assigned_ipv4: Some(ip),
-        ..Default::default()
-    };
-    if let Some(m) = lease.subnet {
-        ns.subnet_mask = Some(std::net::Ipv4Addr::new(m[0], m[1], m[2], m[3]));
-    }
-    if let Some(r) = lease.router {
-        ns.gateway = Some(std::net::Ipv4Addr::new(r[0], r[1], r[2], r[3]));
-    }
-    for d in &lease.dns {
-        ns.dns_servers
-            .push(std::net::Ipv4Addr::new(d[0], d[1], d[2], d[3]));
-    }
-    ns
-}
+
 
 /// Public-facing client state for embedders/FFI
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

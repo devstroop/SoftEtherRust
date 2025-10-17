@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use clap::Parser;
 use tracing::{error, info};
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use vpnclient::{shared_config, VpnClient, DEFAULT_CONFIG_FILE};
 
 #[derive(Parser)]
@@ -39,35 +39,47 @@ async fn main() -> Result<()> {
 
     // Initialize tracing with env overrides
     // Priority: RUST_LOG (standard), then RUST_LOG_LEVEL (custom, e.g., "debug"), then --verbose flag
+    // Timestamps: disabled by default, set RUST_LOG_TIME=1 to enable
     let fallback = if cli.verbose { "debug" } else { "info" };
     let default_level = std::env::var("RUST_LOG_LEVEL").unwrap_or_else(|_| fallback.to_string());
-    let env_filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new(default_level.clone()))
-        .unwrap_or_else(|_| EnvFilter::new(fallback));
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .or_else(|_| tracing_subscriber::EnvFilter::try_new(default_level.clone()))
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(fallback));
 
-    // Bridge log crate to tracing BEFORE initializing tracing_subscriber
-    // This must happen first to avoid "logger already initialized" errors
-    tracing_log::LogTracer::init()
-        .map_err(|e| anyhow::anyhow!("Failed to initialize log bridge: {}", e))?;
-    
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(fmt::layer().with_target(true).without_time())
-        .try_init()
-        .ok();
-    // Third-party style log gating can be enabled via RUST_LOG
+    // Check if timestamps should be enabled (disabled by default for clean logs)
+    // Set RUST_LOG_TIME=1 to enable timestamps
+    let enable_time = std::env::var("RUST_LOG_TIME")
+        .ok()
+        .and_then(|v| v.parse::<u8>().ok())
+        .unwrap_or(0)
+        != 0;
+
+    if enable_time {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt::layer().with_target(true))
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt::layer().with_target(true).without_time())
+            .init();
+    }
+
+    // Bridge log crate to tracing (ignore error if already initialized)
+    let _ = tracing_log::LogTracer::init();
 
     // Handle hash generation mode
     if cli.gen_hash {
         let username = cli.username.context("Username required for --gen-hash")?;
         let password = cli.password.context("Password required for --gen-hash")?;
-        
+
         // Generate password hash using SoftEther method (SHA-0 of password + uppercase username)
         let hash = cedar::ClientAuth::hash_password_with_username(&password, &username);
-        
+
         // Encode to base64 for storage
         let encoded_hash = base64::prelude::BASE64_STANDARD.encode(&hash);
-        
+
         println!("✓ Password hash generated successfully");
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         println!("Username: {}", username);
@@ -103,14 +115,14 @@ async fn connect(config_path: &str) -> Result<()> {
     // Parse shared ClientConfig (skip_tls_verify is controlled by config file)
     let cc: shared_config::ClientConfig = shared_config::io::load_json(config_path)
         .with_context(|| format!("Failed to load configuration from: {config_path}"))?;
-    
+
     // Show TLS verification status from config
     if cc.skip_tls_verify {
         info!("⚠️  TLS certificate verification is DISABLED (skip_tls_verify=true in config)");
     } else {
         info!("🔒 TLS certificate verification is ENABLED");
     }
-    
+
     let mut vpn_client = VpnClient::from_shared_config(cc)?;
     // Run like the classic vpnclient: connect and keep running until interrupted
     match vpn_client.run_until_interrupted().await {

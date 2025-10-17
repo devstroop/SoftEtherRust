@@ -145,14 +145,14 @@ impl MacOSUtun {
     pub async fn read_packet(&self) -> Result<Option<Vec<u8>>> {
         let fd = self.fd.as_raw_fd();
         task::spawn_blocking(move || {
-            // Poll with short timeout
+            // Poll with very short timeout (1ms) for low latency
             unsafe {
                 let mut fds = libc::pollfd {
                     fd,
                     events: libc::POLLIN,
                     revents: 0,
                 };
-                let rc = libc::poll(&mut fds as *mut libc::pollfd, 1, 100);
+                let rc = libc::poll(&mut fds as *mut libc::pollfd, 1, 1); // 1ms timeout
                 if rc < 0 {
                     return Err(anyhow::anyhow!(
                         "utun poll error: {}",
@@ -165,7 +165,8 @@ impl MacOSUtun {
 
             // Read from utun device
             let mut buffer = vec![0u8; 2048];
-            let n = unsafe { libc::read(fd, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len()) };
+            let n =
+                unsafe { libc::read(fd, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len()) };
 
             if n < 0 {
                 let err = std::io::Error::last_os_error();
@@ -214,7 +215,8 @@ impl MacOSUtun {
             packet.extend_from_slice(&af_family.to_be_bytes());
             packet.extend_from_slice(&payload);
 
-            let n = unsafe { libc::write(fd, packet.as_ptr() as *const libc::c_void, packet.len()) };
+            let n =
+                unsafe { libc::write(fd, packet.as_ptr() as *const libc::c_void, packet.len()) };
             if n < 0 {
                 return Err(anyhow::anyhow!(
                     "utun write error: {}",

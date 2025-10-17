@@ -33,9 +33,6 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
 use crate::config::{AuthConfig, VpnConfig};
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-use crate::dhcp::DhcpClient;
-use crate::dhcp::Lease as DhcpLease;
 use crate::network::SecureConnection;
 use crate::shared_config;
 #[cfg(feature = "adapter")]
@@ -108,8 +105,6 @@ pub struct VpnClient {
     event_tx: Option<mpsc::UnboundedSender<ClientEvent>>,
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-use crate::types::network_settings_from_lease;
 use crate::types::{mask_to_prefix, settings_json_with_kind};
 use crate::types::{ClientEvent, ClientState, EventLevel, NetworkSettings};
 
@@ -304,7 +299,10 @@ impl VpnClient {
         }
         self.config.host = new_host.clone();
         self.config.port = new_port;
-        debug!("🔧 Config updated: host={}, port={}", self.config.host, self.config.port);
+        debug!(
+            "🔧 Config updated: host={}, port={}",
+            self.config.host, self.config.port
+        );
         info!(
             "Redirecting to {}:{} (attempt {})",
             self.config.host, self.config.port, redirect_count
@@ -380,7 +378,9 @@ impl VpnClient {
         };
 
         // Use server-assigned session name if available, otherwise generate one
-        let session_name = self.server_session_name.clone()
+        let session_name = self
+            .server_session_name
+            .clone()
             .unwrap_or_else(|| format!("SoftEtherRustClient_{}", uuid::Uuid::new_v4()));
 
         let mut session = Session::new(
@@ -502,14 +502,7 @@ impl VpnClient {
             self.bridge_ready
         );
 
-        // Attempt DHCP over tunnel if adapter exists
-        if self.adapter.is_some() {
-            if let Err(e) = self.attempt_tunnel_dhcp().await {
-                warn!("Failed to obtain IP via tunnel DHCP: {}", e);
-            }
-        }
-
-        // Apply network settings (will use tunnel DHCP results if available)
+        // Apply network settings (will use bridge DHCP results if available)
         if let Err(e) = self.apply_network_settings().await {
             warn!("Failed to apply network settings: {}", e);
         }
@@ -521,121 +514,6 @@ impl VpnClient {
         info!("VPN connection established successfully");
 
         Ok(())
-    }
-
-    /// Attempt DHCP over tunnel for supported platforms
-    ///
-    /// Performs DHCP discovery and configuration over the encrypted VPN tunnel.
-    /// This allows the client to obtain IP configuration from the VPN server's DHCP server.
-    ///
-    /// Process Flow:
-    ///   1. Check if bridging is ready and server didn't provide IP
-    ///   2. Wait for dataplane links to be established
-    ///   3. Generate MAC address for DHCP requests
-    ///   4. Create DHCP client and attempt discovery
-    ///   5. Apply lease information if successful
-    ///   6. Cancel fallback DHCP if tunnel DHCP succeeds
-    ///
-    /// Platform Support:
-    ///   - macOS: Uses NDRV/BPF adapter with system DHCP fallback
-    ///   - iOS: Uses UTUN adapter for DHCP over tunnel
-    ///   - Other platforms: Skipped (use SecureNAT mode)
-    ///
-    /// DHCP Timing:
-    ///   - Uses configurable timeouts and retry intervals
-    ///   - Falls back to system DHCP after configured delay
-    ///   - Applies DNS servers from DHCP lease
-    ///
-    /// Returns:
-    ///   - Result<()>: Success or error during DHCP process
-    async fn attempt_tunnel_dhcp(&mut self) -> Result<()> {
-        #[cfg(target_os = "macos")]
-        {
-            if !self.bridge_ready {
-                return Ok(());
-            }
-
-            if let Some(ip) = self.network_settings.as_ref().and_then(|n| n.assigned_ipv4) {
-                if ip.is_private() {
-                    // Server already provided IP, skip tunnel DHCP
-                    return Ok(());
-                }
-            }
-
-            if let (Some(dp), Some(adp)) = (self.dataplane.clone(), self.adapter.as_ref()) {
-                let ifname = adp.name().to_string();
-
-                // Ensure dataplane has links
-                self.wait_for_dataplane_links(&dp).await;
-
-                // Generate MAC and attempt DHCP
-                let mac = self.generate_adapter_mac(&ifname);
-                let dhcp = DhcpClient::new(dp, mac);
-                debug!("Attempting DHCP over tunnel on {}", ifname);
-
-                // Set up fallback system DHCP
-                let fallback_handle = self.spawn_system_dhcp_fallback(&ifname);
-
-                // Attempt tunnel DHCP
-                if let Some(lease) = dhcp
-                    .run_once(&ifname, Duration::from_secs(30))
-                    .await
-                    .ok()
-                    .flatten()
-                {
-                    // Cancel fallback and apply lease
-                    if let Some(tx) = fallback_handle {
-                        let _ = tx.send(());
-                    }
-
-                    self.network_settings = Some(network_settings_from_lease(&lease));
-                    self.emit_settings_snapshot();
-                    self.apply_dhcp_dns(&lease, &ifname).await;
-                    return Ok(());
-                }
-            }
-        }
-
-        #[cfg(target_os = "ios")]
-        {
-            if let Some(ip) = self.network_settings.as_ref().and_then(|n| n.assigned_ipv4) {
-                if ip.is_private() {
-                    return Ok(());
-                }
-            }
-
-            if let Some(dp) = self.dataplane.clone() {
-                self.wait_for_dataplane_links(&dp).await;
-
-                let mut mac = [0u8; 6];
-                rand::rng().fill_bytes(&mut mac);
-                mac[0] = (mac[0] & 0b1111_1110) | 0b0000_0010;
-
-                let dhcp = DhcpClient::new(dp, mac);
-                debug!("Attempting DHCP over tunnel (iOS)");
-
-                if let Some(lease) = dhcp
-                    .run_once("utun", Duration::from_secs(30))
-                    .await
-                    .ok()
-                    .flatten()
-                {
-                    self.network_settings = Some(network_settings_from_lease(&lease));
-                    self.emit_settings_snapshot();
-                    return Ok(());
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Wait for dataplane to have active links
-    async fn wait_for_dataplane_links(&self, dp: &DataPlane) {
-        let start = std::time::Instant::now();
-        while dp.summary().total_links == 0 && start.elapsed() < Duration::from_secs(3) {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
     }
 
     /// Generate MAC address for adapter
@@ -670,98 +548,6 @@ impl VpnClient {
         ]);
         mac[0] = (mac[0] & 0b1111_1110) | 0b0000_0010; // locally administered, unicast
         mac
-    }
-
-    /// Spawn system DHCP fallback task
-    fn spawn_system_dhcp_fallback(
-        &mut self,
-        ifname: &str,
-    ) -> Option<tokio::sync::oneshot::Sender<()>> {
-        #[cfg(target_os = "macos")]
-        {
-            let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
-            let ifname_kick = ifname.to_string();
-            let kick_after = self.config.client.dhcp_fallback_after_ms;
-            let kick_timeout = self.config.client.dhcp_kick_timeout_ms;
-
-            let fallback = tokio::spawn(async move {
-                let delay = Duration::from_millis(kick_after);
-                let timed_out = tokio::time::timeout(delay, &mut cancel_rx).await.is_err();
-                if timed_out {
-                    crate::network_config::kick_dhcp_until_ip(
-                        &ifname_kick,
-                        Duration::from_millis(kick_timeout),
-                    )
-                    .await;
-                }
-            });
-
-            self.aux_tasks.push(fallback);
-            Some(cancel_tx)
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            None
-        }
-    }
-
-    /// Apply DNS settings from DHCP lease
-    async fn apply_dhcp_dns(&self, _lease: &DhcpLease, ifname: &str) {
-        #[cfg(target_os = "macos")]
-        if self.config.connection.apply_dns {
-            use tokio::process::Command;
-
-            if let Some(ref ns2) = self.network_settings {
-                if !ns2.dns_servers.is_empty() {
-                    let mut service_name: Option<String> =
-                        self.config.client.macos_dns_service_name.clone();
-                    if service_name.is_none() {
-                        // Try to detect service name
-                        let list = Command::new("bash")
-                            .arg("-c")
-                            .arg("networksetup -listnetworkserviceorder | sed -n 's/.*Device: (\\(.*\\)).*/\\1/p'")
-                            .output()
-                            .await
-                            .ok();
-                        if let Some(out) = list {
-                            let services = String::from_utf8_lossy(&out.stdout);
-                            if services.contains(ifname) {
-                                service_name = Some("Wi-Fi".to_string());
-                            }
-                        }
-                    }
-
-                    if let Some(svc) = service_name {
-                        let args = ns2
-                            .dns_servers
-                            .iter()
-                            .map(|d| d.to_string())
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        let cmd = format!(
-                            "networksetup -setdnsservers '{}' {}",
-                            svc.replace("'", "'\\''"),
-                            args
-                        );
-                        if let Ok(out) = Command::new("bash").arg("-c").arg(&cmd).output().await {
-                            if out.status.success() {
-                                debug!("Applied DNS servers to service '{}'", svc);
-                            } else {
-                                warn!(
-                                    "Failed to apply macOS DNS: {}",
-                                    String::from_utf8_lossy(&out.stderr)
-                                );
-                            }
-                        }
-                    } else {
-                        debug!(
-                            "(macOS) DNS servers suggested: {} (manual apply with: networksetup -setdnsservers <ServiceName> <servers> )",
-                            ns2.dns_servers.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ")
-                        );
-                    }
-                }
-            }
-        }
     }
 }
 

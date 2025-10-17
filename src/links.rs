@@ -101,7 +101,7 @@ impl VpnClient {
             if direction == 1 || direction == 2 {
                 debug!("Server split directions across connections (half-connected)");
             }
-            
+
             // CRITICAL: Check if server is actually ready to receive data
             // Try to read with a short timeout to see if server sends anything first
             debug!("🔍 Checking if server sends initial data on data link...");
@@ -118,10 +118,13 @@ impl VpnClient {
                     debug!("⚠️  No data from server yet (WouldBlock) - server may not be reading our packets");
                 }
                 Err(e) => {
-                    debug!("⚠️  Server peek error: {} - may indicate connection issue", e);
+                    debug!(
+                        "⚠️  Server peek error: {} - may indicate connection issue",
+                        e
+                    );
                 }
             }
-            
+
             // Hand off TLS stream to dataplane
             // DO NOT set timeout - dataplane RX task needs true blocking I/O
             // The socket was already configured for blocking mode in network.rs

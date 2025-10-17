@@ -5,7 +5,6 @@ mod adapter_bridge_packets;
 mod auth;
 pub mod config;
 pub mod connection;
-pub mod dhcp;
 pub mod io;
 pub mod links;
 pub mod network;

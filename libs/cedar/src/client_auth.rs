@@ -157,7 +157,7 @@ impl ClientAuth {
     pub fn hash_password_with_username(password: &str, username: &str) -> [u8; SHA1_SIZE] {
         mayaqua::crypto::softether_password_hash(password, username)
     }
-    
+
     /// Hash password using SoftEther method (SHA-0 of UTF-8 bytes only - legacy)
     /// NOTE: For proper SoftEther hashing, use hash_password_with_username instead
     fn hash_password(password: &str) -> [u8; SHA1_SIZE] {

@@ -89,20 +89,31 @@ impl SecureConnection {
         if sni_override.is_some() {
             debug!("TLS SNI set to '{}' (original host '{}')", sni_host, host);
         }
-        
+
         // CRITICAL: Configure socket for blocking I/O with no timeouts
         // The dataplane RX thread needs to block until data is available
-        tls_stream.get_ref()
+        tls_stream
+            .get_ref()
             .set_nonblocking(false)
             .context("Failed to set blocking mode")?;
-        tls_stream.get_ref()
+        tls_stream
+            .get_ref()
             .set_read_timeout(None)
             .context("Failed to clear read timeout")?;
-        tls_stream.get_ref()
+        tls_stream
+            .get_ref()
             .set_write_timeout(None)
             .context("Failed to clear write timeout")?;
-        debug!("Configured socket for blocking I/O (no timeouts)");
         
+        // CRITICAL: Disable Nagle's algorithm (TCP_NODELAY) for low-latency packet forwarding
+        // Without this, TCP buffers small packets causing massive ping delays (6-16 seconds)
+        // VPN traffic consists of many small packets (ICMP, DHCP, etc.) that must be sent immediately
+        tls_stream
+            .get_ref()
+            .set_nodelay(true)
+            .context("Failed to set TCP_NODELAY")?;
+        debug!("Configured socket for blocking I/O (no timeouts, TCP_NODELAY enabled)");
+
         // Log local address (ip:port) of the TCP socket for visibility
         if let Ok(sockaddr) = tls_stream.get_ref().local_addr() {
             if std::env::var("RUST_3RD_LOG").ok().as_deref() == Some("1") {

@@ -54,13 +54,13 @@ impl VirtualAdapter {
         } else {
             [0x5E, 0x00, 0x53, 0xFF, 0xFF, 0xFF] // SoftEther default
         };
-        
+
         let translator_opts = TranslatorOptions {
             our_mac,
             learn_ip: true,
             verbose: true,
         };
-        
+
         Self {
             name,
             mac_address,
@@ -70,12 +70,12 @@ impl VirtualAdapter {
             utun: None,
         }
     }
-    
+
     /// Get a reference to the L2/L3 translator
     pub fn translator(&self) -> &L2L3Translator {
         &self.translator
     }
-    
+
     /// Get a mutable reference to the L2/L3 translator
     pub fn translator_mut(&mut self) -> &mut L2L3Translator {
         &mut self.translator
@@ -215,12 +215,14 @@ impl VirtualAdapter {
     /// - `Err(...)` - I/O error
     #[cfg(target_os = "macos")]
     pub async fn read_ip_packet(&mut self) -> Result<Option<Vec<u8>>> {
-        let utun = self.utun.as_ref()
+        let utun = self
+            .utun
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("utun device not initialized"))?;
-        
+
         utun.read_packet().await
     }
-    
+
     /// Write an IP packet to the utun device (with L3→L2 translation)
     ///
     /// Writes an IP packet directly to the utun device. Since utun operates
@@ -230,9 +232,11 @@ impl VirtualAdapter {
     /// * `ip_packet` - Raw IP packet (IPv4 or IPv6)
     #[cfg(target_os = "macos")]
     pub async fn write_ip_packet(&mut self, ip_packet: &[u8]) -> Result<()> {
-        let utun = self.utun.as_ref()
+        let utun = self
+            .utun
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("utun device not initialized"))?;
-        
+
         utun.write_packet(ip_packet).await
     }
 }
@@ -247,14 +251,14 @@ impl VirtualAdapter {
         info!("Created utun device: {}", self.name);
         Ok(())
     }
-    
+
     /// Destroy macOS utun device
     async fn destroy_macos(&mut self) -> Result<()> {
         self.utun = None;
         self.is_created = false;
         Ok(())
     }
-    
+
     async fn set_ip_address_macos(&self, ip: &str, netmask: &str) -> Result<()> {
         let output = Command::new("ifconfig")
             .arg(&self.name)
@@ -480,12 +484,12 @@ fn parse_mac_address(mac_str: &str) -> Result<[u8; 6]> {
     if parts.len() != 6 {
         return Err(anyhow::anyhow!("Invalid MAC address format: {}", mac_str));
     }
-    
+
     let mut mac = [0u8; 6];
     for (i, part) in parts.iter().enumerate() {
         mac[i] = u8::from_str_radix(part, 16)
             .map_err(|e| anyhow::anyhow!("Invalid MAC address byte '{}': {}", part, e))?;
     }
-    
+
     Ok(mac)
 }
