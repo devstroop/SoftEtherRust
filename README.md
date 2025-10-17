@@ -6,7 +6,42 @@
 
 This is a comprehensive Rust implementation of the SoftEther VPN protocol, providing a fully compatible alternative to the original C implementation. The project implements the core protocol components with full binary compatibility and modern Rust safety guarantees.
 
-## 📱 Embedding in Apps (FFI)
+## � Quick Start
+
+### Generate Password Hash
+
+```bash
+cargo build --release
+./target/release/vpnclient --gen-hash --username YOUR_USERNAME --password YOUR_PASSWORD
+```
+
+### Create Configuration
+
+Create `config.json`:
+```json
+{
+  "server": "vpn.example.com",
+  "port": 443,
+  "hub": "VPN",
+  "username": "your_username",
+  "password_hash": "YOUR_GENERATED_HASH",
+  "use_compress": true,
+  "use_encrypt": true,
+  "max_connections": 1,
+  "skip_tls_verify": true,
+  "nat_traversal": false
+}
+```
+
+### Connect
+
+```bash
+sudo ./target/release/vpnclient -c config.json
+```
+
+📖 **See [CONFIGURATION.md](CONFIGURATION.md) for detailed configuration options and examples.**
+
+## �📱 Embedding in Apps (FFI)
 
 Looking to embed the Rust client into an iOS/Android/desktop app? Start here:
 

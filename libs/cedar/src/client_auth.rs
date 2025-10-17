@@ -78,8 +78,8 @@ impl ClientAuth {
             return Err(Error::InvalidParameter);
         }
 
-        // Hash the password using SHA1 (SoftEther format)
-        let hashed_password = Self::hash_password(password);
+        // Hash the password using SHA-0 with username (SoftEther format)
+        let hashed_password = Self::hash_password_with_username(password, username);
 
         Ok(Self {
             auth_type: AuthType::Password,
@@ -152,15 +152,16 @@ impl ClientAuth {
         })
     }
 
-    /// Hash password using SoftEther method (SHA1 of UTF-8 bytes)
+    /// Hash password using SoftEther method (SHA-0 of password + uppercase username)
+    /// This matches the original SoftEther VPN implementation
+    pub fn hash_password_with_username(password: &str, username: &str) -> [u8; SHA1_SIZE] {
+        mayaqua::crypto::softether_password_hash(password, username)
+    }
+    
+    /// Hash password using SoftEther method (SHA-0 of UTF-8 bytes only - legacy)
+    /// NOTE: For proper SoftEther hashing, use hash_password_with_username instead
     fn hash_password(password: &str) -> [u8; SHA1_SIZE] {
-        use sha1::{Digest, Sha1};
-        let mut hasher = Sha1::new();
-        hasher.update(password.as_bytes());
-        let result = hasher.finalize();
-        let mut hash = [0u8; SHA1_SIZE];
-        hash.copy_from_slice(&result[..SHA1_SIZE]);
-        hash
+        mayaqua::crypto::sha0(password.as_bytes())
     }
 
     /// Validate authentication data

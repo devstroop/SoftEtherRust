@@ -89,6 +89,17 @@ impl SecureConnection {
         if sni_override.is_some() {
             debug!("TLS SNI set to '{}' (original host '{}')", sni_host, host);
         }
+        
+        // CRITICAL: Remove read/write timeouts after connection is established
+        // The dataplane needs to continuously read without timing out
+        tls_stream.get_ref()
+            .set_read_timeout(None)
+            .context("Failed to clear read timeout")?;
+        tls_stream.get_ref()
+            .set_write_timeout(None)
+            .context("Failed to clear write timeout")?;
+        debug!("Cleared socket timeouts for continuous packet forwarding");
+        
         // Log local address (ip:port) of the TCP socket for visibility
         if let Ok(sockaddr) = tls_stream.get_ref().local_addr() {
             if std::env::var("RUST_3RD_LOG").ok().as_deref() == Some("1") {

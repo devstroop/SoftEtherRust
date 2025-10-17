@@ -24,34 +24,63 @@ pub enum DhcpResponse {
 /// Parse DHCP response from Ethernet frame
 /// Returns Some(DhcpResponse) if this is a DHCP OFFER or ACK
 pub fn parse_dhcp_response(eth_frame: &[u8]) -> Option<DhcpResponse> {
-    // Must be at least: Ethernet(14) + IPv4(20) + UDP(8) + BOOTP(236) + Magic(4) = 282 bytes
-    if eth_frame.len() < 282 {
+    // Must be at least: Ethernet(14) + IPv4 min(20) + UDP(8) + BOOTP min(236) + Magic(4) = 282 bytes
+    // BUT: IP header can have options, so we need to check IHL (Internet Header Length)
+    if eth_frame.len() < 14 + 20 {
+        trace!("🚫 DHCP parse: too short for Ethernet+IP (len={}, need ≥34)", eth_frame.len());
         return None;
     }
     
     // Check EtherType: 0x0800 (IPv4)
     if eth_frame[12] != 0x08 || eth_frame[13] != 0x00 {
+        trace!("🚫 DHCP parse: not IPv4 (ethertype={:02x}{:02x})", eth_frame[12], eth_frame[13]);
+        return None;
+    }
+    
+    // Get IP header length from IHL field (lower 4 bits of first byte, in 32-bit words)
+    let ip_header_start = 14;
+    let ihl = (eth_frame[ip_header_start] & 0x0f) as usize * 4; // IHL is in 32-bit words
+    debug!("🔍 IP header length (IHL): {} bytes", ihl);
+    
+    if ihl < 20 || ihl > 60 {
+        trace!("🚫 DHCP parse: invalid IHL={} (must be 20-60)", ihl);
         return None;
     }
     
     // Check IP protocol: 17 (UDP)
-    if eth_frame[23] != 17 {
+    let ip_proto_offset = ip_header_start + 9;
+    if eth_frame.len() <= ip_proto_offset || eth_frame[ip_proto_offset] != 17 {
+        trace!("🚫 DHCP parse: not UDP (protocol={:?})", eth_frame.get(ip_proto_offset));
         return None;
     }
     
     // Check UDP ports: src=67 (DHCP server), dst=68 (DHCP client)
-    let udp_offset = 14 + 20; // After Ethernet + IPv4 headers
+    let udp_offset = 14 + ihl; // After Ethernet + IPv4 headers (with variable length)
+    if eth_frame.len() < udp_offset + 8 {
+        trace!("🚫 DHCP parse: too short for UDP header (len={}, need ≥{})", eth_frame.len(), udp_offset + 8);
+        return None;
+    }
+    
     let src_port = u16::from_be_bytes([eth_frame[udp_offset], eth_frame[udp_offset + 1]]);
     let dst_port = u16::from_be_bytes([eth_frame[udp_offset + 2], eth_frame[udp_offset + 3]]);
     
     if src_port != 67 || dst_port != 68 {
+        trace!("🚫 DHCP parse: wrong ports (src={}, dst={}, expected 67→68)", src_port, dst_port);
         return None;
     }
     
-    // Parse BOOTP header
+    debug!("✅ DHCP packet detected: UDP 67→68, IHL={}, len={}", ihl, eth_frame.len());
+    
+    // Parse BOOTP header (minimum 236 bytes)
     let bootp_offset = udp_offset + 8;
+    if eth_frame.len() < bootp_offset + 236 {
+        debug!("🚫 DHCP parse: too short for BOOTP header (len={}, need ≥{})", eth_frame.len(), bootp_offset + 236);
+        return None;
+    }
+    
     let op = eth_frame[bootp_offset]; // Should be 2 (BOOTREPLY)
     if op != 2 {
+        debug!("🚫 DHCP parse: not BOOTREPLY (op={}, expected 2)", op);
         return None;
     }
     
@@ -62,13 +91,23 @@ pub fn parse_dhcp_response(eth_frame: &[u8]) -> Option<DhcpResponse> {
         eth_frame[bootp_offset + 18],
         eth_frame[bootp_offset + 19],
     ];
+    debug!("✅ BOOTP REPLY found, yiaddr={}.{}.{}.{}", yiaddr[0], yiaddr[1], yiaddr[2], yiaddr[3]);
     
     // Check DHCP magic cookie: 0x63825363
     let magic_offset = bootp_offset + 236;
-    if eth_frame[magic_offset] != 0x63 || eth_frame[magic_offset + 1] != 0x82 
-        || eth_frame[magic_offset + 2] != 0x53 || eth_frame[magic_offset + 3] != 0x63 {
+    if eth_frame.len() < magic_offset + 4 {
+        debug!("🚫 DHCP parse: too short for magic cookie (len={}, need ≥{})", eth_frame.len(), magic_offset + 4);
         return None;
     }
+    
+    if eth_frame[magic_offset] != 0x63 || eth_frame[magic_offset + 1] != 0x82 
+        || eth_frame[magic_offset + 2] != 0x53 || eth_frame[magic_offset + 3] != 0x63 {
+        debug!("🚫 DHCP parse: bad magic cookie ({:02x}{:02x}{:02x}{:02x})", 
+            eth_frame[magic_offset], eth_frame[magic_offset + 1], 
+            eth_frame[magic_offset + 2], eth_frame[magic_offset + 3]);
+        return None;
+    }
+    debug!("✅ DHCP magic cookie verified");
     
     // Parse DHCP options
     let mut msg_type: Option<u8> = None;
@@ -161,12 +200,16 @@ pub fn parse_dhcp_response(eth_frame: &[u8]) -> Option<DhcpResponse> {
     
     match msg_type {
         Some(2) => { // DHCP OFFER
+            info!("🎉 DHCP OFFER parsed! IP={}.{}.{}.{}, server={:?}", 
+                yiaddr[0], yiaddr[1], yiaddr[2], yiaddr[3], server_id);
             Some(DhcpResponse::Offer {
                 yiaddr,
                 server_id: server_id.unwrap_or([0, 0, 0, 0]),
             })
         }
         Some(5) => { // DHCP ACK
+            info!("🎉 DHCP ACK parsed! IP={}.{}.{}.{}, mask={:?}, router={:?}, dns1={:?}, dns2={:?}", 
+                yiaddr[0], yiaddr[1], yiaddr[2], yiaddr[3], mask, router, dns1, dns2);
             Some(DhcpResponse::Ack {
                 yiaddr,
                 mask: mask.unwrap_or([255, 255, 0, 0]),
@@ -175,7 +218,10 @@ pub fn parse_dhcp_response(eth_frame: &[u8]) -> Option<DhcpResponse> {
                 dns2: dns2.unwrap_or([0, 0, 0, 0]),
             })
         }
-        _ => None,
+        _ => {
+            debug!("🚫 DHCP parse: unsupported msg_type={:?} (expected 2=OFFER or 5=ACK)", msg_type);
+            None
+        }
     }
 }
 

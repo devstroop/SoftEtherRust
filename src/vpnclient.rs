@@ -99,6 +99,9 @@ pub struct VpnClient {
     pub(crate) bridge_ready: bool,
     // Prevent duplicate DHCP/monitor spawning across code paths
     pub(crate) dhcp_spawned: bool,
+    // Server mode: true = SecureNAT (L3 IP packets), false = Bridge/Routing (L2 Ethernet frames)
+    // Determined from policy flags: NoBridge=1 AND NoRouting=1 = SecureNAT
+    pub(crate) is_securenat_mode: bool,
     // Optional state notification channel for embedders/FFI
     state_tx: Option<mpsc::UnboundedSender<ClientState>>,
     // Optional event channel for embedders/FFI
@@ -216,6 +219,7 @@ impl VpnClient {
             server_timeout_ms: None,
             bridge_ready: false,
             dhcp_spawned: false,
+            is_securenat_mode: false, // Default to Bridge mode, will be updated after auth
             state_tx: None,
             event_tx: None,
         })

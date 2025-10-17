@@ -299,9 +299,45 @@ impl VpnClient {
                         eth_frame.len()
                     );
                     
+                    // Add hex dump for packets that might be DHCP (UDP port 67/68)
+                    if eth_frame.len() >= 42 {
+                        let ethertype = u16::from_be_bytes([eth_frame[12], eth_frame[13]]);
+                        if ethertype == 0x0800 { // IPv4
+                            // Get IP header length (IHL field in low 4 bits of first byte)
+                            if eth_frame.len() >= 15 {
+                                let ihl = (eth_frame[14] & 0x0F) as usize * 4;
+                                let ip_proto = eth_frame.get(14 + 9).copied();
+                                let udp_offset = 14 + ihl;
+                                
+                                if ip_proto == Some(17) && eth_frame.len() >= udp_offset + 4 { // UDP
+                                    let src_port = u16::from_be_bytes([eth_frame[udp_offset], eth_frame[udp_offset + 1]]);
+                                    let dst_port = u16::from_be_bytes([eth_frame[udp_offset + 2], eth_frame[udp_offset + 3]]);
+                                    if src_port == 67 || dst_port == 68 || src_port == 68 || dst_port == 67 {
+                                        info!("🔍 POTENTIAL DHCP PACKET (UDP {}→{}, IHL={}), len={}", src_port, dst_port, ihl, eth_frame.len());
+                                        // Hex dump first 128 bytes (or full packet if smaller)
+                                        let dump_len = eth_frame.len().min(128);
+                                        let hex: String = eth_frame[..dump_len]
+                                            .chunks(16)
+                                            .enumerate()
+                                            .map(|(i, chunk)| {
+                                                let hex_part: String = chunk.iter()
+                                                    .map(|b| format!("{:02x}", b))
+                                                    .collect::<Vec<_>>()
+                                                    .join(" ");
+                                                format!("  {:04x}: {}", i * 16, hex_part)
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
+                                        info!("📦 HEX DUMP (first {} bytes):\n{}", dump_len, hex);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
                     // Check if this is a DHCP response before processing
                     if let Some(dhcp_response) = crate::adapter_bridge_packets::parse_dhcp_response(&eth_frame) {
-                        trace!("📬 Parsed DHCP response, forwarding to packet generator");
+                        info!("✅ DHCP RESPONSE PARSED: {:?}", dhcp_response);
                         let _ = dhcp_response_tx.send(dhcp_response);
                         // Don't write DHCP responses to utun - they're handled internally
                         continue;

@@ -315,27 +315,19 @@ impl DataPlane {
         let inner_for_rx = self.inner.clone();
         let tls_for_rx = tls_shared.clone();
         let rx_handle = tokio::task::spawn_blocking(move || {
+            info!("🎯 Dataplane RX task started (link dir={direction:?})");
             // limit hexdump logs to avoid noise
             let mut debug_hexdump_budget: usize = 8;
             loop {
                 // Helper: read big-endian u32
                 let read_u32_be = |guard: &mut TlsStream<TcpStream>| -> std::io::Result<u32> {
                     let mut b = [0u8; 4];
-                    if let Err(e) = guard.read_exact(&mut b) {
-                        // Treat timeout / wouldblock as transient; sleep briefly and continue
-                        if e.kind() == std::io::ErrorKind::WouldBlock
-                            || e.kind() == std::io::ErrorKind::TimedOut
-                        {
-                            std::thread::sleep(std::time::Duration::from_millis(50));
-                            return Err(e);
-                        } else {
-                            return Err(e);
-                        }
-                    }
+                    guard.read_exact(&mut b)?;
                     Ok(u32::from_be_bytes(b))
                 };
                 // Parse message: either KEEP_ALIVE ([0xffffffff][len][bytes]) or data batch ([count][len][frame] * count)
                 let mut frames: Vec<Vec<u8>> = Vec::new();
+                debug!("📡 Dataplane RX: attempting to read first u32...");
                 {
                     let mut guard = tls_for_rx.lock().unwrap();
                     let first = match read_u32_be(&mut guard) {
@@ -441,16 +433,23 @@ impl DataPlane {
                     if f.len() >= 42 {
                         let ethertype = u16::from_be_bytes([f[12], f[13]]);
                         if ethertype == 0x0800 {
-                            // IPv4
-                            let ip_proto = f[23];
-                            if ip_proto == 17 {
-                                // UDP
-                                let src_port = u16::from_be_bytes([f[34], f[35]]);
-                                let dst_port = u16::from_be_bytes([f[36], f[37]]);
-                                if (src_port == 67 || src_port == 68)
-                                    || (dst_port == 67 || dst_port == 68)
-                                {
-                                    info!("📬 Link RX: DHCP packet received ({src_port} -> {dst_port}, {} bytes)", f.len());
+                            // IPv4 - check IHL for variable header length
+                            let ihl = (f[14] & 0x0f) as usize * 4;
+                            let ip_proto_offset = 14 + 9;
+                            if f.len() > ip_proto_offset {
+                                let ip_proto = f[ip_proto_offset];
+                                if ip_proto == 17 {
+                                    // UDP
+                                    let udp_offset = 14 + ihl;
+                                    if f.len() >= udp_offset + 4 {
+                                        let src_port = u16::from_be_bytes([f[udp_offset], f[udp_offset + 1]]);
+                                        let dst_port = u16::from_be_bytes([f[udp_offset + 2], f[udp_offset + 3]]);
+                                        if (src_port == 67 || src_port == 68)
+                                            || (dst_port == 67 || dst_port == 68)
+                                        {
+                                            info!("📬 Link RX: DHCP packet received ({src_port} -> {dst_port}, IHL={}, {} bytes)", ihl, f.len());
+                                        }
+                                    }
                                 }
                             }
                         }

@@ -346,6 +346,8 @@ impl VpnClient {
         if let Some(ref ns_inner) = self.network_settings {
             self.server_policy_max_connections =
                 super::policy::extract_policy_max_connections(ns_inner);
+            // Detect server mode based on policy flags
+            self.is_securenat_mode = super::policy::is_securenat_mode(ns_inner);
         }
         if let Ok(m) = welcome_pack
             .get_int("max_connection")
