@@ -13,18 +13,19 @@
 mod arp;
 mod translator;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 mod utun_macos;
 
 pub use translator::{L2L3Translator, TranslatorOptions, TranslatorStats};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub use utun_macos::MacOSUtun;
 
 use anyhow::Result;
+#[allow(unused_imports)]
 use log::{debug, info};
 
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "windows"))]
 use tokio::process::Command;
 
 /// Virtual network adapter for VPN connections
@@ -37,7 +38,7 @@ pub struct VirtualAdapter {
     mac_address: Option<String>,
     is_created: bool,
     translator: L2L3Translator,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     utun: Option<MacOSUtun>,
 }
 
@@ -66,7 +67,7 @@ impl VirtualAdapter {
             mac_address,
             is_created: false,
             translator: L2L3Translator::new(translator_opts),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
             utun: None,
         }
     }
@@ -88,7 +89,7 @@ impl VirtualAdapter {
     pub async fn create(&mut self) -> Result<()> {
         debug!("Creating virtual adapter: {}", self.name);
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             self.create_macos().await?;
         }
@@ -158,7 +159,7 @@ impl VirtualAdapter {
             anyhow::bail!("Adapter not created");
         }
         debug!("Setting IP address {}/{} on {}", ip, netmask, self.name);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             self.set_ip_address_macos(ip, netmask).await?;
         }
@@ -189,7 +190,7 @@ impl VirtualAdapter {
             "Adding route {} via {} on {}",
             destination, gateway, self.name
         );
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             self.add_route_macos(destination, gateway).await?;
         }
@@ -213,7 +214,7 @@ impl VirtualAdapter {
     /// - `Ok(Some(ip_packet))` - IP packet ready for processing
     /// - `Ok(None)` - No packet available
     /// - `Err(...)` - I/O error
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub async fn read_ip_packet(&mut self) -> Result<Option<Vec<u8>>> {
         let utun = self
             .utun
@@ -230,7 +231,7 @@ impl VirtualAdapter {
     ///
     /// # Arguments
     /// * `ip_packet` - Raw IP packet (IPv4 or IPv6)
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub async fn write_ip_packet(&mut self, ip_packet: &[u8]) -> Result<()> {
         let utun = self
             .utun
@@ -241,7 +242,7 @@ impl VirtualAdapter {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 impl VirtualAdapter {
     /// Create macOS utun device
     async fn create_macos(&mut self) -> Result<()> {

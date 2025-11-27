@@ -7,6 +7,7 @@ use adapter::VirtualAdapter;
 
 use super::VpnClient;
 use crate::adapter_bridge_packets::generate_next_packet;
+use crate::types::NetworkSettings;
 
 /// DHCP state machine (matches Zig implementation)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,16 +188,21 @@ impl VpnClient {
     ///   - mac_address: Optional MAC address for the virtual adapter
     ///
     /// Returns:
-    ///   - Result<()>: Success or error during adapter/bridge setup
+    ///   - Result<Option<tokio::sync::mpsc::UnboundedReceiver<NetworkSettings>>>: Success with optional DHCP settings receiver
     pub(crate) async fn start_adapter_and_bridge(
         &mut self,
         mac_address: Option<String>,
-    ) -> Result<()> {
+    ) -> Result<Option<tokio::sync::mpsc::UnboundedReceiver<NetworkSettings>>> {
+        // Channel to notify when DHCP configuration is complete
+        // Create outside the conditional so it's available for return
+        let dhcp_complete_rx: Option<tokio::sync::mpsc::UnboundedReceiver<NetworkSettings>>;
+        
         #[cfg(not(feature = "adapter"))]
         {
             // No adapter bridging when the adapter feature is disabled
             self.bridge_ready = false;
-            return Ok(());
+            dhcp_complete_rx = None;
+            return Ok(dhcp_complete_rx);
         }
 
         // Ensure adapter exists
@@ -211,13 +217,16 @@ impl VpnClient {
             }
 
             // Generate deterministic MAC address from interface name
-            let adapter_ref = self.adapter.as_ref().unwrap();
+            let adapter_ref = self.adapter.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Adapter not initialized"))?;
             let ifname = adapter_ref.name();
             let our_mac = self.generate_adapter_mac(ifname);
 
             // Move adapter into Arc<Mutex<>> for shared access across tasks
-            let adapter =
-                std::sync::Arc::new(tokio::sync::Mutex::new(self.adapter.take().unwrap()));
+            let adapter = std::sync::Arc::new(tokio::sync::Mutex::new(
+                self.adapter.take()
+                    .ok_or_else(|| anyhow::anyhow!("Adapter already consumed"))?
+            ));
             let adapter1 = adapter.clone();
             let adapter_for_arp = adapter.clone(); // Clone for ARP checking
             let adapter2 = adapter.clone();
@@ -228,18 +237,23 @@ impl VpnClient {
             let adapter_to_dp_tx_task3 = adapter_to_dp_tx.clone(); // Clone for task3 (ARP replies)
             self.dataplane
                 .as_ref()
-                .unwrap()
+                .ok_or_else(|| anyhow::anyhow!("Dataplane not initialized"))?
                 .set_adapter_tx(adapter_to_dp_rx);
 
             // Channel for dataplane -> adapter (Ethernet → IP)
             let (dp_to_adapter_tx, mut dp_to_adapter_rx) = tokio::sync::mpsc::unbounded_channel();
             self.dataplane
                 .as_ref()
-                .unwrap()
+                .ok_or_else(|| anyhow::anyhow!("Dataplane not initialized"))?
                 .set_adapter_rx(dp_to_adapter_tx);
 
             // Channel for DHCP responses (Task3 -> Task1)
             let (dhcp_response_tx, mut dhcp_response_rx) = tokio::sync::mpsc::unbounded_channel();
+            
+            // Channel to notify when DHCP configuration is complete
+            let (dhcp_complete_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            dhcp_complete_rx = Some(rx);
+            let dhcp_complete_tx_task1 = dhcp_complete_tx.clone();
 
             // Task 1: Proactive packet generator (DHCP, ARP, keep-alive)
             // This mimics Zig's MacOsTunGetNextPacket() behavior
@@ -365,8 +379,15 @@ impl VpnClient {
                     {
                         // Send ARP request every 1 second until gateway MAC learned
                         if state.last_dhcp_send.elapsed() > Duration::from_secs(1) {
-                            let gateway_ip = state.gateway_ip.unwrap();
-                            let our_ip_arr = state.our_ip.unwrap();
+                            // Safe unwrap: checked .is_some() above
+                            let gateway_ip = match state.gateway_ip {
+                                Some(ip) => ip,
+                                None => continue, // Defensive: skip if None
+                            };
+                            let our_ip_arr = match state.our_ip {
+                                Some(ip) => ip,
+                                None => continue, // Defensive: skip if None
+                            };
                             let our_ip = std::net::Ipv4Addr::new(
                                 our_ip_arr[0],
                                 our_ip_arr[1],
@@ -472,7 +493,8 @@ impl VpnClient {
                                 let actual_gateway = if router == [0, 0, 0, 0]
                                     && state.dhcp_server_ip.is_some()
                                 {
-                                    let server_ip = state.dhcp_server_ip.unwrap();
+                                    // Safe unwrap: checked .is_some() above
+                                    let server_ip = state.dhcp_server_ip.expect("DHCP server IP should be Some");
                                     info!("🔧 Router option is 0.0.0.0, using DHCP server as gateway: {}.{}.{}.{}", 
                                         server_ip[0], server_ip[1], server_ip[2], server_ip[3]);
                                     server_ip
@@ -556,6 +578,27 @@ impl VpnClient {
                                         dns2[0], dns2[1], dns2[2], dns2[3]
                                     );
                                 }
+
+                                // Notify that DHCP configuration is complete
+                                let settings = NetworkSettings {
+                                    assigned_ipv4: Some(std::net::Ipv4Addr::new(yiaddr[0], yiaddr[1], yiaddr[2], yiaddr[3])),
+                                    subnet_mask: Some(std::net::Ipv4Addr::new(mask[0], mask[1], mask[2], mask[3])),
+                                    gateway: Some(std::net::Ipv4Addr::new(actual_gateway[0], actual_gateway[1], actual_gateway[2], actual_gateway[3])),
+                                    dns_servers: {
+                                        let mut dns_list = Vec::new();
+                                        if dns1[0] != 0 || dns1[1] != 0 || dns1[2] != 0 || dns1[3] != 0 {
+                                            dns_list.push(std::net::Ipv4Addr::new(dns1[0], dns1[1], dns1[2], dns1[3]));
+                                        }
+                                        if dns2[0] != 0 || dns2[1] != 0 || dns2[2] != 0 || dns2[3] != 0 {
+                                            dns_list.push(std::net::Ipv4Addr::new(dns2[0], dns2[1], dns2[2], dns2[3]));
+                                        }
+                                        dns_list
+                                    },
+                                    policies: Vec::new(),
+                                    ports: Vec::new(),
+                                };
+                                info!("📢 DHCP complete, notifying caller: {:?}", settings);
+                                let _ = dhcp_complete_tx_task1.send(settings);
                             }
                         }
                     }
@@ -564,7 +607,15 @@ impl VpnClient {
                     if state.our_ip.is_some()
                         && last_gratuitous_arp.elapsed() >= Duration::from_secs(10)
                     {
-                        let garp = build_gratuitous_arp(state.our_mac, state.our_ip.unwrap());
+                        // Skip GARP if we don't have an IP yet
+                        let our_ip = match state.our_ip {
+                            Some(ip) => ip,
+                            None => {
+                                warn!("Cannot send GARP: our_ip is None");
+                                continue;
+                            }
+                        };
+                        let garp = build_gratuitous_arp(state.our_mac, our_ip);
                         info!("📡 Sending periodic Gratuitous ARP");
                         if let Err(e) = adapter_to_dp_tx.send(garp) {
                             warn!("Failed to send gratuitous ARP: {}", e);
@@ -892,6 +943,6 @@ impl VpnClient {
             self.bridge_ready = true;
         }
 
-        Ok(())
+        Ok(dhcp_complete_rx)
     }
 }

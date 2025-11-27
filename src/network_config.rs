@@ -427,7 +427,8 @@ impl VpnClient {
             debug!("Bridge owns adapter, skipping adapter-based network config");
             return Ok(());
         } else {
-            self.adapter.as_ref().unwrap()
+            self.adapter.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Adapter not initialized"))?
         };
 
         let ip = match ns.assigned_ipv4 {

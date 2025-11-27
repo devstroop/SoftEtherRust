@@ -3,6 +3,8 @@ members = [
     "libs/mayaqua",
     "libs/cedar",
     "libs/adapter",
+    "libs/virtual_tap_rust",
+    "softether_ffi",
 ]
 resolver = "2"
 

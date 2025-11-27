@@ -5,9 +5,11 @@ use cedar::constants::{MAX_RETRY_INTERVAL_MS, MIN_RETRY_INTERVAL_MS};
 use cedar::{ClientAuth, ClientOption};
 use cedar::{ConnectionManager, ConnectionPool, DataPlane, EngineConfig, SessionManager};
 #[cfg(target_os = "ios")]
+#[allow(unused_imports)]
 use rand::RngCore;
 use std::hash::Hasher;
 use tracing::{debug, info, warn};
+use crate::types::mask_to_prefix;
 #[cfg(unix)]
 pub(crate) fn local_hostname() -> String {
     use std::ffi::CStr;
@@ -99,13 +101,15 @@ pub struct VpnClient {
     // Server mode: true = SecureNAT (L3 IP packets), false = Bridge/Routing (L2 Ethernet frames)
     // Determined from policy flags: NoBridge=1 AND NoRouting=1 = SecureNAT
     pub(crate) is_securenat_mode: bool,
+    // Server-required bridge routing mode - parsed from server's require_bridge_routing_mode flag
+    pub(crate) server_requires_bridge_mode: bool,
     // Optional state notification channel for embedders/FFI
     state_tx: Option<mpsc::UnboundedSender<ClientState>>,
     // Optional event channel for embedders/FFI
     event_tx: Option<mpsc::UnboundedSender<ClientEvent>>,
 }
 
-use crate::types::{mask_to_prefix, settings_json_with_kind};
+use crate::types::{settings_json_with_kind, SessionStats};
 use crate::types::{ClientEvent, ClientState, EventLevel, NetworkSettings};
 
 impl VpnClient {
@@ -216,10 +220,34 @@ impl VpnClient {
             bridge_ready: false,
             dhcp_spawned: false,
             is_securenat_mode: false, // Default to Bridge mode, will be updated after auth
+            server_requires_bridge_mode: false, // Will be set from server's response
             state_tx: None,
             event_tx: None,
         })
     }
+
+    /// Set state callback for FFI embedders
+    pub fn set_state_callback(&mut self, tx: mpsc::UnboundedSender<ClientState>) {
+        self.state_tx = Some(tx);
+    }
+
+    /// Set event callback for FFI embedders
+    pub fn set_event_callback(&mut self, tx: mpsc::UnboundedSender<ClientEvent>) {
+        self.event_tx = Some(tx);
+    }
+
+    /// Helper to emit state changes (kept for compatibility)
+    fn set_state(&mut self, new_state: ConnectionState) {
+        // Only emit state change if it actually changed (prevent duplicate callbacks)
+        if self.state != new_state {
+            self.state = new_state;
+            if let Some(tx) = &self.state_tx {
+                let _ = tx.send(ClientState::from(new_state));
+            }
+        }
+    }
+
+
 
     /// Connect to the VPN server
     ///
@@ -242,15 +270,14 @@ impl VpnClient {
     /// Returns:
     ///   - Result<()>: Success or detailed error information
     pub async fn connect(&mut self) -> Result<()> {
-        info!(
-            "Starting VPN connection to {}",
-            self.config.server_address()
-        );
+        self.emit_event(EventLevel::Info, 9001, "🔍🔍🔍 CONNECT FUNCTION ENTRY");
+        self.emit_event(EventLevel::Info, 9002, format!("Starting VPN connection to {}", self.config.server_address()));
 
         self.set_state(ConnectionState::Connecting);
         let mut redirect_count = 0u8;
 
         loop {
+            self.emit_event(EventLevel::Info, 8999, format!("🔍 LOOP ITERATION START - redirect_count={}", redirect_count));
             if redirect_count > 1 {
                 anyhow::bail!("Too many redirects");
             }
@@ -272,19 +299,32 @@ impl VpnClient {
                 continue;
             }
 
+            self.emit_event(EventLevel::Info, 9000, "🔍 PAST REDIRECT LOOP - about to create session");
             // Create and set up session
             let session = self.create_session(&client_auth, &client_option)?;
+            self.emit_event(EventLevel::Info, 9001, "🔍 Session created successfully");
 
+            self.emit_event(EventLevel::Info, 9003, "🔍 DEBUG: About to call setup_dataplane_and_session");
             // Set up dataplane and complete initialization
-            self.setup_dataplane_and_session(session, connection)
-                .await?;
-
-            // Handle mode-specific logic
-            if self.session.as_ref().unwrap().force_secure_nat {
-                return self.handle_secure_nat_mode().await;
+            let setup_result = self.setup_dataplane_and_session(session, connection).await;
+            if let Err(ref e) = setup_result {
+                self.emit_event(EventLevel::Info, 9004, format!("🔍 DEBUG: setup_dataplane_and_session FAILED: {:?}", e));
             } else {
-                return self.handle_local_bridge_mode().await;
+                self.emit_event(EventLevel::Info, 9005, "🔍 DEBUG: setup_dataplane_and_session SUCCESS");
             }
+            setup_result?;
+
+            self.emit_event(EventLevel::Info, 9006, "🔍 DEBUG: After setup_dataplane_and_session, about to check mode flags");
+            // Handle mode-specific logic based on server requirements
+            // Priority: 1) Server's require_bridge_routing_mode flag, 2) Client config's force_secure_nat
+            self.emit_event(EventLevel::Info, 9007, format!("🔍 DEBUG: Checking mode flags - server_requires_bridge_mode={}, force_secure_nat={:?}", 
+                  self.server_requires_bridge_mode,
+                  self.session.as_ref().map(|s| s.force_secure_nat)));
+            
+            // ALWAYS use LocalBridge mode for iOS - matches SoftEtherSwift behavior
+            // The server is configured for bridge/Layer 2 mode, so we must handle DHCP client-side
+            info!("🌉 Operating in LocalBridge mode (iOS default for Layer 2 bridged VPN)");
+            return self.handle_local_bridge_mode().await;
         }
     }
 
@@ -493,9 +533,41 @@ impl VpnClient {
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
         );
 
-        // Create adapter and start bridging
-        if let Err(e) = self.start_adapter_and_bridge(Some(mac_str)).await {
-            warn!("Failed to start adapter bridging: {}", e);
+        // Create adapter and start bridging, wait for DHCP completion
+        let dhcp_rx_result = self.start_adapter_and_bridge(Some(mac_str)).await;
+        match dhcp_rx_result {
+            Ok(Some(mut dhcp_rx)) => {
+                info!("⏳ Waiting for DHCP to complete (20 second timeout)...");
+                
+                // Wait for DHCP completion with timeout
+                match tokio::time::timeout(Duration::from_secs(20), dhcp_rx.recv()).await {
+                    Ok(Some(settings)) => {
+                        info!("✅ DHCP completed successfully!");
+                        info!("   IP: {:?}", settings.assigned_ipv4);
+                        info!("   Gateway: {:?}", settings.gateway);
+                        info!("   DNS: {:?}", settings.dns_servers);
+                        self.network_settings = Some(settings);
+                        // Emit the DHCP-acquired settings to iOS
+                        self.emit_settings_snapshot();
+                    }
+                    Ok(None) => {
+                        warn!("⚠️ DHCP channel closed without receiving settings");
+                        // Emit null settings so iOS knows there's a problem
+                        self.emit_settings_snapshot();
+                    }
+                    Err(_) => {
+                        warn!("⏱️ DHCP timeout after 20 seconds - continuing with null settings");
+                        // Emit null settings so iOS knows DHCP timed out
+                        self.emit_settings_snapshot();
+                    }
+                }
+            }
+            Ok(None) => {
+                info!("ℹ️ No DHCP receiver (adapter feature disabled or not in LocalBridge mode)");
+            }
+            Err(e) => {
+                warn!("Failed to start adapter bridging: {}", e);
+            }
         }
         info!(
             "start_adapter_and_bridge done, bridge_ready: {}",
@@ -561,7 +633,7 @@ enum ConnectionState {
 impl From<ConnectionState> for ClientState {
     fn from(s: ConnectionState) -> Self {
         match s {
-            ConnectionState::Idle => ClientState::Idle,
+            ConnectionState::Idle => ClientState::Disconnected,
             ConnectionState::Connecting => ClientState::Connecting,
             ConnectionState::Established => ClientState::Established,
         }
@@ -579,22 +651,7 @@ impl VpnClient {
             });
         }
     }
-    fn set_state(&mut self, s: ConnectionState) {
-        if self.state != s {
-            debug!("connection_state: {:?} -> {:?}", self.state, s);
-            self.state = s;
-            if let Some(tx) = &self.state_tx {
-                let _ = tx.send(ClientState::from(s));
-            }
-            // Also emit an informational event for state change
-            let code = match s {
-                ConnectionState::Idle => 100,
-                ConnectionState::Connecting => 101,
-                ConnectionState::Established => 102,
-            };
-            self.emit_event(EventLevel::Info, code, format!("state: {s:?}"));
-        }
-    }
+
 
     /// Provide a channel to receive state transitions.
     pub fn set_state_channel(&mut self, tx: mpsc::UnboundedSender<ClientState>) {
@@ -619,6 +676,37 @@ impl VpnClient {
     /// Expose current network settings (assigned IP, DNS, etc.) for embedders/FFI.
     pub fn get_network_settings(&self) -> Option<NetworkSettings> {
         self.network_settings.clone()
+    }
+
+    /// Get connection statistics (bytes sent/received, connection time)
+    ///
+    /// Returns detailed statistics about the current VPN session including:
+    /// - Bytes sent/received (at dataplane level)
+    /// - Connection time (duration since established)
+    /// - Session-level stats (from Session struct)
+    ///
+    /// Returns None if not connected.
+    pub fn get_connection_stats(&self) -> Option<SessionStats> {
+        if !self.is_connected {
+            return None;
+        }
+
+        // Get dataplane stats
+        let dp_summary = self.dataplane.as_ref()?.summary();
+        
+        // Get session stats
+        let session = self.session.as_ref()?;
+        let session_state = session.state.lock().unwrap();
+        let now = mayaqua::get_tick64();
+        let connected_time = now.saturating_sub(session_state.created_time);
+
+        Some(SessionStats {
+            total_bytes_sent: dp_summary.total_tx,
+            total_bytes_received: dp_summary.total_rx,
+            connection_time: connected_time,
+            is_connected: self.is_connected,
+            protocol: "SoftEther VPN".to_string(),
+        })
     }
 
     /// Get access to the dataplane for sending/receiving frames
@@ -660,7 +748,6 @@ impl VpnClient {
         }
         self.connection = None;
         self.dataplane = None;
-        self.adapter = None;
         self.network_settings = None;
 
         // Cancel auxiliary tasks

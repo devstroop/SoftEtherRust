@@ -27,7 +27,7 @@ for ((i=1; i<=$#; i++)); do
 done
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
-HEADER="$ROOT_DIR/crates/ffi/include/softether_ffi.h"
+HEADER="$ROOT_DIR/softether_ffi/softether_ffi.h"
 OUT_DIR="$ROOT_DIR/target/xcframework"
 mkdir -p "$OUT_DIR"
 

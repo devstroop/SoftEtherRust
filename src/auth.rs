@@ -150,10 +150,25 @@ impl VpnClient {
             p.add_int("use_encrypt", client_option.use_encrypt as u32)?;
             p.add_int("use_compress", client_option.use_compress as u32)?;
             p.add_int("half_connection", client_option.half_connection as u32)?;
-            // 10. Unique ID
+            // 10. Bridge/routing mode flags - CRITICAL FOR MODE DETECTION!
+            p.add_bool("require_bridge_routing_mode", client_option.require_bridge_routing_mode)?;
+            p.add_bool("require_monitor_mode", client_option.require_monitor_mode)?;
+            // 11. QoS flag
+            p.add_bool("qos", !client_option.disable_qos)?;
+            // 12. Bulk transfer support flags
+            p.add_bool("support_bulk_on_rudp", true)?;
+            p.add_bool("support_hmac_on_bulk_of_rudp", true)?;
+            // 13. UDP recovery support
+            p.add_bool("support_udp_recovery", true)?;
+            // 14. Unique ID
             let mut unique = [0u8; 20];
             rand::rng().fill_bytes(&mut unique);
             p.add_data("unique_id", unique.to_vec())?;
+            // 15. UDP acceleration fields (if enabled)
+            // TODO: Add UDP acceleration support when UdpAccel is implemented
+            // For now, we don't add use_udp_acceleration=true
+            // 16. RUDP bulk max version
+            p.add_int("rudp_bulk_max_version", 2)?;
             p
         } else if matches!(client_auth.auth_type, AuthType::Ticket) {
             use cedar::constants::CEDAR_SIGNATURE_STR;
@@ -185,10 +200,25 @@ impl VpnClient {
             p.add_int("use_encrypt", client_option.use_encrypt as u32)?;
             p.add_int("use_compress", client_option.use_compress as u32)?;
             p.add_int("half_connection", client_option.half_connection as u32)?;
-            // 10. Unique ID
+            // 10. Bridge/routing mode flags - CRITICAL FOR MODE DETECTION!
+            p.add_bool("require_bridge_routing_mode", client_option.require_bridge_routing_mode)?;
+            p.add_bool("require_monitor_mode", client_option.require_monitor_mode)?;
+            // 11. QoS flag
+            p.add_bool("qos", !client_option.disable_qos)?;
+            // 12. Bulk transfer support flags
+            p.add_bool("support_bulk_on_rudp", true)?;
+            p.add_bool("support_hmac_on_bulk_of_rudp", true)?;
+            // 13. UDP recovery support
+            p.add_bool("support_udp_recovery", true)?;
+            // 14. Unique ID
             let mut unique = [0u8; 20];
             rand::rng().fill_bytes(&mut unique);
             p.add_data("unique_id", unique.to_vec())?;
+            // 15. UDP acceleration fields (if enabled)
+            // TODO: Add UDP acceleration support when UdpAccel is implemented
+            // For now, we don't add use_udp_acceleration=true
+            // 16. RUDP bulk max version
+            p.add_int("rudp_bulk_max_version", 2)?;
             p
         } else {
             cedar::handshake::build_login_pack(client_option, client_auth)
@@ -247,7 +277,8 @@ impl VpnClient {
             }
         }
 
-        // Redirects
+        // Redirects - CHECK THESE FIRST BEFORE PARSING NETWORK SETTINGS
+        // If redirecting, we should NOT emit network settings events
         if let Ok(redirect_host) = welcome_pack
             .get_str("RedirectHost")
             .or_else(|_| welcome_pack.get_str("redirect_host"))
@@ -319,6 +350,7 @@ impl VpnClient {
             }
         }
 
+        // ✅ Only parse and emit network settings if NOT redirecting
         // Session info lines - capture server-assigned session name
         let server_session_name = welcome_pack
             .get_str("SessionName")
@@ -372,13 +404,32 @@ impl VpnClient {
             }
         }
         self.network_settings = ns;
-        self.emit_settings_snapshot();
+        // NOTE: Don't emit settings here - they may be null if bridge mode is required
+        // Settings will be emitted after DHCP completes in handle_local_bridge_mode()
+        // or after initial connection in other modes
         if let Some(ref ns_inner) = self.network_settings {
             self.server_policy_max_connections =
                 super::policy::extract_policy_max_connections(ns_inner);
             // Detect server mode based on policy flags
             self.is_securenat_mode = super::policy::is_securenat_mode(ns_inner);
         }
+        
+        // Parse server's mode requirements from welcome_pack
+        match welcome_pack.get_bool("require_bridge_routing_mode") {
+            Ok(require_bridge) => {
+                self.server_requires_bridge_mode = require_bridge;
+                info!("🌉 Server requires bridge routing mode: {}", require_bridge);
+            }
+            Err(e) => {
+                warn!("❌ Failed to get require_bridge_routing_mode from welcome_pack: {:?}", e);
+                info!("📋 Dumping welcome_pack contents for debugging...");
+                info!("{}", welcome_pack.debug_dump());
+            }
+        }
+        if let Ok(require_monitor) = welcome_pack.get_bool("require_monitor_mode") {
+            info!("🔍 Server requires monitor mode: {}", require_monitor);
+        }
+        
         if let Ok(m) = welcome_pack
             .get_int("max_connection")
             .or_else(|_| welcome_pack.get_int("MaxConnection"))

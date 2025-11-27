@@ -1,7 +1,8 @@
 use std::net::Ipv4Addr;
+use serde::{Deserialize, Serialize};
 
 /// Parsed network settings (assigned IP, DNS, policy flags) extracted from welcome/auth packs
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkSettings {
     pub assigned_ipv4: Option<Ipv4Addr>,
     pub dns_servers: Vec<Ipv4Addr>,
@@ -48,13 +49,31 @@ pub fn settings_json_with_kind(ns: Option<&NetworkSettings>, include_kind: bool)
 
 
 
-/// Public-facing client state for embedders/FFI
+/// Internal connection state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClientState {
+pub enum ConnectionState {
     Idle = 0,
     Connecting = 1,
     Established = 2,
+}
+
+/// Public-facing client state for embedders/FFI
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientState {
+    Disconnected = 0,
+    Connecting = 1,
+    Established = 2,
     Disconnecting = 3,
+}
+
+impl From<ConnectionState> for ClientState {
+    fn from(state: ConnectionState) -> Self {
+        match state {
+            ConnectionState::Idle => ClientState::Disconnected,
+            ConnectionState::Connecting => ClientState::Connecting,
+            ConnectionState::Established => ClientState::Established,
+        }
+    }
 }
 
 /// Event level for embedders
