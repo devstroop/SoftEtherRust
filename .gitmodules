@@ -1,6 +1,7 @@
-[submodule "dhcproto"]
-	path = libs/dhcproto
-	url = https://github.com/devstroop/dhcproto.git
-[submodule "tun-rs"]
-	path = libs/tun-rs
-	url = https://github.com/devstroop/tun-rs.git
+[submodule "native-tls"]
+	path = libs/native-tls
+	url = https://github.com/SoftEtherUnofficial/rust-native-tls.git
+	branch = dev
+[submodule "libs/rustls"]
+	path = libs/rustls
+	url = https://github.com/SoftEtherUnofficial/rustls
