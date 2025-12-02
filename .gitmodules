@@ -1,7 +1,3 @@
-[submodule "native-tls"]
-	path = libs/native-tls
-	url = https://github.com/SoftEtherUnofficial/rust-native-tls.git
-	branch = dev
 [submodule "libs/rustls"]
 	path = libs/rustls
 	url = https://github.com/SoftEtherUnofficial/rustls
