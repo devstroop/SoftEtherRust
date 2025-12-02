@@ -45,7 +45,7 @@ impl Default for Lease {
 }
 
 pub struct DhcpClient {
-    dp: DataPlane,
+    l2_inject_tx: mpsc::UnboundedSender<Vec<u8>>,  // L2 injection channel for sending Ethernet frames
     mac: [u8; 6],
     xid: u32,
     rx: mpsc::UnboundedReceiver<Vec<u8>>,
@@ -55,20 +55,20 @@ pub struct DhcpClient {
 }
 
 impl DhcpClient {
-    pub fn new(dp: DataPlane, mac: [u8; 6]) -> Self {
+    pub fn new(dp: DataPlane, mac: [u8; 6], l2_inject_tx: mpsc::UnboundedSender<Vec<u8>>) -> Self {
         use rand::RngCore;
         let mut xb = [0u8; 4];
         rand::rng().fill_bytes(&mut xb);
         let xid = u32::from_be_bytes(xb);
         let (tx, rx) = mpsc::unbounded_channel();
     dp.set_rx_tap(tx); // global tap (one-shot usage acceptable)
-    Self { dp, mac, xid, rx, server_mac: None, server_ip_observed: None }
+    Self { l2_inject_tx, mac, xid, rx, server_mac: None, server_ip_observed: None }
     }
 
-    pub fn new_with_xid(dp: DataPlane, mac: [u8;6], xid: u32) -> Self {
+    pub fn new_with_xid(dp: DataPlane, mac: [u8;6], xid: u32, l2_inject_tx: mpsc::UnboundedSender<Vec<u8>>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
     dp.set_rx_tap(tx);
-    Self { dp, mac, xid, rx, server_mac: None, server_ip_observed: None }
+    Self { l2_inject_tx, mac, xid, rx, server_mac: None, server_ip_observed: None }
     }
 
     pub fn xid(&self) -> u32 { self.xid }
@@ -168,37 +168,27 @@ impl DhcpClient {
     }
 
     fn build_discover(&self) -> Result<Vec<u8>> {
-        let mut msg = v4::Message::new_with_id(self.xid, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, &self.mac);
-        msg.set_opcode(v4::Opcode::BootRequest);
-        msg.set_htype(v4::HType::Eth);
-        msg.set_flags(v4::Flags::default().set_broadcast());
-        msg.opts_mut().insert(v4::DhcpOption::MessageType(v4::MessageType::Discover));
-        msg.opts_mut().insert(v4::DhcpOption::ParameterRequestList(vec![
-            v4::OptionCode::SubnetMask,
-            v4::OptionCode::Router,
-            v4::OptionCode::DomainNameServer,
-            v4::OptionCode::AddressLeaseTime,
-            v4::OptionCode::DomainName,
-            v4::OptionCode::InterfaceMtu,
-            v4::OptionCode::BroadcastAddr,
-            v4::OptionCode::ClasslessStaticRoute,
-        ]));
-    self.wrap_dhcp(&msg, Ipv4Addr::UNSPECIFIED, Ipv4Addr::new(255,255,255,255), None, true)
+        // Use VirtualTap C library's DHCP builder (matches working Zig/Swift implementation)
+        virtualtap::build_dhcp_discover(self.mac, self.xid)
+            .map_err(|code| anyhow::anyhow!("DHCP DISCOVER build failed: error code {}", code))
     }
 
     fn build_request(&self, offer: &v4::Message) -> Result<Vec<u8>> {
-        let mut msg = v4::Message::new_with_id(self.xid, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, &self.mac);
-        msg.set_opcode(v4::Opcode::BootRequest);
-        msg.set_htype(v4::HType::Eth);
-        msg.set_flags(v4::Flags::default().set_broadcast());
-        msg.opts_mut().insert(v4::DhcpOption::MessageType(v4::MessageType::Request));
-        if offer.yiaddr() != Ipv4Addr::UNSPECIFIED {
-            msg.opts_mut().insert(v4::DhcpOption::RequestedIpAddress(offer.yiaddr()));
-        }
-        if let Some(v4::DhcpOption::ServerIdentifier(sid)) = offer.opts().get(v4::OptionCode::ServerIdentifier) {
-            msg.opts_mut().insert(v4::DhcpOption::ServerIdentifier(*sid));
-        }
-        self.wrap_dhcp(&msg, Ipv4Addr::UNSPECIFIED, Ipv4Addr::new(255,255,255,255), None, true)
+        // Extract IP and server ID from OFFER
+        let requested_ip = offer.yiaddr();
+        let server_ip = if let Some(v4::DhcpOption::ServerIdentifier(sid)) = offer.opts().get(v4::OptionCode::ServerIdentifier) {
+            *sid
+        } else {
+            return Err(anyhow::anyhow!("DHCP OFFER missing ServerIdentifier"));
+        };
+        
+        // Convert to network byte order (u32)
+        let requested_ip_u32 = u32::from_be_bytes(requested_ip.octets());
+        let server_ip_u32 = u32::from_be_bytes(server_ip.octets());
+        
+        // Use VirtualTap C library's DHCP builder (matches working Zig/Swift implementation)
+        virtualtap::build_dhcp_request(self.mac, self.xid, requested_ip_u32, server_ip_u32)
+            .map_err(|code| anyhow::anyhow!("DHCP REQUEST build failed: error code {}", code))
     }
 
     /// Build a broadcast RENEW/REBIND style REQUEST (broadcast IP/Ethernet)
@@ -301,9 +291,15 @@ impl DhcpClient {
         Ok(eth)
     }
 
-    pub fn send_frame(&self, frame: Vec<u8>) { if !self.dp.send_frame(frame) { warn!("DHCP frame send failed (no link)"); } }
-
-    // Removed raw IPv4 preference helper; SoftEther dataplane operates on L2 frames.
+    pub fn send_frame(&self, frame: Vec<u8>) { 
+        // Send Ethernet frame via L2 injection channel → VirtualTap → DataPlane
+        debug!("DHCP send_frame: sending {} bytes to L2 injection channel", frame.len());
+        if let Err(e) = self.l2_inject_tx.send(frame) {
+            warn!("DHCP L2 injection failed: {}", e);
+        } else {
+            debug!("DHCP send_frame: successfully sent to L2 injection channel");
+        }
+    }
 
     pub async fn wait_for(&mut self, ty: v4::MessageType, deadline: Instant, event_cb: Option<&(dyn Fn(u32, String) + Send + Sync)>, iface_name: &str) -> Result<Option<v4::Message>> {
     use dhcproto::v4::Decoder;

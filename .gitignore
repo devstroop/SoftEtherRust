@@ -24,3 +24,6 @@ SoftEther-Go/
 
 # Cargo
 # Commit Cargo.lock for binaries and cdylibs for reproducible builds
+
+# Logs
+*.log

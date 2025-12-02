@@ -16,6 +16,7 @@ mod policy;
 pub mod types;
 pub mod vpnclient; 
 mod pencore;
+mod tun_bridge;
 
 
 // internal runtime configuration (private); public config is shared_config::ClientConfig

@@ -11,6 +11,17 @@ use cedar::{AuthType, ClientAuth, ClientOption};
 
 use super::VpnClient;
 
+/// Result of authentication containing redirect info and crypto settings
+#[derive(Debug, Clone)]
+pub struct AuthResult {
+    /// Redirect host and port if server requested redirection
+    pub redirect: Option<(String, u16)>,
+    /// Server-negotiated encryption setting
+    pub use_encrypt: bool,
+    /// Server-negotiated compression setting
+    pub use_compress: bool,
+}
+
 impl VpnClient {
     pub fn create_client_auth(&self) -> Result<ClientAuth> {
         if let Some(ticket) = self.redirect_ticket {
@@ -78,7 +89,7 @@ impl VpnClient {
         connection: &mut SecureConnection,
         client_auth: &ClientAuth,
         client_option: &ClientOption,
-    ) -> Result<Option<(String, u16)>> {
+    ) -> Result<AuthResult> {
         let _hello_pack = connection.initial_hello()?;
         let (server_ver, server_build) = connection.server_version();
         if server_ver > 0 && server_build > 0 {
@@ -126,7 +137,7 @@ impl VpnClient {
             p.add_str("username", &client_auth.username)?;
             p.add_str("protocol", CEDAR_SIGNATURE_STR)?;
             p.add_int("max_connection", client_option.max_connection)?;
-            p.add_int("use_compress", 0)?;
+            p.add_int("use_compress", if client_option.use_compress { 1 } else { 0 })?;
             p.add_int("half_connection", client_option.half_connection as u32)?;
             p.add_int("authtype", 1)?;
             if let Some(sp) = secure_pwd.as_ref() {
@@ -149,7 +160,7 @@ impl VpnClient {
             p.add_str("username", &client_auth.username)?;
             p.add_str("protocol", CEDAR_SIGNATURE_STR)?;
             p.add_int("max_connection", client_option.max_connection)?;
-            p.add_int("use_compress", 0)?;
+            p.add_int("use_compress", if client_option.use_compress { 1 } else { 0 })?;
             p.add_int("half_connection", client_option.half_connection as u32)?;
             p.add_int("authtype", 99)?;
             p.add_data("ticket", client_auth.hashed_password.to_vec())?;
@@ -163,6 +174,10 @@ impl VpnClient {
             cedar::handshake::build_login_pack(client_option, client_auth)
                 .context("Failed to build cedar login pack")?
         };
+
+        // CRITICAL: Bridge/Routing mode flags (missing these causes NoRouting=1 policy!)
+        auth_pack.add_bool("require_bridge_routing_mode", true)?;
+        auth_pack.add_bool("require_monitor_mode", false)?;
 
         // Environment info
         let os_name = std::env::consts::OS;
@@ -222,7 +237,14 @@ impl VpnClient {
                 "Server requested redirection to {}:{} (host field)",
                 redirect_host, redirect_port
             );
-            return Ok(Some((redirect_host.to_string(), redirect_port)));
+            // Parse crypto settings even during redirect
+            let use_encrypt = welcome_pack.get_int("use_encrypt").unwrap_or(0) != 0;
+            let use_compress = welcome_pack.get_int("use_compress").unwrap_or(0) != 0;
+            return Ok(AuthResult {
+                redirect: Some((redirect_host.to_string(), redirect_port)),
+                use_encrypt,
+                use_compress,
+            });
         }
         let do_redirect = welcome_pack
             .get_int("Redirect")
@@ -240,7 +262,14 @@ impl VpnClient {
             if !ip.is_empty() {
                 self.capture_redirect_ticket(&welcome_pack);
                 info!("[INFO] redirect new_host={} new_port={}", ip, port);
-                return Ok(Some((ip.to_string(), port)));
+                // Parse crypto settings even during redirect
+                let use_encrypt = welcome_pack.get_int("use_encrypt").unwrap_or(0) != 0;
+                let use_compress = welcome_pack.get_int("use_compress").unwrap_or(0) != 0;
+                return Ok(AuthResult {
+                    redirect: Some((ip.to_string(), port)),
+                    use_encrypt,
+                    use_compress,
+                });
             }
         }
         if let Ok(rflag) = welcome_pack.get_int("Redirect") {
@@ -256,7 +285,14 @@ impl VpnClient {
                         "Server requested redirection to {}:{} (cluster)",
                         ipv4, port
                     );
-                    return Ok(Some((ipv4.to_string(), port)));
+                    // Parse crypto settings even during redirect
+                    let use_encrypt = welcome_pack.get_int("use_encrypt").unwrap_or(0) != 0;
+                    let use_compress = welcome_pack.get_int("use_compress").unwrap_or(0) != 0;
+                    return Ok(AuthResult {
+                        redirect: Some((ipv4.to_string(), port)),
+                        use_encrypt,
+                        use_compress,
+                    });
                 }
             }
         }
@@ -368,6 +404,13 @@ impl VpnClient {
                 self.sni_host = Some(hn.to_string());
             }
         }
+        
+        // Extract server-negotiated crypto settings (CRITICAL!)
+        // The server decides whether to use encryption/compression, not the client.
+        let use_encrypt = welcome_pack.get_int("use_encrypt").unwrap_or(0) != 0;
+        let use_compress = welcome_pack.get_int("use_compress").unwrap_or(0) != 0;
+        info!("Server crypto negotiation: encrypt={} compress={}", use_encrypt, use_compress);
+        
         if let Ok(sk) = welcome_pack
             .get_data("session_key")
             .or_else(|_| welcome_pack.get_data("SessionKey"))
@@ -399,7 +442,13 @@ impl VpnClient {
         } else {
             debug!("No session_key present in welcome pack");
         }
-        Ok(None)
+        
+        // Return auth result with crypto settings (no redirect)
+        Ok(AuthResult {
+            redirect: None,
+            use_encrypt,
+            use_compress,
+        })
     }
 
     pub(crate) fn capture_redirect_ticket(&mut self, pack: &mayaqua::Pack) {

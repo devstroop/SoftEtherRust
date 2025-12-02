@@ -29,7 +29,7 @@ pub mod io {
         if let Some(map) = v.as_object() {
             // Known canonical keys (include legacy aliases to avoid false positives if used)
             const KNOWN: &[&str] = &[
-                "server","port","hub","username","password","password_hash","skip_tls_verify","use_compress","max_connections","nat_traversal","udp_acceleration","static_ip","static_ipv4","static_ipv6","ip_version","require_static_ip"
+                "server","port","hub","username","password","password_hash","skip_tls_verify","use_encrypt","use_compress","max_connections","nat_traversal","udp_acceleration","static_ip","static_ipv4","static_ipv6","ip_version","require_static_ip"
             ];
             for k in map.keys() {
                 if !KNOWN.contains(&k.as_str()) { unknown.push(k.clone()); }
@@ -53,6 +53,8 @@ pub enum ConfigError {
 
 pub type Result<T> = std::result::Result<T, ConfigError>;
 
+fn default_true() -> bool { true }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientConfig {
     pub server: String,
@@ -66,6 +68,11 @@ pub struct ClientConfig {
     /// Skip TLS certificate verification (insecure). Default: false
     #[serde(default)]
     pub skip_tls_verify: bool,
+    /// Enable RC4 encryption on top of TLS (default: true, recommended for performance)
+    #[serde(default = "default_true")]
+    pub use_encrypt: bool,
+    /// Enable data compression (default: false for compatibility)
+    #[serde(default)]
     pub use_compress: bool,
     pub max_connections: u32,
     /// Enable NAT traversal (SecureNAT / NAT-T style) if supported; default false
@@ -99,6 +106,7 @@ impl Default for ClientConfig {
             password: None,
             password_hash: None,
             skip_tls_verify: false,
+            use_encrypt: true,
             use_compress: false,
             max_connections: 1,
             nat_traversal: None,
@@ -130,6 +138,7 @@ impl ClientConfig {
     pub fn to_client_option(&self) -> std::result::Result<cedar::ClientOption, mayaqua::Error> {
         let mut opt = cedar::ClientOption::new(&self.server, self.port, &self.hub)?;
         opt = opt.with_max_connections(self.max_connections);
+        opt = opt.with_encryption(self.use_encrypt);
         opt = opt.with_compression(self.use_compress);
         Ok(opt)
     }

@@ -2,7 +2,7 @@
 members = [
     "libs/mayaqua",
     "libs/cedar",
-    "libs/tun-rs",
+    "libs/virtualtap",
     "crates/vpnclient",
     # FFI crates
     "crates/ffi"

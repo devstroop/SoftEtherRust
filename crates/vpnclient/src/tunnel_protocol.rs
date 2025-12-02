@@ -2,13 +2,11 @@
 //! Bridges TLS connections with Session packet channels
 
 use anyhow::Result;
-use cedar::Session;
+use cedar::{Session, TlsStream};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn, error};
-use native_tls::TlsStream;
-use std::net::TcpStream;
 use std::sync::Mutex;
 use std::io::{Read, Write};
 
@@ -29,7 +27,7 @@ impl TunnelProtocolHandler {
     }
 
     /// Register a TLS stream and start bidirectional pumping
-    pub fn register_tls_stream(&mut self, tls: TlsStream<TcpStream>) -> Result<()> {
+    pub fn register_tls_stream(&mut self, tls: TlsStream) -> Result<()> {
         let tls_shared = Arc::new(Mutex::new(tls));
         
         // Start RX pump: TLS → Session (Server to Local)
@@ -74,7 +72,7 @@ impl TunnelProtocolHandler {
 }
 
 /// Read a SoftEther frame from TLS stream
-fn read_softether_frame(tls: &Arc<Mutex<TlsStream<TcpStream>>>) -> std::io::Result<Option<Vec<u8>>> {
+fn read_softether_frame(tls: &Arc<Mutex<TlsStream>>) -> std::io::Result<Option<Vec<u8>>> {
     let mut guard = tls.lock().unwrap();
     
     // Read frame header: [count:4][len:4] or [0xffffffff][len:4] for keepalive

@@ -16,6 +16,7 @@ pub mod connection_pool;
 pub mod dataplane;
 pub mod redirect;
 pub mod session_mgr;
+pub mod tls_backend; // TLS abstraction layer
 pub mod types;
 pub mod watermark;
 
@@ -34,6 +35,7 @@ pub use connection_pool::*;
 pub use dataplane::*;
 pub use redirect::*;
 pub use session_mgr::*;
+pub use tls_backend::TlsStream; // Re-export for convenience
 pub use types::*;
 #[cfg(feature = "udp-accel")]
 pub use udp_accel::*;

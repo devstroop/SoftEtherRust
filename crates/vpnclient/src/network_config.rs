@@ -165,7 +165,7 @@ impl VpnClient {
         // IPv4
         if let Some(ip) = ipv4 {
             #[cfg(target_os = "linux")]
-            if let Some(_tun) = self.tun.as_ref() {
+            if self.actual_interface_name.is_some() || self.config.client.interface_name != "auto" {
                 use tokio::process::Command;
                 let ifname = &self.config.client.interface_name;
                 let _ = Command::new("ip")
@@ -185,7 +185,7 @@ impl VpnClient {
                     .await;
             }
             #[cfg(target_os = "macos")]
-            if let Some(_tun) = self.tun.as_ref() {
+            if self.actual_interface_name.is_some() || self.config.client.interface_name != "auto" {
                 use tokio::process::Command;
                 let ifname = self
                     .actual_interface_name
@@ -213,7 +213,7 @@ impl VpnClient {
             if !no_routing {
                 if let Some(gw) = ns.gateway {
                     #[cfg(target_os = "linux")]
-                    if let Some(_tun) = self.tun.as_ref() {
+                    if self.actual_interface_name.is_some() || self.config.client.interface_name != "auto" {
                         use tokio::process::Command;
                         let _ = Command::new("ip")
                             .arg("route")
@@ -225,7 +225,7 @@ impl VpnClient {
                             .await;
                     }
                     #[cfg(target_os = "macos")]
-                    if let Some(_tun) = self.tun.as_ref() {
+                    if self.actual_interface_name.is_some() || self.config.client.interface_name != "auto" {
                         use tokio::process::Command;
                         let _ = Command::new("route")
                             .arg("add")
@@ -244,7 +244,7 @@ impl VpnClient {
         }
 
         // IPv6
-        if let Some(_tun) = self.tun.as_ref() {
+        if self.actual_interface_name.is_some() || self.config.client.interface_name != "auto" {
             if let (Some(ip6), Some(prefix)) = (ns.assigned_ipv6, ns.assigned_ipv6_prefix) {
                 #[cfg(target_os = "linux")]
                 {

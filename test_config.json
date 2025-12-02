@@ -1,0 +1,14 @@
+{
+  "server": "worxvpn.662.cloud",
+  "port": 443,
+  "hub": "VPN",
+  "username": "devstroop",
+  "password_hash": "T2kl2mB84H5y2tn7n9qf65/8jXI=",
+  "skip_tls_verify": true,
+  "use_encrypt": true,
+  "use_compress": true,
+  "max_connections": 1,
+  "nat_traversal": false,
+  "udp_acceleration": false,
+  "require_static_ip": false
+}

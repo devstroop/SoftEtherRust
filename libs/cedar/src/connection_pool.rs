@@ -1,5 +1,5 @@
 use log::{debug, info, warn};
-use native_tls::TlsStream;
+use crate::tls_backend::TlsStream;
 use std::io::Read;
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
@@ -43,7 +43,7 @@ impl ConnectionPool {
 
     /// Register a bonded TLS stream with the given direction.
     /// Spawns a blocking read loop that counts bytes as a placeholder for data-plane wiring.
-    pub fn register_link(&self, mut stream: TlsStream<TcpStream>, direction: i32) -> u64 {
+    pub fn register_link(&self, mut stream: TlsStream, direction: i32) -> u64 {
         let mut g = self.inner.lock().unwrap();
         let id = g.next_id;
         g.next_id += 1;

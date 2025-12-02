@@ -39,24 +39,18 @@ impl VpnClient {
         }
 
         // Send a lightweight PACK keep-alive (noop) every ~50 seconds on control channel
-        // Only until a dataplane link is established, to avoid control-channel read contention.
-        let dp_links = self
-            .dataplane
-            .as_ref()
-            .map(|dp| dp.summary().total_links)
-            .unwrap_or(0);
-        if dp_links == 0 {
-            if let Some(conn) = &mut self.connection {
-                let now = get_tick64();
-                if self.last_noop_sent == 0
-                    || now.saturating_sub(self.last_noop_sent) >= Session::KEEP_ALIVE_INTERVAL
-                {
-                    if let Err(e) = conn.send_noop() {
-                        warn!("Keep-alive (noop) send failed: {}", e);
-                    } else {
-                        debug!("Keep-alive (noop) sent");
-                        self.last_noop_sent = now;
-                    }
+        // This must continue even after dataplane links are established to prevent
+        // the control connection from timing out.
+        if let Some(conn) = &mut self.connection {
+            let now = get_tick64();
+            if self.last_noop_sent == 0
+                || now.saturating_sub(self.last_noop_sent) >= Session::KEEP_ALIVE_INTERVAL
+            {
+                if let Err(e) = conn.send_noop() {
+                    warn!("Keep-alive (noop) send failed: {}", e);
+                } else {
+                    debug!("Keep-alive (noop) sent");
+                    self.last_noop_sent = now;
                 }
             }
         }

@@ -110,10 +110,14 @@ impl VpnClient {
             if direction == 1 || direction == 2 {
                 debug!("Server split directions across connections (half-connected)");
             }
-            // Hand off TLS stream to dataplane
+            
+            // Hand off TCP stream to dataplane
+            // CRITICAL: After additional_connect handshake, SoftEther data links use RAW TCP
+            // with SoftEther framing, NOT TLS! Extract the underlying TCP stream.
             let _ = conn.set_timeouts(None, None);
-            let tls = conn.into_tls_stream();
-            let _ = dp.register_link(tls, direction as i32);
+            let tcp = conn.into_tls_stream().into_tcp_stream();
+            let link_id = dp.register_link(tcp, direction as i32);
+            info!("[SESSION] Link registered (link_id={}), data flow can now begin", link_id);
             break;
         }
         Ok(())
@@ -338,12 +342,13 @@ impl VpnClient {
                             let _bond_handle = mgr2.register_bond(direction as i32);
                             // Disable timeouts so idle sockets are not closed by client side
                             let _ = conn.set_timeouts(None, None);
-                            // Hand off the TLS stream into dataplane/pool
-                            let tls = conn.into_tls_stream();
+                            // Hand off the raw TCP stream into dataplane (strip TLS layer)
+                            let tcp = conn.into_tls_stream().into_tcp_stream();
                             if let Some(dp) = dp2.as_ref() {
-                                let _ = dp.register_link(tls, direction as i32);
+                                let _ = dp.register_link(tcp, direction as i32);
                             } else {
-                                let _ = pool2.register_link(tls, direction as i32);
+                                // LinkPool not yet updated to use TcpStream - skip for now
+                                warn!("additional_link: DataPlane not available, skipping link registration");
                             }
                             // Hold the connection open
                             loop {

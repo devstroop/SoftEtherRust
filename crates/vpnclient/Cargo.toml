@@ -12,15 +12,14 @@ path = "src/main.rs"
 
 [dependencies]
 mayaqua = { path = "../../libs/mayaqua" }
-cedar = { path = "../../libs/cedar" }
-tun-rs = { path = "../../libs/tun-rs", features = ["async_tokio"] }
-dhcproto = { path = "../../libs/dhcproto" }
+cedar = { path = "../../libs/cedar", default-features = false, features = ["compress"] }
+virtualtap = { path = "../../libs/virtualtap" }
 ipnet = { version = "2.5", features = ["serde"] }
+dhcproto = "0.12"
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }
-tokio-native-tls = "0.3"
-native-tls = "0.2"
+
 x509-parser = "0.15"
 
 # Networking
@@ -49,7 +48,12 @@ anyhow = "1.0"
 tempfile = "3.8"
 
 [features]
-default = []
+# TLS backend selection (mutually exclusive)
+default = ["use-native-tls"]
+use-native-tls = ["cedar/use-native-tls"]
+use-rustls = ["cedar/use-rustls"]
+
+# Other features
 trace = []
 adapter-tests = []
 test-redirect = []

@@ -93,6 +93,10 @@ pub struct Session {
     pub config: SessionConfig,
     pub client_option: ClientOption,
     pub client_auth: ClientAuth,
+    
+    // Server-negotiated settings (may differ from client_option)
+    pub server_use_encrypt: bool,
+    pub server_use_compress: bool,
 
     // Session flags and settings
     pub flags: SessionFlags,
@@ -172,6 +176,8 @@ impl Session {
             config,
             client_option,
             client_auth,
+            server_use_encrypt: false,
+            server_use_compress: false,
 
             flags: SessionFlags::default(),
             protocol_options: ProtocolOptions::default(),
@@ -283,8 +289,10 @@ impl Session {
         Ok(())
     }
 
-    /// Keep-alive timing (match C defaults): 50s interval, 60s timeout
-    pub const KEEP_ALIVE_INTERVAL: u64 = 50_000; // 50 seconds
+    /// Keep-alive timing (match C defaults):
+    /// C code uses GenNextKeepAliveSpan() = rand(timeout/5, timeout/2)
+    /// With default timeout=20s, this is 4-10s. Using conservative 5s here.
+    pub const KEEP_ALIVE_INTERVAL: u64 = 5_000; // 5 seconds (was 50s - BUG!)
     pub const KEEP_ALIVE_TIMEOUT: u64 = 60_000; // 60 seconds
 
     /// Build a minimal keep-alive Pack compatible with server expectations

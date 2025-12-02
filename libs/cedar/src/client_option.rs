@@ -26,6 +26,7 @@ pub struct ClientOption {
     pub retry_interval: u32,                 // Retry interval (seconds)
     pub hubname: String,                     // HUB name
     pub max_connection: u32,                 // Max concurrent TCP connections
+    pub use_encrypt: bool,                   // Use RC4 encryption (on top of TLS)
     pub use_compress: bool,                  // Use data compression
     pub half_connection: bool,               // Use half connection in TCP
     pub no_routing_tracking: bool,           // Disable routing tracking
@@ -71,8 +72,8 @@ impl ClientOption {
             retry_interval: 15,
             hubname: hubname.to_string(),
             max_connection: 1,
-            // encryption always enforced (implicit over TLS)
-            use_compress: false,
+            use_encrypt: true,       // RC4 encryption on top of TLS (default: enabled)
+            use_compress: false,     // Compression (default: disabled)
             half_connection: false,
             no_routing_tracking: false,
             device_name: String::new(),
@@ -201,6 +202,11 @@ impl ClientOption {
         self
     }
 
+    /// Set encryption (RC4 on top of TLS)
+    pub fn with_encryption(mut self, enable: bool) -> Self {
+        self.use_encrypt = enable;
+        self
+    }
 
     /// Set maximum connections
     pub fn with_max_connections(mut self, max: u32) -> Self {
@@ -312,8 +318,8 @@ impl Default for ClientOption {
             retry_interval: 15,
             hubname: String::new(),
             max_connection: 1,
-            // implicit encryption
-            use_compress: false,
+            use_encrypt: true,       // RC4 encryption on top of TLS (default: enabled)
+            use_compress: false,     // Compression (default: disabled)
             half_connection: false,
             no_routing_tracking: false,
             device_name: String::new(),

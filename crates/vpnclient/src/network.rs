@@ -2,9 +2,8 @@
 
 use anyhow::{Context, Result};
 use base64::prelude::*;
-use cedar::WATERMARK;
+use cedar::{TlsStream, WATERMARK};
 use mayaqua::{HttpRequest, HttpResponse, Pack};
-use native_tls::{TlsConnector, TlsStream};
 use crate::pencore::Pencore;
 use rand::RngCore;
 use std::io::{Read, Write};
@@ -16,7 +15,7 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 
 /// Secure TLS connection wrapper
 pub struct SecureConnection {
-    stream: TlsStream<TcpStream>,
+    stream: TlsStream,
     server_version: u32,
     server_build: u32,
     server_random: Option<[u8; 20]>,
@@ -58,27 +57,22 @@ impl SecureConnection {
         let tcp_stream =
             connect_with_timeout(addr, timeout).context("Failed to establish TCP connection")?;
 
-        // Configure TLS connector
-        let mut tls_builder = TlsConnector::builder();
-        if skip_tls_verify {
-            static TLS_INSECURE_WARN_ONCE: Once = Once::new();
-            TLS_INSECURE_WARN_ONCE
-                .call_once(|| warn!("TLS certificate verification disabled (insecure)"));
-            tls_builder.danger_accept_invalid_certs(true);
-            tls_builder.danger_accept_invalid_hostnames(true);
+        // TCP buffer optimization (matches Swift [TCP_BUFFER] setup)
+        // Enable TCP_NODELAY (disable Nagle) for low latency
+        if let Err(e) = tcp_stream.set_nodelay(true) {
+            debug!("Failed to set TCP_NODELAY: {}", e);
+        } else {
+            debug!("[TCP_BUFFER] TCP_NODELAY enabled");
         }
 
-        let tls_connector = tls_builder
-            .build()
-            .context("Failed to build TLS connector")?;
-
-        // Establish TLS connection
+        // Establish TLS connection using abstraction layer
         debug!("Establishing TLS handshake");
         let sni_host = sni_override.unwrap_or(host);
-        let tls_stream = tls_connector
-            .connect(sni_host, tcp_stream)
+        let tls_stream = TlsStream::connect(sni_host, tcp_stream, skip_tls_verify)
             .context("TLS handshake failed")?;
 
+        debug!("TLS backend: {}", TlsStream::backend_name());
+        
         if std::env::var("RUST_3RD_LOG").ok().as_deref() == Some("1") {
             info!(
                 "[INFO] link_established host={} port={} transport=tcp",
@@ -99,40 +93,37 @@ impl SecureConnection {
             }
         }
         // Try to dump server certificate subjects like third-party logs
-        if let Ok(Some(cert)) = tls_stream.peer_certificate() {
-            // native-tls exposes end-entity; no chain. Try to parse and log subject.
-            if let Ok(der) = cert.to_der() {
-                if let Ok((_rem, x509)) = X509Certificate::from_der(&der) {
-                    let cn = x509
-                        .subject()
-                        .iter_common_name()
-                        .next()
-                        .and_then(|cn| cn.as_str().ok())
-                        .unwrap_or("");
-                    if std::env::var("RUST_3RD_LOG").ok().as_deref() == Some("1") {
-                        info!(
-                            "Cert 0 {}",
-                            if cn.is_empty() {
-                                x509.subject().to_string()
-                            } else {
-                                cn.to_string()
-                            }
-                        );
-                    } else {
-                        debug!(
-                            "Cert 0 {}",
-                            if cn.is_empty() {
-                                x509.subject().to_string()
-                            } else {
-                                cn.to_string()
-                            }
-                        );
-                    }
+        if let Ok(Some(cert_der)) = tls_stream.peer_certificate_der() {
+            if let Ok((_rem, x509)) = X509Certificate::from_der(&cert_der) {
+                let cn = x509
+                    .subject()
+                    .iter_common_name()
+                    .next()
+                    .and_then(|cn| cn.as_str().ok())
+                    .unwrap_or("");
+                if std::env::var("RUST_3RD_LOG").ok().as_deref() == Some("1") {
+                    info!(
+                        "Cert 0 {}",
+                        if cn.is_empty() {
+                            x509.subject().to_string()
+                        } else {
+                            cn.to_string()
+                        }
+                    );
+                } else {
+                    debug!(
+                        "Cert 0 {}",
+                        if cn.is_empty() {
+                            x509.subject().to_string()
+                        } else {
+                            cn.to_string()
+                        }
+                    );
                 }
             }
         }
 
-        Ok(Self {
+        Ok(SecureConnection {
             stream: tls_stream,
             server_version: 0,
             server_build: 0,
@@ -451,7 +442,7 @@ impl SecureConnection {
 
     /// Extract the underlying TLS stream; this consumes the SecureConnection.
     /// Intended for future data-plane integration to hand off the bonded socket.
-    pub fn into_tls_stream(self) -> TlsStream<TcpStream> {
+    pub fn into_tls_stream(self) -> TlsStream {
         self.stream
     }
 
