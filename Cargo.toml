@@ -4,7 +4,6 @@ members = [
     "libs/cedar",
     "libs/virtualtap",
     "crates/vpnclient",
-    # FFI crates
     "crates/ffi"
 ]
 resolver = "2"

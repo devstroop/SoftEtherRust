@@ -10,7 +10,7 @@ mod route_manager;
 
 pub use translator::{Translator, TranslatorConfig};
 pub use dhcp::{DhcpInfo, parse_dhcp, build_dhcp_discover, build_dhcp_request};
-pub use arp::{ArpInfo, parse_arp, build_arp_reply, build_arp_gratuitous};
+pub use arp::{ArpInfo, parse_arp, build_arp_reply, build_arp_gratuitous, build_arp_request};
 pub use tun_device::TunDevice;
 pub use route_manager::RouteManager;
 

@@ -22,24 +22,19 @@ subtle = { workspace = true }
 anyhow = "1.0"
 tracing = { workspace = true }
 
-# TLS backends (feature-gated)
-native-tls = { version = "0.2", optional = true }
-tokio-native-tls = { version = "0.3", optional = true }
 # SOFTETHER PATCH: Using local rustls fork with increased MAX_FRAGMENT_LEN (16KB -> 64KB)
 # to support SoftEther VPN's non-standard large TLS records
-rustls = { path = "../rustls/rustls", optional = true, features = ["dangerous_configuration"] }
-tokio-rustls = { version = "0.24", optional = true }
-rustls-pemfile = { version = "1.0", optional = true }
-webpki-roots = { version = "0.25", optional = true }
+rustls = { path = "../rustls/rustls", features = ["dangerous_configuration"] }
+tokio-rustls = "0.24"
+rustls-pemfile = "1.0"
+webpki-roots = "0.25"
 
 [dev-dependencies]
 serde_json = "1.0"
 
 [features]
-default = ["compress", "use-rustls"]
+default = ["compress"]
 compress = ["mayaqua/compress"]
 trace = []
 udp-accel = []
 nat-traversal = []
-use-native-tls = ["dep:native-tls", "dep:tokio-native-tls"]
-use-rustls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:webpki-roots"]

@@ -102,6 +102,37 @@ pub fn build_arp_gratuitous(our_mac: [u8; 6], our_ip: [u8; 4]) -> Vec<u8> {
     frame
 }
 
+/// Build ARP request to discover MAC address for an IP
+pub fn build_arp_request(
+    our_mac: [u8; 6],
+    our_ip: [u8; 4],
+    target_ip: [u8; 4],
+) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(42);
+    
+    // Ethernet header (broadcast to reach target)
+    frame.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]); // Broadcast
+    frame.extend_from_slice(&our_mac);     // Source MAC
+    frame.extend_from_slice(&[0x08, 0x06]); // EtherType: ARP
+    
+    // ARP packet
+    frame.extend_from_slice(&[0x00, 0x01]); // Hardware type: Ethernet
+    frame.extend_from_slice(&[0x08, 0x00]); // Protocol type: IPv4
+    frame.push(6); // Hardware address length
+    frame.push(4); // Protocol address length
+    frame.extend_from_slice(&[0x00, 0x01]); // Operation: Request (1)
+    
+    // Sender (us)
+    frame.extend_from_slice(&our_mac);
+    frame.extend_from_slice(&our_ip);
+    
+    // Target (unknown MAC, we're asking for it)
+    frame.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    frame.extend_from_slice(&target_ip);
+    
+    frame
+}
+
 #[derive(Debug, Clone)]
 pub struct ArpInfo {
     pub operation: u16,     // 1=request, 2=reply

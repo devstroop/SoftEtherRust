@@ -48,12 +48,7 @@ anyhow = "1.0"
 tempfile = "3.8"
 
 [features]
-# TLS backend selection (mutually exclusive)
-default = ["use-rustls"]
-use-native-tls = ["cedar/use-native-tls"]
-use-rustls = ["cedar/use-rustls"]
-
-# Other features
+default = []
 trace = []
 adapter-tests = []
 test-redirect = []

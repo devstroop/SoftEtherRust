@@ -143,7 +143,13 @@ pub fn spawn_tun_bridge(
                 continue;
             }
             
-            debug!("TUN RX: received {} bytes IP packet from OS", ip_packet.len());
+            // Check if this is ICMP (for ping debugging)
+            let is_icmp = ip_packet.len() >= 20 && ip_packet[9] == 1;
+            if is_icmp {
+                info!("TUN RX: 📤 Received {} bytes ICMP packet from OS", ip_packet.len());
+            } else {
+                debug!("TUN RX: received {} bytes IP packet from OS", ip_packet.len());
+            }
             
             // Convert IP packet (L3) to Ethernet frame (L2) using pure Rust VirtualTap
             let eth_frame = match translator_rx.ip_to_ethernet(&ip_packet) {
@@ -154,12 +160,20 @@ pub fn spawn_tun_bridge(
                 }
             };
             
-            debug!("TUN RX: translated {} bytes IP → {} bytes Ethernet", ip_packet.len(), eth_frame.len());
+            if is_icmp {
+                info!("TUN RX: 📤 Translated ICMP: {} bytes IP → {} bytes Ethernet", ip_packet.len(), eth_frame.len());
+            } else {
+                debug!("TUN RX: translated {} bytes IP → {} bytes Ethernet", ip_packet.len(), eth_frame.len());
+            }
             
             // Send Ethernet frame to DataPlane
-            if let Err(e) = tun_to_dp_tx.send(eth_frame) {
+            if let Err(e) = tun_to_dp_tx.send(eth_frame.clone()) {
                 warn!("TUN RX: DataPlane channel closed: {}", e);
                 break;
+            }
+            
+            if is_icmp {
+                info!("TUN RX: 📤 Sent ICMP frame to DataPlane");
             }
         }
         
@@ -249,8 +263,8 @@ pub fn spawn_tun_bridge(
                         }
                     }
                 }
-                // Don't process ARP packets further, return to loop
-                continue;
+                // ✅ FIX: Don't return early - let packet flow through ethernet_to_ip() for passive learning
+                // ARP packets will return None from ethernet_to_ip(), which is fine
             }
             
             // ✅ DHCP INTERCEPT: Check if this is a DHCP OFFER or ACK from server
@@ -356,6 +370,34 @@ pub fn spawn_tun_bridge(
                             
                             *dhcp_state_tx.state.lock().unwrap() = DhcpState::Bound;
                             
+                            // ✅ Proactive gateway discovery: Send gratuitous ARP + request gateway MAC
+                            // This ensures we learn gateway MAC even if server doesn't ARP for us
+                            info!("[ARP] 🔍 Initiating proactive gateway discovery...");
+                            
+                            // 1. Gratuitous ARP (announce our IP/MAC to network)
+                            let gratuitous_arp = virtualtap::build_arp_gratuitous(
+                                mac_for_dhcp,
+                                dhcp_info.offered_ip,
+                            );
+                            if let Err(e) = l2_inject_dhcp_response.send(gratuitous_arp) {
+                                warn!("[ARP] Failed to send gratuitous ARP: {}", e);
+                            } else {
+                                info!("[ARP] ✅ Sent gratuitous ARP announcement");
+                            }
+                            
+                            // 2. ARP request for gateway (learn gateway MAC)
+                            let gateway_arp_request = virtualtap::build_arp_request(
+                                mac_for_dhcp,
+                                dhcp_info.offered_ip,
+                                gateway,
+                            );
+                            if let Err(e) = l2_inject_dhcp_response.send(gateway_arp_request) {
+                                warn!("[ARP] Failed to send gateway ARP request: {}", e);
+                            } else {
+                                info!("[ARP] ✅ Sent ARP request for gateway {}.{}.{}.{}",
+                                    gateway[0], gateway[1], gateway[2], gateway[3]);
+                            }
+                            
                             // ✅ Apply route configuration for full tunnel mode
                             let device_name_clone = device_name_for_routes.clone();
                             let dhcp_state_for_routes = dhcp_state_tx.clone();
@@ -404,6 +446,12 @@ pub fn spawn_tun_bridge(
             
             match result {
                 Ok(Some(ip_packet)) => {
+                    // Check if this is ICMP reply (for ping debugging)
+                    let is_icmp_reply = ip_packet.len() >= 20 && ip_packet[9] == 1;
+                    if is_icmp_reply {
+                        info!("TUN TX: 📥 Received ICMP reply from DataPlane: {} bytes", ip_packet.len());
+                    }
+                    
                     // IP packet extracted - send to TUN device
                     debug!("TUN TX: translated {} bytes Ethernet → {} bytes IP", eth_frame.len(), ip_packet.len());
                     
@@ -411,6 +459,8 @@ pub fn spawn_tun_bridge(
                         Ok(n) => {
                             if n != ip_packet.len() {
                                 warn!("TUN TX: partial write ({}/{})", n, ip_packet.len());
+                            } else if is_icmp_reply {
+                                info!("TUN TX: 📥 Sent ICMP reply to OS ({} bytes)", n);
                             }
                         }
                         Err(e) => {

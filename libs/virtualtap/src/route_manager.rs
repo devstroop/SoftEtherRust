@@ -80,6 +80,12 @@ impl RouteManager {
             let server_str = format!("{}.{}.{}.{}", server[0], server[1], server[2], server[3]);
             let gateway_str = format!("{}.{}.{}.{}", gateway[0], gateway[1], gateway[2], gateway[3]);
             
+            // ✅ CRITICAL: Delete any existing host route first (from previous crashed sessions)
+            // This prevents "Can't assign requested address" errors
+            let _ = Command::new("route")
+                .args(&["-n", "delete", "-host", &server_str])
+                .output();
+            
             log::info!("[●] ROUTE: add host {} gateway {}", server_str, gateway_str);
             
             let output = Command::new("route")
