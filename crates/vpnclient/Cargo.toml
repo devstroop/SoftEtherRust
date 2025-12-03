@@ -49,7 +49,7 @@ tempfile = "3.8"
 
 [features]
 # TLS backend selection (mutually exclusive)
-default = ["use-native-tls"]
+default = ["use-rustls"]
 use-native-tls = ["cedar/use-native-tls"]
 use-rustls = ["cedar/use-rustls"]
 

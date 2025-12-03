@@ -36,7 +36,7 @@ webpki-roots = { version = "0.25", optional = true }
 serde_json = "1.0"
 
 [features]
-default = ["compress", "use-native-tls"]
+default = ["compress", "use-rustls"]
 compress = ["mayaqua/compress"]
 trace = []
 udp-accel = []

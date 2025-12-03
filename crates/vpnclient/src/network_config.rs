@@ -212,9 +212,68 @@ impl VpnClient {
             res.ipv4_addr = Some((ip, cidr as u8));
             if !no_routing {
                 if let Some(gw) = ns.gateway {
+                    // CRITICAL: Save original default gateway before changing it
+                    use tokio::process::Command;
+                    #[cfg(target_os = "linux")]
+                    {
+                        if let Ok(output) = Command::new("ip")
+                            .arg("route")
+                            .arg("show")
+                            .arg("default")
+                            .output()
+                            .await
+                        {
+                            if let Ok(s) = String::from_utf8(output.stdout) {
+                                // Parse: "default via 192.168.1.1 dev eth0"
+                                if let Some(rest) = s.strip_prefix("default via ") {
+                                    let parts: Vec<&str> = rest.split_whitespace().collect();
+                                    if let Ok(orig_gw) = parts.get(0).unwrap_or(&"").parse::<Ipv4Addr>() {
+                                        let orig_iface = parts.get(2).map(|s| s.to_string());
+                                        if let Some(r) = applied.as_mut() {
+                                            r.original_default_gateway = Some((orig_gw, orig_iface));
+                                            info!("Saved original default gateway: {} via {:?}", orig_gw, r.original_default_gateway.as_ref().unwrap().1);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(target_os = "macos")]
+                    {
+                        if let Ok(output) = Command::new("route")
+                            .arg("-n")
+                            .arg("get")
+                            .arg("default")
+                            .output()
+                            .await
+                        {
+                            if let Ok(s) = String::from_utf8(output.stdout) {
+                                // Parse: "gateway: 192.168.1.1"
+                                let mut orig_gw = None;
+                                let mut orig_iface = None;
+                                for line in s.lines() {
+                                    if line.trim().starts_with("gateway:") {
+                                        if let Some(gw_str) = line.split(':').nth(1) {
+                                            if let Ok(gw) = gw_str.trim().parse::<Ipv4Addr>() {
+                                                orig_gw = Some(gw);
+                                            }
+                                        }
+                                    } else if line.trim().starts_with("interface:") {
+                                        if let Some(iface) = line.split(':').nth(1) {
+                                            orig_iface = Some(iface.trim().to_string());
+                                        }
+                                    }
+                                }
+                                if let (Some(gw), Some(r)) = (orig_gw, applied.as_mut()) {
+                                    r.original_default_gateway = Some((gw, orig_iface.clone()));
+                                    info!("Saved original default gateway: {} via {:?}", gw, orig_iface);
+                                }
+                            }
+                        }
+                    }
+                    
                     #[cfg(target_os = "linux")]
                     if self.actual_interface_name.is_some() || self.config.client.interface_name != "auto" {
-                        use tokio::process::Command;
                         let _ = Command::new("ip")
                             .arg("route")
                             .arg("add")
@@ -226,13 +285,38 @@ impl VpnClient {
                     }
                     #[cfg(target_os = "macos")]
                     if self.actual_interface_name.is_some() || self.config.client.interface_name != "auto" {
-                        use tokio::process::Command;
-                        let _ = Command::new("route")
+                        // CRITICAL: Delete old default route first, then add VPN route
+                        // (macOS allows multiple default routes, but we want VPN to be primary)
+                        info!("Removing existing default route before adding VPN route");
+                        let delete_result = Command::new("route")
+                            .arg("delete")
+                            .arg("default")
+                            .output()
+                            .await;
+                        
+                        if let Ok(output) = delete_result {
+                            if !output.status.success() {
+                                warn!("Failed to delete old default route (may not exist): {:?}", 
+                                      String::from_utf8_lossy(&output.stderr));
+                            }
+                        }
+                        
+                        info!("Adding VPN default route via {}", gw);
+                        let add_result = Command::new("route")
                             .arg("add")
                             .arg("default")
                             .arg(gw.to_string())
                             .output()
                             .await;
+                            
+                        if let Ok(output) = add_result {
+                            if !output.status.success() {
+                                warn!("Failed to add VPN default route: {:?}", 
+                                      String::from_utf8_lossy(&output.stderr));
+                            } else {
+                                info!("Successfully changed default route to VPN gateway {}", gw);
+                            }
+                        }
                     }
                     if let Some(r) = applied.as_mut() {
                         r.routes_added.push(format!("v4 default via {}", gw));

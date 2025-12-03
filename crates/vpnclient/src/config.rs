@@ -20,6 +20,18 @@ pub struct RuntimeConfig {
 
 impl RuntimeConfig {
     pub fn server_address(&self) -> String { format!("{}:{}", self.host, self.port) }
+    
+    /// Parse server IP address from hostname (if it's an IP)
+    /// Returns None if hostname is not a valid IPv4 address
+    pub fn server_ip(&self) -> Option<[u8; 4]> {
+        // Try to parse as IPv4 address
+        if let Ok(addr) = self.host.parse::<Ipv4Addr>() {
+            let octets = addr.octets();
+            Some(octets)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -112,13 +124,12 @@ impl TryFrom<shared_config::ClientConfig> for RuntimeConfig {
             AuthConfig::Anonymous
         };
     let client_defaults = ClientRuntime::default();
-    // Removed: metrics/snapshot/health/debug tunables (now fixed internally)
-    // Always derive deterministic MAC from username|hub|server triple.
-    use sha2::{Digest, Sha256};
-    let mut h=Sha256::new();
-    h.update(c.username.as_bytes()); h.update(b"|"); h.update(c.hub.as_bytes()); h.update(b"|"); h.update(c.server.as_bytes());
-    let out=h.finalize();
-    let mut mac_bytes=[0u8;6]; mac_bytes.copy_from_slice(&out[..6]);
+    // ✅ RANDOMIZE MAC (like Zig/Swift) for different IPs each connection
+    // Previously: deterministic SHA256(username|hub|server) -> same IP always
+    // Now: random bytes -> DHCP assigns different IPs
+    use rand::RngCore;
+    let mut mac_bytes = [0u8; 6];
+    rand::thread_rng().fill_bytes(&mut mac_bytes);
     mac_bytes[0] = (mac_bytes[0] & 0b1111_1110) | 0b0000_0010; // locally administered unicast
         // Determine DHCP enable flags from ip_version preference + presence of static configs.
         use crate::shared_config::IpVersionPreference;

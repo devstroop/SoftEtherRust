@@ -297,6 +297,23 @@ impl DataPlane {
             frame.len(),
             id
         );
+        
+        // Debug: Check if this is a DHCP packet
+        if frame.len() > 42 {
+            let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+            if ethertype == 0x0800 && frame.len() > 34 {
+                let ip_proto = frame[23];
+                if ip_proto == 17 { // UDP
+                    let udp_start = 34;
+                    if frame.len() > udp_start + 4 {
+                        let src_port = u16::from_be_bytes([frame[udp_start], frame[udp_start + 1]]);
+                        let dst_port = u16::from_be_bytes([frame[udp_start + 2], frame[udp_start + 3]]);
+                        // DHCP packet (client -> server)
+                    }
+                }
+            }
+        }
+        
         let ok = writer.send(frame).is_ok();
         if !ok {
             if let Some(cb)=&self.event_cb { cb(293, format!("dataplane tx failure: enqueue error link_id={}", id)); }
@@ -488,15 +505,16 @@ impl DataPlane {
                         }
                     }
                 }
-                // Optional: log interesting L2 types (e.g., DHCP) for diagnostics
+                
+                // Frames received from server
+                
+                // Optional: log DHCP for diagnostics (silent in production)
                 for f in &frames {
                     if f.len() >= 42 {
                         let ethertype = u16::from_be_bytes([f[12], f[13]]);
                         if ethertype == 0x0800 {
-                            // IPv4
                             let ip_proto = f[23];
                             if ip_proto == 17 {
-                                // UDP
                                 let src_port = u16::from_be_bytes([f[34], f[35]]);
                                 let dst_port = u16::from_be_bytes([f[36], f[37]]);
                                 if (src_port == 67 || src_port == 68)

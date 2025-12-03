@@ -115,6 +115,7 @@ pub struct AppliedResources {
     pub ipv4_addr: Option<(Ipv4Addr, u8)>,
     pub ipv6_addr: Option<(Ipv6Addr, u8)>,
     pub routes_added: Vec<String>,
+    pub original_default_gateway: Option<(Ipv4Addr, Option<String>)>, // (gateway IP, interface name)
     pub original_dns: Option<Vec<std::net::IpAddr>>,
     pub dns_modified: bool,
     pub dns_service_name: Option<String>,
@@ -222,28 +223,34 @@ impl VpnClient {
         self.set_state(ConnectionState::Connecting);
         let mut redirect_count = 0u8;
         let mut attempt: u32 = 0;
+        
+        // Create session BEFORE auth loop (with temp UUID name) - SERVER NEEDS THIS!
+        let session_config = SessionConfig {
+            timeout: self.config.connection.timeout,
+            max_connection: self.config.connection.max_connections,
+            keep_alive_interval: 50,
+            additional_connection_interval: 1000,
+            connection_disconnect_span: 12000,
+            retry_interval: 15,
+            qos: false,
+        };
+        let client_auth = self.create_client_auth()?;
+        let client_option = self.create_client_option()?;
+        let mut session = Session::new(
+            format!("SoftEtherRustClient_{}", uuid::Uuid::new_v4()),
+            client_option.clone(),
+            client_auth.clone(),
+            session_config,
+        )?;
+        
         loop {
             if redirect_count > 1 {
                 anyhow::bail!("Too many redirects");
             }
-
+            
+            // Recreate auth/option on each iteration (especially after redirect)
             let client_auth = self.create_client_auth()?;
             let client_option = self.create_client_option()?;
-            let session_config = SessionConfig {
-                timeout: self.config.connection.timeout,
-                max_connection: self.config.connection.max_connections,
-                keep_alive_interval: 50,
-                additional_connection_interval: 1000,
-                connection_disconnect_span: 12000,
-                retry_interval: 15,
-                qos: false,
-            };
-            let mut session = Session::new(
-                format!("SoftEtherRustClient_{}", uuid::Uuid::new_v4()),
-                client_option.clone(),
-                client_auth.clone(),
-                session_config,
-            )?;
 
             let timeout_duration = Duration::from_secs(self.config.connection.timeout as u64);
             // Establish connection with exponential backoff on failures
@@ -318,7 +325,7 @@ impl VpnClient {
                 continue;
             }
 
-            // -- Auth success, no redirect → apply crypto settings --
+            // -- Auth success, no redirect → use pre-created session --
             // CRITICAL: Use server-negotiated crypto settings, not client preferences!
             session.server_use_encrypt = auth_result.use_encrypt;
             session.server_use_compress = auth_result.use_compress;
@@ -391,7 +398,52 @@ impl VpnClient {
                     }
                 }));
             }
-            // Establish the first bulk data link via additional_connect before bridging/DHCP
+            
+            // ✅ CRITICAL FIX: Create TUN bridge BEFORE opening data link!
+            // The packet adapter MUST be registered with DataPlane before the server starts sending packets
+            // This matches Zig/iOS behavior where adapter is initialized before SessionMain starts
+            if let Some(dp) = self.dataplane.clone() {
+                let mac = self.config.client.mac_address;
+                let server_ip = self.config.server_ip(); // Parse server IP for host route
+                match crate::tun_bridge::spawn_tun_bridge(dp, mac, server_ip) {
+                    Ok((tun_name, l2_inject_tx, rx_task, tx_task, l2_inject_task, dhcp_task)) => {
+                        info!("TUN bridge established: {} (OS ↔ VirtualTap ↔ DataPlane)", tun_name);
+                        self.actual_interface_name = Some(tun_name.clone());
+                        self.l2_inject_tx = Some(l2_inject_tx.clone());  // Store for DHCP renewal
+                        self.aux_tasks.push(rx_task);
+                        self.aux_tasks.push(tx_task);
+                        self.aux_tasks.push(l2_inject_task);
+                        self.aux_tasks.push(dhcp_task); // Add DHCP task
+                    }
+                    Err(e) => {
+                        warn!("Failed to spawn TUN bridge: {}", e);
+                        return Err(anyhow::anyhow!("TUN bridge creation failed: {}", e));
+                    }
+                }
+            }
+            
+            // ✅ CRITICAL: Add host route for VPN server BEFORE opening data link
+            // This ensures the data link TCP connection uses the original gateway
+            // If we add this route after the connection is established, the connection breaks
+            if let Some(server_ip) = self.config.server_ip() {
+                use virtualtap::RouteManager;
+                let mut route_mgr = RouteManager::new();
+                
+                // Get original gateway
+                if let Ok(original_gw) = route_mgr.get_default_gateway() {
+                    // Add host route for VPN server through original gateway
+                    if let Err(e) = route_mgr.add_host_route(server_ip) {
+                        warn!("Failed to add pre-connection host route: {}", e);
+                    } else {
+                        info!("[●] PRE-CONNECT: Added host route for VPN server (protects data link)");
+                    }
+                } else {
+                    warn!("Failed to get default gateway for pre-connection host route");
+                }
+            }
+            
+            // Establish the first bulk data link via additional_connect
+            // NOW the adapter is ready to receive packets!
             if let Err(e) = self.open_primary_data_link().await { error!("Failed to establish primary data link: {}", e); return Err(e); }
             
             // Start SessionMain-equivalent packet pump (matches Swift SessionMain loop behavior)
@@ -435,81 +487,13 @@ impl VpnClient {
                 return Err(anyhow::anyhow!("static_ip required by configuration"));
             }
 
-            // Create TUN device with VirtualTap L2↔L3 translation BEFORE DHCP
-            // This ensures packets can flow to/from the OS during DHCP negotiation
-            if let Some(dp) = self.dataplane.clone() {
-                let mac = self.config.client.mac_address;
-                match crate::tun_bridge::spawn_tun_bridge(dp, mac) {
-                    Ok((tun_name, l2_inject_tx, rx_task, tx_task, l2_inject_task)) => {
-                        info!("TUN bridge established: {} (OS ↔ VirtualTap ↔ DataPlane)", tun_name);
-                        self.actual_interface_name = Some(tun_name.clone());
-                        self.l2_inject_tx = Some(l2_inject_tx.clone());  // Store for DHCP renewal
-                        self.aux_tasks.push(rx_task);
-                        self.aux_tasks.push(tx_task);
-                        self.aux_tasks.push(l2_inject_task);
-                    }
-                    Err(e) => {
-                        warn!("Failed to spawn TUN bridge: {}", e);
-                        return Err(anyhow::anyhow!("TUN bridge creation failed: {}", e));
-                    }
-                }
-            }
-
-            // Bridging / DHCP flow: if no IPv4 settings and DHCP enabled, perform acquisition (unless skipped earlier)
-            if self.config.client.enable_in_tunnel_dhcp && self.network_settings.as_ref().and_then(|n| n.assigned_ipv4).is_none() {
-                if let Some(dp)=self.dataplane.clone() {
-                    if self.l2_inject_tx.is_none() {
-                        warn!("DHCP enabled but L2 injection channel not available");
-                        return Err(anyhow::anyhow!("Cannot perform DHCP without L2 injection channel"));
-                    }
-                    let l2_tx = self.l2_inject_tx.clone().unwrap();
-                    self.emit_event(EventLevel::Info, 299, "dhcp acquisition attempt");
-                    let start=std::time::Instant::now();
-                    // Wait up to 20 seconds for session to fully establish and data link to become active
-                    // The server needs time to initialize the session before it will forward frames
-                    while dp.summary().total_links==0 && start.elapsed() < Duration::from_secs(20) { tokio::time::sleep(Duration::from_millis(100)).await; }
-                    // Give additional time for RX loop to stabilize even after link is registered
-                    if dp.summary().total_links > 0 {
-                        info!("Data link active ({}), waiting additional 10s for session stabilization", dp.summary().total_links);
-                        tokio::time::sleep(Duration::from_secs(10)).await;
-                    }
-                    if self.dhcp_mac.is_none(){
-                        tracing::warn!("dhcp_mac not initialized; using deterministic client MAC");
-                        self.dhcp_mac=Some(self.config.client.mac_address);
-                    }
-                    let mac=self.dhcp_mac.unwrap_or(self.config.client.mac_address);
-                    let dp_clone=dp.clone();
-                    let mut dhcp=crate::dhcp::DhcpClient::new(dp_clone.clone(), mac, l2_tx.clone());
-                    info!("Attempting DHCP over tunnel");
-                    let iface_for_dhcp=self.actual_interface_name.as_ref().unwrap_or(&self.config.client.interface_name).clone();
-                    if let Some(xid)=self.dhcp_xid { dhcp=crate::dhcp::DhcpClient::new_with_xid(dp_clone, mac, xid, l2_tx); }
-                    // Hook DHCP diagnostics into event stream
-                    let event_tx_cb = self.event_tx.clone();
-                    let cb = move |code: u32, message: String| {
-                        if let Some(tx) = &event_tx_cb {
-                            // Map DHCP diag codes to levels: 297/296 = Warn, others Info
-                            let level = if code == 297 || code == 296 { crate::types::EventLevel::Warn } else { crate::types::EventLevel::Info };
-                            let _ = tx.send(crate::types::ClientEvent { level, code: code as i32, message });
-                        }
-                    };
-                    match dhcp.run_once(&iface_for_dhcp, Duration::from_secs(30), Some(&cb)).await {
-                        Ok(Some(lease))=>{
-                            self.network_settings=Some(crate::types::network_settings_from_lease(&lease));
-                            self.emit_settings_snapshot();
-                            info!("DHCP lease acquired: {}", lease.client_ip);
-                            self.dhcp_mac=Some(mac);
-                            self.dhcp_xid=Some(dhcp.xid());
-                            let now_acq=current_unix_secs();
-                            self.lease_acquired_at=Some(now_acq);
-                            self.lease_acquired_at_atomic.store(now_acq, Ordering::Relaxed);
-                            self.maybe_emit_interface_snapshot(&lease, &iface_for_dhcp, true);
-                            if let Some(lt)=lease.lease_time { let xid=self.dhcp_xid; self.spawn_dhcp_renew_task(lease, lt, iface_for_dhcp.clone(), xid); self.spawn_lease_health_monitor(lt.as_secs()); }
-                        }
-                        Ok(None)=>warn!("No DHCP offer/ack within timeout"),
-                        Err(e)=>warn!("DHCP negotiation failed: {e}"),
-                    }
-                }
-            }
+            // TUN bridge was already created before opening the data link (see above)
+            // This ensures the adapter is ready when server starts sending packets
+            
+            // ✅ DHCP is now handled automatically by the TUN bridge task
+            // It sends DHCP DISCOVER to the server via DataPlane and waits for OFFER/ACK
+            // VirtualTap will parse the responses and apply IP configuration automatically
+            info!("DHCP will be handled by TUN bridge (sends to server via SoftEther protocol)");
 
             // DHCPv6 acquisition (independent) if enabled
             if self.config.client.enable_in_tunnel_dhcpv6 {
@@ -770,57 +754,98 @@ impl VpnClient {
             use tokio::process::Command;
             if let Some(resources) = self.applied_resources.take() {
                 let ifname = resources.interface_name;
-                // Remove routes in reverse order
-                for r in resources.routes_added.iter().rev() {
+                
+                // CRITICAL: Restore original default gateway if we have it
+                if let Some((orig_gw, orig_iface)) = resources.original_default_gateway {
+                    info!("Restoring original default gateway: {} via {:?}", orig_gw, orig_iface);
                     #[cfg(target_os = "linux")]
                     {
-                        if let Some(gw) = r.strip_prefix("v4 default via ") {
-                            let _ = Command::new("ip")
-                                .arg("route")
-                                .arg("del")
-                                .arg("default")
-                                .arg("via")
-                                .arg(gw.trim())
-                                .arg("dev")
-                                .arg(&ifname)
-                                .output()
-                                .await;
-                            continue;
+                        // First delete VPN default route
+                        let _ = Command::new("ip")
+                            .arg("route")
+                            .arg("del")
+                            .arg("default")
+                            .output()
+                            .await;
+                        // Then restore original
+                        let mut cmd = Command::new("ip");
+                        cmd.arg("route").arg("add").arg("default").arg("via").arg(orig_gw.to_string());
+                        if let Some(ref iface) = orig_iface {
+                            cmd.arg("dev").arg(iface);
                         }
-                        if let Some(gw6) = r.strip_prefix("v6 default via ") {
-                            let _ = Command::new("ip")
-                                .arg("-6")
-                                .arg("route")
-                                .arg("del")
-                                .arg("default")
-                                .arg("via")
-                                .arg(gw6.trim())
-                                .arg("dev")
-                                .arg(&ifname)
-                                .output()
-                                .await;
-                            continue;
-                        }
+                        let _ = cmd.output().await;
+                        info!("Original default route restored");
                     }
                     #[cfg(target_os = "macos")]
                     {
-                        if let Some(gw) = r.strip_prefix("v4 default via ") {
-                            let _ = Command::new("route")
-                                .arg("delete")
-                                .arg("default")
-                                .arg(gw.trim())
-                                .output()
-                                .await;
-                            continue;
+                        // First delete VPN default route
+                        let _ = Command::new("route")
+                            .arg("delete")
+                            .arg("default")
+                            .output()
+                            .await;
+                        // Then restore original
+                        let _ = Command::new("route")
+                            .arg("add")
+                            .arg("default")
+                            .arg(orig_gw.to_string())
+                            .output()
+                            .await;
+                        info!("Original default route restored");
+                    }
+                } else {
+                    // Fallback: just remove routes we added (old behavior)
+                    for r in resources.routes_added.iter().rev() {
+                        #[cfg(target_os = "linux")]
+                        {
+                            if let Some(gw) = r.strip_prefix("v4 default via ") {
+                                let _ = Command::new("ip")
+                                    .arg("route")
+                                    .arg("del")
+                                    .arg("default")
+                                    .arg("via")
+                                    .arg(gw.trim())
+                                    .arg("dev")
+                                    .arg(&ifname)
+                                    .output()
+                                    .await;
+                                continue;
+                            }
+                            if let Some(gw6) = r.strip_prefix("v6 default via ") {
+                                let _ = Command::new("ip")
+                                    .arg("-6")
+                                    .arg("route")
+                                    .arg("del")
+                                    .arg("default")
+                                    .arg("via")
+                                    .arg(gw6.trim())
+                                    .arg("dev")
+                                    .arg(&ifname)
+                                    .output()
+                                    .await;
+                                continue;
+                            }
                         }
-                        if r.starts_with("v6 default via ") {
-                            let _ = Command::new("route")
-                                .arg("delete")
-                                .arg("-inet6")
-                                .arg("default")
-                                .output()
-                                .await;
-                            continue;
+                        #[cfg(target_os = "macos")]
+                        {
+                            if let Some(gw) = r.strip_prefix("v4 default via ") {
+                                let _ = Command::new("route")
+                                    .arg("delete")
+                                    .arg("default")
+                                    .arg(gw.trim())
+                                    .output()
+                                    .await;
+                                continue;
+                            }
+                            if r.starts_with("v6 default via ") {
+                                let _ = Command::new("route")
+                                    .arg("delete")
+                                    .arg("-inet6")
+                                    .arg("default")
+                                    .output()
+                                    .await;
+                                continue;
+                            }
                         }
                     }
                 }

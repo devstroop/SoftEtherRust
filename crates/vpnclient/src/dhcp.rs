@@ -168,9 +168,9 @@ impl DhcpClient {
     }
 
     fn build_discover(&self) -> Result<Vec<u8>> {
-        // Use VirtualTap C library's DHCP builder (matches working Zig/Swift implementation)
-        virtualtap::build_dhcp_discover(self.mac, self.xid)
-            .map_err(|code| anyhow::anyhow!("DHCP DISCOVER build failed: error code {}", code))
+        // Use pure Rust VirtualTap's DHCP builder
+        let discover_frame = virtualtap::build_dhcp_discover(self.mac, self.xid);
+        Ok(discover_frame)
     }
 
     fn build_request(&self, offer: &v4::Message) -> Result<Vec<u8>> {
@@ -182,13 +182,13 @@ impl DhcpClient {
             return Err(anyhow::anyhow!("DHCP OFFER missing ServerIdentifier"));
         };
         
-        // Convert to network byte order (u32)
-        let requested_ip_u32 = u32::from_be_bytes(requested_ip.octets());
-        let server_ip_u32 = u32::from_be_bytes(server_ip.octets());
+        // Convert to network byte order ([u8; 4])
+        let requested_ip_arr = requested_ip.octets();
+        let server_ip_arr = server_ip.octets();
         
-        // Use VirtualTap C library's DHCP builder (matches working Zig/Swift implementation)
-        virtualtap::build_dhcp_request(self.mac, self.xid, requested_ip_u32, server_ip_u32)
-            .map_err(|code| anyhow::anyhow!("DHCP REQUEST build failed: error code {}", code))
+        // Use pure Rust VirtualTap's DHCP builder
+        let request_frame = virtualtap::build_dhcp_request(self.mac, self.xid, requested_ip_arr, server_ip_arr);
+        Ok(request_frame)
     }
 
     /// Build a broadcast RENEW/REBIND style REQUEST (broadcast IP/Ethernet)

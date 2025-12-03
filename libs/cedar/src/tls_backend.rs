@@ -22,7 +22,7 @@ mod native_impl {
     impl TlsStream {
         pub fn connect(
             host: &str,
-            tcp_stream: TcpStream,
+            mut tcp_stream: TcpStream,
             skip_verify: bool,
         ) -> Result<Self> {
             let mut builder = TlsConnector::builder();
@@ -38,6 +38,10 @@ mod native_impl {
 
             let connector = builder.build()
                 .context("Failed to build TLS connector")?;
+            
+            // Ensure TCP stream is in blocking mode for TLS operations
+            tcp_stream.set_nonblocking(false)
+                .context("Failed to set blocking mode")?;
             
             let stream = connector.connect(host, tcp_stream)
                 .context("TLS handshake failed")?;

@@ -20,6 +20,8 @@ pub struct AuthResult {
     pub use_encrypt: bool,
     /// Server-negotiated compression setting
     pub use_compress: bool,
+    /// Server-assigned session name (e.g., SID-USER-PC-123)
+    pub session_name: Option<String>,
 }
 
 impl VpnClient {
@@ -175,9 +177,18 @@ impl VpnClient {
                 .context("Failed to build cedar login pack")?
         };
 
-        // CRITICAL: Bridge/Routing mode flags (missing these causes NoRouting=1 policy!)
-        auth_pack.add_bool("require_bridge_routing_mode", true)?;
-        auth_pack.add_bool("require_monitor_mode", false)?;
+        // CRITICAL: Bridge/Routing mode flags (must use INT not BOOL - server expects 0/1 integers!)
+        // Using add_bool() caused server to not enable DHCP - it didn't see the flag correctly
+        auth_pack.add_int("require_bridge_routing_mode", 1)?;
+        auth_pack.add_int("require_monitor_mode", 0)?;
+        
+        // CRITICAL: RUDP and bulk transfer support (required for proper packet flow!)
+        // Missing these causes server to not send certain packet types including DHCP
+        auth_pack.add_int("qos", 0)?;
+        auth_pack.add_int("support_bulk_on_rudp", 1)?;
+        auth_pack.add_int("support_hmac_on_bulk_of_rudp", 1)?;
+        auth_pack.add_int("support_udp_recovery", 1)?;
+        auth_pack.add_int("rudp_bulk_max_version", 2)?;
 
         // Environment info
         let os_name = std::env::consts::OS;
@@ -244,6 +255,7 @@ impl VpnClient {
                 redirect: Some((redirect_host.to_string(), redirect_port)),
                 use_encrypt,
                 use_compress,
+                session_name: None,
             });
         }
         let do_redirect = welcome_pack
@@ -269,6 +281,7 @@ impl VpnClient {
                     redirect: Some((ip.to_string(), port)),
                     use_encrypt,
                     use_compress,
+                    session_name: None,
                 });
             }
         }
@@ -292,17 +305,20 @@ impl VpnClient {
                         redirect: Some((ipv4.to_string(), port)),
                         use_encrypt,
                         use_compress,
+                        session_name: None,
                     });
                 }
             }
         }
 
         // Session info lines
-        if let Ok(session_name) = welcome_pack
+        let session_name = welcome_pack
             .get_str("SessionName")
             .or_else(|_| welcome_pack.get_str("session_name"))
-        {
-            info!("[INFO] session_established session_name={}", session_name);
+            .ok()
+            .map(|s| s.to_string());
+        if let Some(ref sn) = session_name {
+            info!("[INFO] session_established session_name={}", sn);
         }
         if let Ok(cn) = welcome_pack
             .get_str("ConnectionName")
@@ -358,6 +374,25 @@ impl VpnClient {
                 }
                 if !flags.is_empty() {
                     self.emit_event(super::types::EventLevel::Info, 1201, format!("policy: {}", flags.join(" ")));
+                }
+                
+                // ⚠️ Check CRITICAL DHCP-blocking policies
+                for (k, v) in &ns.policies {
+                    match k.as_str() {
+                        "DHCPFilter" if *v != 0 => {
+                            warn!("🚨 DHCPFilter={} - ALL DHCP PACKETS BLOCKED!", v);
+                        }
+                        "DHCPNoServer" if *v != 0 => {
+                            warn!("🚨 DHCPNoServer={} - DHCP RESPONSES FROM SERVER BLOCKED!", v);
+                        }
+                        "NoBridge" if *v != 0 => {
+                            warn!("⚠️  NoBridge={} - Bridge mode may be disabled!", v);
+                        }
+                        "NoRouting" if *v != 0 => {
+                            warn!("⚠️  NoRouting={} - Routing mode may be disabled!", v);
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -448,6 +483,7 @@ impl VpnClient {
             redirect: None,
             use_encrypt,
             use_compress,
+            session_name,
         })
     }
 
