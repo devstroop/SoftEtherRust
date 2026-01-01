@@ -141,6 +141,7 @@ jobs:
         run: |
           mkdir -p target/ios
           cp target/aarch64-apple-ios/release/libsoftether.a target/ios/
+          rm -rf target/ios/SoftEtherVPN.xcframework
           xcodebuild -create-xcframework \
             -library target/ios/libsoftether.a -headers include \
             -output target/ios/SoftEtherVPN.xcframework

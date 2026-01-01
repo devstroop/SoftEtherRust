@@ -14,11 +14,12 @@ use std::time::{Duration, Instant};
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use std::sync::atomic::Ordering;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use tokio::sync::mpsc;
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use tokio::time::interval;
 use tokio::time::timeout;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use tracing::error;
 use tracing::{debug, info, warn};
 
@@ -29,12 +30,18 @@ use crate::adapter::TunDevice;
 use crate::adapter::UtunDevice;
 #[cfg(target_os = "windows")]
 use crate::adapter::WintunDevice;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use crate::client::ConcurrentReader;
 use crate::client::{ConnectionManager, VpnConnection};
 use crate::error::{Error, Result};
-use crate::packet::{ArpHandler, DhcpClient, DhcpConfig, DhcpState, BROADCAST_MAC};
-use crate::protocol::{compress, decompress, decompress_into, is_compressed, TunnelCodec};
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+use crate::packet::ArpHandler;
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+use crate::packet::BROADCAST_MAC;
+use crate::packet::{DhcpClient, DhcpConfig, DhcpState};
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+use crate::protocol::decompress_into;
+use crate::protocol::{compress, decompress, is_compressed, TunnelCodec};
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use super::DataLoopState;
@@ -237,6 +244,7 @@ impl TunnelRunner {
     /// Configure routes for VPN traffic.
     ///
     /// This sets up routing so traffic to the VPN subnet goes through the TUN device.
+    #[allow(dead_code)]
     fn configure_routes(&self, tun: &impl TunAdapter, dhcp_config: &DhcpConfig) -> Result<()> {
         // If explicit routes are configured, use those
         if !self.config.routes.is_empty() {
