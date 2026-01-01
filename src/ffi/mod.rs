@@ -70,13 +70,13 @@
 //! external fun softether_destroy(handle: Long)
 //! ```
 
-mod types;
 mod callbacks;
 mod client;
+mod types;
 
-pub use types::*;
 pub use callbacks::*;
 pub use client::*;
+pub use types::*;
 
 #[cfg(feature = "jni")]
 mod jni;

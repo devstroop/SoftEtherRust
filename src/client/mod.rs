@@ -7,7 +7,7 @@ mod state;
 
 pub use concurrent_reader::{ConcurrentReader, ReceivedPacket};
 pub use connection::VpnConnection;
-pub use multi_connection::{ConnectionManager, ManagedConnection, TcpDirection, ConnectionStats};
+pub use multi_connection::{ConnectionManager, ConnectionStats, ManagedConnection, TcpDirection};
 pub use state::VpnState;
 
 use std::net::Ipv4Addr;
@@ -22,12 +22,13 @@ use crate::adapter::TunAdapter;
 use crate::config::VpnConfig;
 use crate::error::{Error, Result};
 use crate::net::{UdpAccel, UdpAccelAuthParams};
-use crate::protocol::{
-    AuthPack, AuthResult, AuthType, ConnectionOptions, HelloResponse, HttpCodec, HttpRequest, Pack, RedirectInfo, TunnelCodec,
-    VPN_TARGET, SIGNATURE_TARGET, CONTENT_TYPE_SIGNATURE, CONTENT_TYPE_PACK, VPN_SIGNATURE,
-};
 use crate::packet::{DhcpConfig, EtherType};
-use crate::tunnel::{TunnelRunner, TunnelConfig, RouteConfig};
+use crate::protocol::{
+    AuthPack, AuthResult, AuthType, ConnectionOptions, HelloResponse, HttpCodec, HttpRequest, Pack,
+    RedirectInfo, TunnelCodec, CONTENT_TYPE_PACK, CONTENT_TYPE_SIGNATURE, SIGNATURE_TARGET,
+    VPN_SIGNATURE, VPN_TARGET,
+};
+use crate::tunnel::{RouteConfig, TunnelConfig, TunnelRunner};
 
 /// VPN client statistics.
 #[derive(Debug, Clone, Default)]
@@ -88,7 +89,10 @@ impl VpnClient {
 
         // Log multi-connection configuration
         if self.config.max_connections > 1 {
-            debug!(max_connections = self.config.max_connections, "Multi-connection mode enabled");
+            debug!(
+                max_connections = self.config.max_connections,
+                "Multi-connection mode enabled"
+            );
         }
 
         info!(server = %self.config.server, port = self.config.port, hub = %self.config.hub,
@@ -111,7 +115,10 @@ impl VpnClient {
                     self.udp_accel = Some(accel);
                 }
                 Err(e) => {
-                    warn!("Failed to initialize UDP acceleration: {}. Continuing without UDP accel.", e);
+                    warn!(
+                        "Failed to initialize UDP acceleration: {}. Continuing without UDP accel.",
+                        e
+                    );
                     self.udp_accel = None;
                 }
             }
@@ -120,8 +127,12 @@ impl VpnClient {
         // Perform HTTP handshake
         self.state = VpnState::Handshaking;
         let hello = self.perform_handshake(&mut conn).await?;
-        debug!(version = hello.server_version, build = hello.server_build, 
-            server = %hello.server_string, "Server hello received");
+        debug!(
+            version = hello.server_version,
+            build = hello.server_build,
+            server = %hello.server_string,
+            "Server hello received"
+        );
 
         // Authenticate (with UDP accel params if available)
         self.state = VpnState::Authenticating;
@@ -140,7 +151,7 @@ impl VpnClient {
             let redirect_server = redirect.ip_string();
             let redirect_port = redirect.port;
             debug!(server = %redirect_server, port = redirect_port, "Cluster redirect");
-            
+
             // Update actual server IP to redirect server
             if let Ok(ip) = redirect_server.parse::<Ipv4Addr>() {
                 actual_server_ip = ip;
@@ -148,24 +159,24 @@ impl VpnClient {
             // Update actual server address and port for additional connections
             actual_server_addr = redirect_server.clone();
             actual_server_port = redirect_port as u16;
-            
+
             // Send empty Pack acknowledgment
             let ack_pack = Pack::new();
             let request = HttpRequest::post(VPN_TARGET)
                 .header("Content-Type", CONTENT_TYPE_PACK)
                 .header("Connection", "Keep-Alive")
                 .body(ack_pack.to_bytes());
-            
+
             let host = format!("{}:{}", self.config.server, self.config.port);
             let request_bytes = request.build(&host);
             active_conn.write_all(&request_bytes).await?;
-            
+
             // Small delay before closing
             tokio::time::sleep(Duration::from_millis(100)).await;
-            
+
             // Close current connection
             drop(active_conn);
-            
+
             // Connect to redirect server with ticket auth
             let (redirect_conn, redirect_result) = self.connect_redirect(&hello, &redirect).await?;
             auth_result = redirect_result;
@@ -174,33 +185,39 @@ impl VpnClient {
 
         // Check for session key
         if auth_result.session_key.is_empty() {
-            return Err(Error::AuthenticationFailed("No session key received".into()));
+            return Err(Error::AuthenticationFailed(
+                "No session key received".into(),
+            ));
         }
 
-        debug!(key_len = auth_result.session_key.len(), "Session key received");
+        debug!(
+            key_len = auth_result.session_key.len(),
+            "Session key received"
+        );
 
         // Create ConnectionManager for multi-connection support
         // Pass the actual server address (after redirect) for additional connections
         let mut conn_mgr = ConnectionManager::new(
-            active_conn, 
-            &self.config, 
+            active_conn,
+            &self.config,
             &auth_result,
             &actual_server_addr,
             actual_server_port,
         );
-        
+
         // Start tunnel
         self.state = VpnState::EstablishingTunnel;
         info!("VPN session established");
 
         // Run the tunnel data loop
         self.state = VpnState::Connected;
-        
+
         // Build routes from config
-        let routes: Vec<RouteConfig> = crate::config::RoutingConfig::parse_ipv4_cidrs(&self.config.routing.ipv4_include)
-            .into_iter()
-            .map(|(dest, prefix_len)| RouteConfig { dest, prefix_len })
-            .collect();
+        let routes: Vec<RouteConfig> =
+            crate::config::RoutingConfig::parse_ipv4_cidrs(&self.config.routing.ipv4_include)
+                .into_iter()
+                .map(|(dest, prefix_len)| RouteConfig { dest, prefix_len })
+                .collect();
 
         let tunnel_config = TunnelConfig {
             keepalive_interval: 5,
@@ -211,9 +228,9 @@ impl VpnClient {
             use_compress: self.config.use_compress,
             vpn_server_ip: Some(actual_server_ip),
         };
-        
+
         let mut runner = TunnelRunner::new(tunnel_config);
-        
+
         // Set up Ctrl+C handler
         let running = runner.running();
         tokio::spawn(async move {
@@ -221,14 +238,16 @@ impl VpnClient {
             debug!("Shutdown signal received");
             running.store(false, Ordering::SeqCst);
         });
-        
+
         // Run the tunnel with multi-connection support
         match runner.run_multi(&mut conn_mgr).await {
             Ok(()) => {
                 debug!("Tunnel stopped cleanly");
                 let stats = conn_mgr.stats();
-                info!("Connection stats: {} connections, {} bytes sent, {} bytes received",
-                      stats.total_connections, stats.total_bytes_sent, stats.total_bytes_received);
+                info!(
+                    "Connection stats: {} connections, {} bytes sent, {} bytes received",
+                    stats.total_connections, stats.total_bytes_sent, stats.total_bytes_received
+                );
             }
             Err(e) => {
                 error!("Tunnel error: {}", e);
@@ -238,7 +257,7 @@ impl VpnClient {
 
         Ok(())
     }
-    
+
     /// Connect to redirect server and return connection + auth result.
     async fn connect_redirect(
         &self,
@@ -248,20 +267,20 @@ impl VpnClient {
         // Create a modified config for the redirect server
         let redirect_server = redirect.ip_string();
         let redirect_port = redirect.port as u16;
-        
+
         debug!(server = %redirect_server, port = redirect_port, "Connecting to cluster server");
-        
+
         let mut redirect_config = self.config.clone();
         redirect_config.server = redirect_server.clone();
         redirect_config.port = redirect_port;
-        
+
         // Connect to redirect server
         let mut conn = VpnConnection::connect(&redirect_config).await?;
-        
+
         // Perform handshake
         let redirect_hello = self.perform_handshake(&mut conn).await?;
         debug!("Redirect server hello: {:?}", redirect_hello);
-        
+
         // Build connection options from config
         // Multi-connection support: use actual max_connections value
         let options = ConnectionOptions {
@@ -275,7 +294,10 @@ impl VpnClient {
         };
 
         // Build UDP acceleration params if we have an active UDP accel instance
-        let udp_accel_params = self.udp_accel.as_ref().map(UdpAccelAuthParams::from_udp_accel);
+        let udp_accel_params = self
+            .udp_accel
+            .as_ref()
+            .map(UdpAccelAuthParams::from_udp_accel);
 
         // Authenticate with ticket
         let auth_pack = AuthPack::new_ticket(
@@ -286,28 +308,30 @@ impl VpnClient {
             &options,
             udp_accel_params.as_ref(),
         );
-        
+
         let request = HttpRequest::post(VPN_TARGET)
             .header("Content-Type", CONTENT_TYPE_PACK)
             .header("Connection", "Keep-Alive")
             .body(auth_pack.to_bytes());
-        
+
         let host = format!("{}:{}", redirect_server, redirect_port);
         let request_bytes = request.build(&host);
-        
+
         debug!("Sending ticket authentication");
         conn.write_all(&request_bytes).await?;
-        
+
         // Read response
         let mut codec = HttpCodec::new();
         let mut buf = vec![0u8; 8192];
-        
+
         loop {
             let n = conn.read(&mut buf).await?;
             if n == 0 {
-                return Err(Error::ConnectionFailed("Connection closed during redirect authentication".into()));
+                return Err(Error::ConnectionFailed(
+                    "Connection closed during redirect authentication".into(),
+                ));
             }
-            
+
             if let Some(response) = codec.feed(&buf[..n])? {
                 if response.status_code != 200 {
                     return Err(Error::AuthenticationFailed(format!(
@@ -315,30 +339,35 @@ impl VpnClient {
                         response.status_code
                     )));
                 }
-                
+
                 if !response.body.is_empty() {
                     let pack = Pack::deserialize(&response.body)?;
-                    debug!("Redirect auth response keys: {:?}", pack.keys().collect::<Vec<_>>());
-                    
+                    debug!(
+                        "Redirect auth response keys: {:?}",
+                        pack.keys().collect::<Vec<_>>()
+                    );
+
                     let result = AuthResult::from_pack(&pack)?;
-                    
+
                     if result.error > 0 {
                         return Err(Error::AuthenticationFailed(format!(
                             "Redirect authentication error code: {}",
                             result.error
                         )));
                     }
-                    
+
                     return Ok((conn, result));
                 } else {
-                    return Err(Error::ServerError("Empty redirect authentication response".into()));
+                    return Err(Error::ServerError(
+                        "Empty redirect authentication response".into(),
+                    ));
                 }
             }
         }
     }
 
     /// Perform HTTP handshake with the server.
-    /// 
+    ///
     /// Phase 1: Send "VPNCONNECT" signature to /vpnsvc/connect.cgi
     /// The server responds with a Hello Pack containing server random.
     async fn perform_handshake(&self, conn: &mut VpnConnection) -> Result<HelloResponse> {
@@ -350,7 +379,7 @@ impl VpnClient {
 
         let host = format!("{}:{}", self.config.server, self.config.port);
         let request_bytes = request.build(&host);
-        
+
         debug!("Sending signature to {}", SIGNATURE_TARGET);
         conn.write_all(&request_bytes).await?;
         debug!("Sent signature ({} bytes)", VPN_SIGNATURE.len());
@@ -358,17 +387,19 @@ impl VpnClient {
         // Read response
         let mut codec = HttpCodec::new();
         let mut buf = vec![0u8; 4096];
-        
+
         loop {
             let n = conn.read(&mut buf).await?;
             if n == 0 {
-                return Err(Error::ConnectionFailed("Connection closed during handshake".into()));
+                return Err(Error::ConnectionFailed(
+                    "Connection closed during handshake".into(),
+                ));
             }
             debug!("Received {} bytes", n);
 
             if let Some(response) = codec.feed(&buf[..n])? {
                 debug!("HTTP response: status={}", response.status_code);
-                
+
                 if response.status_code != 200 {
                     return Err(Error::ServerError(format!(
                         "Server returned status {}",
@@ -390,9 +421,13 @@ impl VpnClient {
     }
 
     /// Authenticate with the server.
-    /// 
+    ///
     /// Phase 2: Send auth Pack to /vpnsvc/vpn.cgi
-    async fn authenticate(&self, conn: &mut VpnConnection, hello: &HelloResponse) -> Result<AuthResult> {
+    async fn authenticate(
+        &self,
+        conn: &mut VpnConnection,
+        hello: &HelloResponse,
+    ) -> Result<AuthResult> {
         // Determine authentication type
         let auth_type = if hello.use_secure_password {
             AuthType::SecurePassword
@@ -416,7 +451,10 @@ impl VpnClient {
         };
 
         // Build UDP acceleration params if we have an active UDP accel instance
-        let udp_accel_params = self.udp_accel.as_ref().map(UdpAccelAuthParams::from_udp_accel);
+        let udp_accel_params = self
+            .udp_accel
+            .as_ref()
+            .map(UdpAccelAuthParams::from_udp_accel);
 
         // Decode password hash from hex string
         let password_hash_vec = hex::decode(&self.config.password_hash)
@@ -448,10 +486,13 @@ impl VpnClient {
 
         let host = format!("{}:{}", self.config.server, self.config.port);
         let request_bytes = request.build(&host);
-        
+
         debug!("Sending authentication to {}", VPN_TARGET);
         conn.write_all(&request_bytes).await?;
-        debug!("Sent authentication request ({} bytes)", auth_pack.to_bytes().len());
+        debug!(
+            "Sent authentication request ({} bytes)",
+            auth_pack.to_bytes().len()
+        );
 
         // Read response
         let mut codec = HttpCodec::new();
@@ -460,13 +501,15 @@ impl VpnClient {
         loop {
             let n = conn.read(&mut buf).await?;
             if n == 0 {
-                return Err(Error::ConnectionFailed("Connection closed during authentication".into()));
+                return Err(Error::ConnectionFailed(
+                    "Connection closed during authentication".into(),
+                ));
             }
             debug!("Received {} bytes", n);
 
             if let Some(response) = codec.feed(&buf[..n])? {
                 debug!("HTTP response: status={}", response.status_code);
-                
+
                 if response.status_code != 200 {
                     return Err(Error::AuthenticationFailed(format!(
                         "Server returned status {}",
@@ -477,9 +520,12 @@ impl VpnClient {
                 if !response.body.is_empty() {
                     debug!("Response body: {} bytes", response.body.len());
                     let pack = Pack::deserialize(&response.body)?;
-                    
+
                     // Debug: print all keys in response
-                    debug!("Auth response pack keys: {:?}", pack.keys().collect::<Vec<_>>());
+                    debug!(
+                        "Auth response pack keys: {:?}",
+                        pack.keys().collect::<Vec<_>>()
+                    );
                     if let Some(error) = pack.get_int("error") {
                         debug!("Error code in pack: {}", error);
                     }
@@ -489,7 +535,7 @@ impl VpnClient {
                     if let Some(direction) = pack.get_int("direction") {
                         debug!("Direction in pack: {}", direction);
                     }
-                    
+
                     let result = AuthResult::from_pack(&pack)?;
                     debug!("Auth result direction: {}", result.direction);
 
@@ -511,12 +557,17 @@ impl VpnClient {
 
     /// Establish additional data connection.
     #[allow(dead_code)]
-    async fn establish_data_connection(&self, auth: &AuthResult, server: &str, port: u16) -> Result<VpnConnection> {
+    async fn establish_data_connection(
+        &self,
+        auth: &AuthResult,
+        server: &str,
+        port: u16,
+    ) -> Result<VpnConnection> {
         // Create config for the target server
         let mut conn_config = self.config.clone();
         conn_config.server = server.to_string();
         conn_config.port = port;
-        
+
         // Connect to the session server
         let mut conn = VpnConnection::connect(&conn_config).await?;
 
@@ -541,7 +592,9 @@ impl VpnClient {
         loop {
             let n = conn.read(&mut buf).await?;
             if n == 0 {
-                return Err(Error::ConnectionFailed("Connection closed during data connection setup".into()));
+                return Err(Error::ConnectionFailed(
+                    "Connection closed during data connection setup".into(),
+                ));
             }
 
             if let Some(response) = codec.feed(&buf[..n])? {
@@ -573,7 +626,11 @@ impl VpnClient {
 
         // Set up routes
         if let Some(gateway) = dhcp_config.gateway {
-            tun.add_route(Ipv4Addr::new(0, 0, 0, 0), Ipv4Addr::new(0, 0, 0, 0), gateway)?;
+            tun.add_route(
+                Ipv4Addr::new(0, 0, 0, 0),
+                Ipv4Addr::new(0, 0, 0, 0),
+                gateway,
+            )?;
         }
 
         let running = self.running.clone();
@@ -675,12 +732,12 @@ impl VpnClient {
         if let Ok(ip) = server.parse::<Ipv4Addr>() {
             return Ok(ip);
         }
-        
+
         // Try to parse as generic IpAddr (handles IPv4 and IPv6)
         if let Ok(std::net::IpAddr::V4(ip)) = server.parse::<std::net::IpAddr>() {
             return Ok(ip);
         }
-        
+
         // Resolve hostname using DNS
         use std::net::ToSocketAddrs;
         let addr_str = format!("{}:443", server);
@@ -692,9 +749,15 @@ impl VpnClient {
                         return Ok(*v4.ip());
                     }
                 }
-                Err(Error::ConnectionFailed(format!("No IPv4 address found for {}", server)))
+                Err(Error::ConnectionFailed(format!(
+                    "No IPv4 address found for {}",
+                    server
+                )))
             }
-            Err(e) => Err(Error::ConnectionFailed(format!("Failed to resolve {}: {}", server, e))),
+            Err(e) => Err(Error::ConnectionFailed(format!(
+                "Failed to resolve {}: {}",
+                server, e
+            ))),
         }
     }
 

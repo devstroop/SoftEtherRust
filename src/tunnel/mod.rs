@@ -7,7 +7,5 @@
 mod data_loop;
 mod runner;
 
-pub use runner::{TunnelRunner, TunnelConfig, RouteConfig};
-pub use data_loop::{
-    DataLoopState, DataLoopConfig, TimingState, LoopResult, Ipv4Info, format_ip,
-};
+pub use data_loop::{format_ip, DataLoopConfig, DataLoopState, Ipv4Info, LoopResult, TimingState};
+pub use runner::{RouteConfig, TunnelConfig, TunnelRunner};

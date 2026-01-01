@@ -81,7 +81,10 @@ impl ConcurrentReader {
             });
         }
 
-        debug!("ConcurrentReader started with {} reader tasks", handles.len());
+        debug!(
+            "ConcurrentReader started with {} reader tasks",
+            handles.len()
+        );
 
         Self {
             rx,

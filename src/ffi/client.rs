@@ -5,8 +5,8 @@
 use std::ffi::{c_char, c_int, CStr};
 use std::sync::{Arc, Mutex};
 
-use super::types::*;
 use super::callbacks::*;
+use super::types::*;
 
 /// Internal client state.
 struct FfiClient {
@@ -166,7 +166,7 @@ pub unsafe extern "C" fn softether_destroy(handle: SoftEtherHandle) {
 
     // Convert back to Arc
     let client = Arc::from_raw(handle as *const Mutex<FfiClient>);
-    
+
     // Disconnect if connected
     {
         if let Ok(mut guard) = client.lock() {
@@ -178,7 +178,7 @@ pub unsafe extern "C" fn softether_destroy(handle: SoftEtherHandle) {
             // Runtime will be dropped with the client
         }
     }
-    
+
     // Arc is dropped here, releasing resources
     drop(client);
 }

@@ -140,7 +140,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Hash { username, password } => {
             // Get password (prompt if not provided)
             let password = password.unwrap_or_else(prompt_password);
-            
+
             if password.is_empty() {
                 return Err("Password cannot be empty".into());
             }
@@ -182,9 +182,15 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 if let Some(h) = password_hash {
                     // Validate it's valid hex
-                    let bytes = hex::decode(&h).map_err(|e| format!("Invalid password hash (must be 40 hex chars): {}", e))?;
+                    let bytes = hex::decode(&h).map_err(|e| {
+                        format!("Invalid password hash (must be 40 hex chars): {}", e)
+                    })?;
                     if bytes.len() != 20 {
-                        return Err(format!("Password hash must be 20 bytes (40 hex chars), got {} bytes", bytes.len()).into());
+                        return Err(format!(
+                            "Password hash must be 20 bytes (40 hex chars), got {} bytes",
+                            bytes.len()
+                        )
+                        .into());
                     }
                     config.password_hash = h;
                 }
@@ -204,7 +210,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let password_hash_bytes = hex::decode(&password_hash_str)
                     .map_err(|e| format!("Invalid password hash (must be 40 hex chars): {}", e))?;
                 if password_hash_bytes.len() != 20 {
-                    return Err(format!("Password hash must be 20 bytes (40 hex chars), got {} bytes", password_hash_bytes.len()).into());
+                    return Err(format!(
+                        "Password hash must be 20 bytes (40 hex chars), got {} bytes",
+                        password_hash_bytes.len()
+                    )
+                    .into());
                 }
 
                 VpnConfig {
@@ -230,7 +240,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             info!("Hub: {}, Username: {}", config.hub, config.username);
 
             let mut client = VpnClient::new(config);
-            
+
             match client.connect().await {
                 Ok(()) => {
                     info!("Disconnected");

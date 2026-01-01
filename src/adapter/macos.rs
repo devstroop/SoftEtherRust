@@ -8,9 +8,9 @@ use std::process::Command;
 use std::sync::Mutex;
 
 use libc::{
-    c_char, c_int, c_void, close, connect, getsockopt, ioctl, setsockopt, sockaddr,
-    sockaddr_ctl, socket, socklen_t, AF_SYSTEM, CTLIOCGINFO, PF_SYSTEM, SOCK_DGRAM,
-    SOL_SOCKET, SO_SNDBUF, SO_RCVBUF, SYSPROTO_CONTROL,
+    c_char, c_int, c_void, close, connect, getsockopt, ioctl, setsockopt, sockaddr, sockaddr_ctl,
+    socket, socklen_t, AF_SYSTEM, CTLIOCGINFO, PF_SYSTEM, SOCK_DGRAM, SOL_SOCKET, SO_RCVBUF,
+    SO_SNDBUF, SYSPROTO_CONTROL,
 };
 use tracing::{debug, info, warn};
 
@@ -34,7 +34,10 @@ const UTUN_OPT_IFNAME: c_int = 2;
 pub fn get_default_gateway() -> Option<Ipv4Addr> {
     // Use netstat to get the default gateway, excluding utun interfaces
     let output = Command::new("sh")
-        .args(["-c", "netstat -rn | grep '^default' | grep -v 'utun' | head -1 | awk '{print $2}'"])
+        .args([
+            "-c",
+            "netstat -rn | grep '^default' | grep -v 'utun' | head -1 | awk '{print $2}'",
+        ])
         .output()
         .ok()?;
 
@@ -44,7 +47,7 @@ pub fn get_default_gateway() -> Option<Ipv4Addr> {
 
     let gateway_str = String::from_utf8_lossy(&output.stdout);
     let gateway_str = gateway_str.trim();
-    
+
     if gateway_str.is_empty() {
         return None;
     }
@@ -104,7 +107,8 @@ impl UtunDevice {
                 fd,
                 &addr as *const _ as *const sockaddr,
                 std::mem::size_of::<sockaddr_ctl>() as socklen_t,
-            ) < 0 {
+            ) < 0
+            {
                 close(fd);
                 return Err(io::Error::last_os_error());
             }
@@ -119,7 +123,8 @@ impl UtunDevice {
                 UTUN_OPT_IFNAME,
                 name_buf.as_mut_ptr() as *mut c_void,
                 &mut name_len,
-            ) < 0 {
+            ) < 0
+            {
                 close(fd);
                 return Err(io::Error::last_os_error());
             }
@@ -265,14 +270,15 @@ impl TunAdapter for UtunDevice {
             ));
         }
 
-        info!("Configured {} with IP {} netmask {}", self.name, ip, netmask);
+        info!(
+            "Configured {} with IP {} netmask {}",
+            self.name, ip, netmask
+        );
         Ok(())
     }
 
     fn set_up(&mut self) -> io::Result<()> {
-        let status = Command::new("ifconfig")
-            .args([&self.name, "up"])
-            .status()?;
+        let status = Command::new("ifconfig").args([&self.name, "up"]).status()?;
 
         if !status.success() {
             return Err(io::Error::new(
@@ -287,11 +293,7 @@ impl TunAdapter for UtunDevice {
 
     fn add_route(&self, dest: Ipv4Addr, netmask: Ipv4Addr, gateway: Ipv4Addr) -> io::Result<()> {
         // Calculate prefix length from netmask
-        let prefix_len = netmask
-            .octets()
-            .iter()
-            .map(|b| b.count_ones())
-            .sum::<u32>();
+        let prefix_len = netmask.octets().iter().map(|b| b.count_ones()).sum::<u32>();
 
         let status = Command::new("route")
             .args([
@@ -315,18 +317,14 @@ impl TunAdapter for UtunDevice {
     fn add_route_via_interface(&self, dest: Ipv4Addr, prefix_len: u8) -> io::Result<()> {
         let route_str = format!("{}/{}", dest, prefix_len);
         let status = Command::new("route")
-            .args([
-                "-n",
-                "add",
-                "-net",
-                &route_str,
-                "-interface",
-                &self.name,
-            ])
+            .args(["-n", "add", "-net", &route_str, "-interface", &self.name])
             .status()?;
 
         if !status.success() {
-            warn!("Failed to add route to {} via interface {}", route_str, self.name);
+            warn!(
+                "Failed to add route to {} via interface {}",
+                route_str, self.name
+            );
         } else {
             info!("Added route: {} via interface {}", route_str, self.name);
             if let Ok(mut routes) = self.routes_added.lock() {
@@ -337,7 +335,11 @@ impl TunAdapter for UtunDevice {
         Ok(())
     }
 
-    fn set_default_route(&self, _gateway: Ipv4Addr, vpn_server_ip: Option<Ipv4Addr>) -> io::Result<()> {
+    fn set_default_route(
+        &self,
+        _gateway: Ipv4Addr,
+        vpn_server_ip: Option<Ipv4Addr>,
+    ) -> io::Result<()> {
         // On macOS, we use the "split-tunnel" approach for default routing:
         // Instead of replacing the default route (which can break connectivity),
         // we add two more-specific routes that cover the entire IPv4 space:
@@ -350,7 +352,10 @@ impl TunAdapter for UtunDevice {
         // This prevents a routing loop where VPN traffic itself gets routed through the VPN
         if let Some(server_ip) = vpn_server_ip {
             if let Some(orig_gateway) = get_default_gateway() {
-                info!("Adding host route for VPN server {} via original gateway {}", server_ip, orig_gateway);
+                info!(
+                    "Adding host route for VPN server {} via original gateway {}",
+                    server_ip, orig_gateway
+                );
                 let status = Command::new("route")
                     .args([
                         "-n",
@@ -378,17 +383,10 @@ impl TunAdapter for UtunDevice {
                 warn!("Could not determine original default gateway - VPN traffic may not route correctly");
             }
         }
-        
+
         // Add route for 0.0.0.0/1 (first half of IPv4 space)
         let status1 = Command::new("route")
-            .args([
-                "-n",
-                "add",
-                "-net",
-                "0.0.0.0/1",
-                "-interface",
-                &self.name,
-            ])
+            .args(["-n", "add", "-net", "0.0.0.0/1", "-interface", &self.name])
             .status()?;
 
         if !status1.success() {
@@ -403,14 +401,7 @@ impl TunAdapter for UtunDevice {
 
         // Add route for 128.0.0.0/1 (second half of IPv4 space)
         let status2 = Command::new("route")
-            .args([
-                "-n",
-                "add",
-                "-net",
-                "128.0.0.0/1",
-                "-interface",
-                &self.name,
-            ])
+            .args(["-n", "add", "-net", "128.0.0.0/1", "-interface", &self.name])
             .status()?;
 
         if !status2.success() {
@@ -430,26 +421,29 @@ impl TunAdapter for UtunDevice {
             routes.push("128.0.0.0/1".to_string());
         }
 
-        info!("Set default route via {} (split-tunnel: 0.0.0.0/1 + 128.0.0.0/1)", self.name);
+        info!(
+            "Set default route via {} (split-tunnel: 0.0.0.0/1 + 128.0.0.0/1)",
+            self.name
+        );
         Ok(())
     }
 
     fn configure_dns(&self, dns1: Option<Ipv4Addr>, dns2: Option<Ipv4Addr>) -> io::Result<()> {
         // On macOS, we create a custom resolver configuration using scutil
         // This creates a "resolver" entry that takes precedence for DNS resolution
-        
+
         let dns_servers: Vec<String> = [dns1, dns2]
             .iter()
             .filter_map(|&d| d.map(|ip| ip.to_string()))
             .collect();
-        
+
         if dns_servers.is_empty() {
             debug!("No DNS servers to configure");
             return Ok(());
         }
 
         let servers_str = dns_servers.join("\n");
-        
+
         // Create the resolver configuration
         let scutil_commands = format!(
             "d.init\n\
@@ -479,8 +473,10 @@ impl TunAdapter for UtunDevice {
                 Ok(())
             }
             Ok(out) => {
-                warn!("scutil DNS configuration may have failed: {}", 
-                      String::from_utf8_lossy(&out.stderr));
+                warn!(
+                    "scutil DNS configuration may have failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
                 // Don't fail - DNS might still work
                 Ok(())
             }
@@ -519,7 +515,7 @@ impl Drop for UtunDevice {
     fn drop(&mut self) {
         // Restore DNS first
         let _ = self.restore_dns();
-        
+
         // Clean up routes we added
         if let Ok(routes) = self.routes_added.lock() {
             for route in routes.iter() {

@@ -8,9 +8,8 @@ use std::process::Command;
 use std::sync::Mutex;
 
 use libc::{
-    c_char, c_int, c_short, c_void, close, ioctl, open, read, write,
-    sockaddr_in, socket, AF_INET, IFF_NO_PI, IFF_TUN,
-    O_RDWR, SOCK_DGRAM,
+    c_char, c_int, c_short, c_void, close, ioctl, open, read, sockaddr_in, socket, write, AF_INET,
+    IFF_NO_PI, IFF_TUN, O_RDWR, SOCK_DGRAM,
 };
 use tracing::{debug, info, warn};
 
@@ -45,7 +44,10 @@ const IFF_RUNNING: c_short = 0x40;
 pub fn get_default_gateway() -> Option<Ipv4Addr> {
     // Use ip route to get the default gateway, excluding our TUN interfaces
     let output = Command::new("sh")
-        .args(["-c", "ip route show default | grep -v 'tun' | head -1 | awk '{print $3}'"])
+        .args([
+            "-c",
+            "ip route show default | grep -v 'tun' | head -1 | awk '{print $3}'",
+        ])
         .output()
         .ok()?;
 
@@ -55,7 +57,7 @@ pub fn get_default_gateway() -> Option<Ipv4Addr> {
 
     let gateway_str = String::from_utf8_lossy(&output.stdout);
     let gateway_str = gateway_str.trim();
-    
+
     if gateway_str.is_empty() {
         return None;
     }
@@ -266,7 +268,10 @@ impl TunAdapter for TunDevice {
             close(sock);
         }
 
-        info!("Configured {} with IP {} netmask {}", self.name, ip, netmask);
+        info!(
+            "Configured {} with IP {} netmask {}",
+            self.name, ip, netmask
+        );
         Ok(())
     }
 
@@ -304,11 +309,7 @@ impl TunAdapter for TunDevice {
 
     fn add_route(&self, dest: Ipv4Addr, netmask: Ipv4Addr, gateway: Ipv4Addr) -> io::Result<()> {
         // Calculate prefix length from netmask
-        let prefix_len = netmask
-            .octets()
-            .iter()
-            .map(|b| b.count_ones())
-            .sum::<u32>();
+        let prefix_len = netmask.octets().iter().map(|b| b.count_ones()).sum::<u32>();
 
         let status = Command::new("ip")
             .args([
@@ -334,17 +335,14 @@ impl TunAdapter for TunDevice {
     fn add_route_via_interface(&self, dest: Ipv4Addr, prefix_len: u8) -> io::Result<()> {
         let route_str = format!("{}/{}", dest, prefix_len);
         let status = Command::new("ip")
-            .args([
-                "route",
-                "replace",
-                &route_str,
-                "dev",
-                &self.name,
-            ])
+            .args(["route", "replace", &route_str, "dev", &self.name])
             .status()?;
 
         if !status.success() {
-            warn!("Failed to add/replace route to {} via interface {}", route_str, self.name);
+            warn!(
+                "Failed to add/replace route to {} via interface {}",
+                route_str, self.name
+            );
         } else {
             info!("Added route: {} via interface {}", route_str, self.name);
             if let Ok(mut routes) = self.routes_added.lock() {
@@ -355,7 +353,11 @@ impl TunAdapter for TunDevice {
         Ok(())
     }
 
-    fn set_default_route(&self, _gateway: Ipv4Addr, vpn_server_ip: Option<Ipv4Addr>) -> io::Result<()> {
+    fn set_default_route(
+        &self,
+        _gateway: Ipv4Addr,
+        vpn_server_ip: Option<Ipv4Addr>,
+    ) -> io::Result<()> {
         // On Linux, we use the same "split-tunnel" approach as macOS:
         // Add two more-specific routes that cover the entire IPv4 space:
         // - 0.0.0.0/1 covers 0.0.0.0 - 127.255.255.255
@@ -364,7 +366,10 @@ impl TunAdapter for TunDevice {
         // CRITICAL: First, add a host route for the VPN server through the original gateway
         if let Some(server_ip) = vpn_server_ip {
             if let Some(orig_gateway) = get_default_gateway() {
-                info!("Adding host route for VPN server {} via original gateway {}", server_ip, orig_gateway);
+                info!(
+                    "Adding host route for VPN server {} via original gateway {}",
+                    server_ip, orig_gateway
+                );
                 let status = Command::new("ip")
                     .args([
                         "route",
@@ -392,16 +397,10 @@ impl TunAdapter for TunDevice {
                 warn!("Could not determine original default gateway - VPN traffic may not route correctly");
             }
         }
-        
+
         // Add route for 0.0.0.0/1 (first half of IPv4 space)
         let status1 = Command::new("ip")
-            .args([
-                "route",
-                "replace",
-                "0.0.0.0/1",
-                "dev",
-                &self.name,
-            ])
+            .args(["route", "replace", "0.0.0.0/1", "dev", &self.name])
             .status()?;
 
         if !status1.success() {
@@ -416,13 +415,7 @@ impl TunAdapter for TunDevice {
 
         // Add route for 128.0.0.0/1 (second half of IPv4 space)
         let status2 = Command::new("ip")
-            .args([
-                "route",
-                "replace",
-                "128.0.0.0/1",
-                "dev",
-                &self.name,
-            ])
+            .args(["route", "replace", "128.0.0.0/1", "dev", &self.name])
             .status()?;
 
         if !status2.success() {
@@ -442,18 +435,21 @@ impl TunAdapter for TunDevice {
             routes.push("128.0.0.0/1".to_string());
         }
 
-        info!("Set default route via {} (split-tunnel: 0.0.0.0/1 + 128.0.0.0/1)", self.name);
+        info!(
+            "Set default route via {} (split-tunnel: 0.0.0.0/1 + 128.0.0.0/1)",
+            self.name
+        );
         Ok(())
     }
 
     fn configure_dns(&self, dns1: Option<Ipv4Addr>, dns2: Option<Ipv4Addr>) -> io::Result<()> {
         // On Linux, we modify /etc/resolv.conf or use resolvconf/systemd-resolved
-        
+
         let dns_servers: Vec<String> = [dns1, dns2]
             .iter()
             .filter_map(|&d| d.map(|ip| ip.to_string()))
             .collect();
-        
+
         if dns_servers.is_empty() {
             debug!("No DNS servers to configure");
             return Ok(());
@@ -464,17 +460,17 @@ impl TunAdapter for TunDevice {
             let status = Command::new("resolvectl")
                 .args(["dns", &self.name, dns])
                 .status();
-            
+
             if status.is_ok() && status.unwrap().success() {
                 info!("Configured DNS {} via resolvectl", dns);
                 continue;
             }
-            
+
             // Fall back to systemd-resolve (older name)
             let status = Command::new("systemd-resolve")
                 .args(["--interface", &self.name, "--set-dns", dns])
                 .status();
-            
+
             if status.is_ok() && status.unwrap().success() {
                 info!("Configured DNS {} via systemd-resolve", dns);
             }
@@ -501,7 +497,7 @@ impl Drop for TunDevice {
     fn drop(&mut self) {
         // Restore DNS first
         let _ = self.restore_dns();
-        
+
         // Clean up routes we added
         if let Ok(routes) = self.routes_added.lock() {
             for route in routes.iter() {
@@ -509,13 +505,9 @@ impl Drop for TunDevice {
                 // Handle host routes differently
                 if route.starts_with("host:") {
                     let host_ip = route.strip_prefix("host:").unwrap();
-                    let _ = Command::new("ip")
-                        .args(["route", "del", host_ip])
-                        .status();
+                    let _ = Command::new("ip").args(["route", "del", host_ip]).status();
                 } else {
-                    let _ = Command::new("ip")
-                        .args(["route", "del", route])
-                        .status();
+                    let _ = Command::new("ip").args(["route", "del", route]).status();
                 }
             }
         }

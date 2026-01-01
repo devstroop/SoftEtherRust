@@ -46,7 +46,10 @@ fn get_interface_index(adapter_name: &str) -> Option<u32> {
         .args([
             "-NoProfile",
             "-Command",
-            &format!("(Get-NetAdapter -Name '{}' -ErrorAction SilentlyContinue).ifIndex", adapter_name)
+            &format!(
+                "(Get-NetAdapter -Name '{}' -ErrorAction SilentlyContinue).ifIndex",
+                adapter_name
+            ),
         ])
         .output()
         .ok()?;
@@ -81,8 +84,12 @@ impl WintunDevice {
         // Load Wintun DLL - try current directory first, then system path
         let wintun = unsafe { wintun::load() }
             .or_else(|_| unsafe { wintun::load_from_path("wintun.dll") })
-            .map_err(|e| io::Error::new(io::ErrorKind::NotFound, 
-                format!("Failed to load wintun.dll: {}. Please download wintun.dll from https://wintun.net and place it in the current directory or system PATH.", e)))?;
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Failed to load wintun.dll: {}. Please download wintun.dll from https://wintun.net and place it in the current directory or system PATH.", e),
+                )
+            })?;
 
         // Disable wintun logging temporarily to suppress "Element not found" error
         // which is expected when the adapter doesn't exist yet
@@ -102,18 +109,32 @@ impl WintunDevice {
                 // Adapter doesn't exist yet, create a new one (this is normal on first run)
                 debug!("Creating new Wintun adapter");
                 Adapter::create(&wintun, "SoftEther VPN", "SoftEther Rust", None)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, 
-                        format!("Failed to create Wintun adapter: {}. Make sure you're running as Administrator.", e)))?
+                    .map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::Other,
+                            format!("Failed to create Wintun adapter: {}. Make sure you're running as Administrator.", e),
+                        )
+                    })?
             }
         };
 
-        let name = adapter.get_name()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to get adapter name: {}", e)))?;
+        let name = adapter.get_name().map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to get adapter name: {}", e),
+            )
+        })?;
 
         // Start a session with ring buffer capacity (must be power of 2, between 128KB and 64MB)
         // Using 4MB for good performance
-        let session = adapter.start_session(wintun::MAX_RING_CAPACITY)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to start session: {}", e)))?;
+        let session = adapter
+            .start_session(wintun::MAX_RING_CAPACITY)
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Failed to start session: {}", e),
+                )
+            })?;
 
         info!("Created Wintun device: {}", name);
 
@@ -136,9 +157,7 @@ impl WintunDevice {
     /// Helper to run netsh commands
     #[allow(dead_code)]
     fn run_netsh(&self, args: &[&str]) -> io::Result<()> {
-        let status = Command::new("netsh")
-            .args(args)
-            .status()?;
+        let status = Command::new("netsh").args(args).status()?;
 
         if !status.success() {
             return Err(io::Error::new(
@@ -165,13 +184,18 @@ impl TunAdapter for WintunDevice {
                 buf[..len].copy_from_slice(&bytes[..len]);
                 Ok(len)
             }
-            Err(e) => Err(io::Error::new(io::ErrorKind::Other, format!("Receive failed: {}", e))),
+            Err(e) => Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("Receive failed: {}", e),
+            )),
         }
     }
 
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         // Allocate a send packet and copy data
-        let mut packet = self.session.allocate_send_packet(buf.len() as u16)
+        let mut packet = self
+            .session
+            .allocate_send_packet(buf.len() as u16)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Allocate failed: {}", e)))?;
 
         packet.bytes_mut().copy_from_slice(buf);
@@ -184,10 +208,13 @@ impl TunAdapter for WintunDevice {
         // Set MTU using netsh
         let status = Command::new("netsh")
             .args([
-                "interface", "ipv4", "set", "subinterface",
+                "interface",
+                "ipv4",
+                "set",
+                "subinterface",
                 &self.name,
                 &format!("mtu={}", mtu),
-                "store=active"
+                "store=active",
             ])
             .status()?;
 
@@ -198,7 +225,10 @@ impl TunAdapter for WintunDevice {
                 .args([
                     "-NoProfile",
                     "-Command",
-                    &format!("Set-NetIPInterface -InterfaceAlias '{}' -NlMtuBytes {}", self.name, mtu)
+                    &format!(
+                        "Set-NetIPInterface -InterfaceAlias '{}' -NlMtuBytes {}",
+                        self.name, mtu
+                    ),
                 ])
                 .status()?;
 
@@ -214,11 +244,7 @@ impl TunAdapter for WintunDevice {
 
     fn configure(&mut self, ip: Ipv4Addr, netmask: Ipv4Addr) -> io::Result<()> {
         // Calculate prefix length from netmask
-        let prefix_len: u8 = netmask
-            .octets()
-            .iter()
-            .map(|b| b.count_ones() as u8)
-            .sum();
+        let prefix_len: u8 = netmask.octets().iter().map(|b| b.count_ones() as u8).sum();
 
         // Use PowerShell to configure the IP address in a way that shows as DHCP-like
         // First remove existing IPs, then add new one
@@ -239,7 +265,13 @@ impl TunAdapter for WintunDevice {
         );
 
         let status = Command::new("powershell")
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_script])
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &ps_script,
+            ])
             .status()?;
 
         if !status.success() {
@@ -250,8 +282,14 @@ impl TunAdapter for WintunDevice {
 
             let status = Command::new("netsh")
                 .args([
-                    "interface", "ip", "set", "address",
-                    &self.name, "static", &ip.to_string(), &netmask.to_string()
+                    "interface",
+                    "ip",
+                    "set",
+                    "address",
+                    &self.name,
+                    "static",
+                    &ip.to_string(),
+                    &netmask.to_string(),
                 ])
                 .status()?;
 
@@ -279,7 +317,7 @@ impl TunAdapter for WintunDevice {
                 .args([
                     "-NoProfile",
                     "-Command",
-                    &format!("Enable-NetAdapter -Name '{}' -Confirm:$false", self.name)
+                    &format!("Enable-NetAdapter -Name '{}' -Confirm:$false", self.name),
                 ])
                 .status()?;
 
@@ -297,11 +335,7 @@ impl TunAdapter for WintunDevice {
 
     fn add_route(&self, dest: Ipv4Addr, netmask: Ipv4Addr, gateway: Ipv4Addr) -> io::Result<()> {
         // Calculate prefix length from netmask
-        let prefix_len: u8 = netmask
-            .octets()
-            .iter()
-            .map(|b| b.count_ones() as u8)
-            .sum();
+        let prefix_len: u8 = netmask.octets().iter().map(|b| b.count_ones() as u8).sum();
 
         let status = Command::new("route")
             .args([
@@ -309,7 +343,7 @@ impl TunAdapter for WintunDevice {
                 &dest.to_string(),
                 "mask",
                 &netmask.to_string(),
-                &gateway.to_string()
+                &gateway.to_string(),
             ])
             .status()?;
 
@@ -324,9 +358,9 @@ impl TunAdapter for WintunDevice {
 
     fn add_route_via_interface(&self, dest: Ipv4Addr, prefix_len: u8) -> io::Result<()> {
         let if_index = get_interface_index(&self.name);
-        
+
         let route_str = format!("{}/{}", dest, prefix_len);
-        
+
         // Calculate netmask from prefix length
         let netmask_val: u32 = if prefix_len == 0 {
             0
@@ -345,7 +379,7 @@ impl TunAdapter for WintunDevice {
                     &netmask.to_string(),
                     "0.0.0.0",
                     "if",
-                    &idx.to_string()
+                    &idx.to_string(),
                 ])
                 .status()?
         } else {
@@ -363,7 +397,10 @@ impl TunAdapter for WintunDevice {
         };
 
         if !status.success() {
-            warn!("Failed to add route to {} via interface {}", route_str, self.name);
+            warn!(
+                "Failed to add route to {} via interface {}",
+                route_str, self.name
+            );
         } else {
             info!("Added route: {} via interface {}", route_str, self.name);
             if let Ok(mut routes) = self.routes_added.lock() {
@@ -374,22 +411,29 @@ impl TunAdapter for WintunDevice {
         Ok(())
     }
 
-    fn set_default_route(&self, _gateway: Ipv4Addr, vpn_server_ip: Option<Ipv4Addr>) -> io::Result<()> {
+    fn set_default_route(
+        &self,
+        _gateway: Ipv4Addr,
+        vpn_server_ip: Option<Ipv4Addr>,
+    ) -> io::Result<()> {
         // On Windows, we use the same split-tunnel approach as macOS:
         // Add 0.0.0.0/1 and 128.0.0.0/1 routes through the VPN interface
 
         // First, add a host route for the VPN server through the original gateway
         if let Some(server_ip) = vpn_server_ip {
             if let Some(orig_gateway) = get_default_gateway() {
-                info!("Adding host route for VPN server {} via original gateway {}", server_ip, orig_gateway);
-                
+                info!(
+                    "Adding host route for VPN server {} via original gateway {}",
+                    server_ip, orig_gateway
+                );
+
                 let status = Command::new("route")
                     .args([
                         "add",
                         &server_ip.to_string(),
                         "mask",
                         "255.255.255.255",
-                        &orig_gateway.to_string()
+                        &orig_gateway.to_string(),
                     ])
                     .status()?;
 
@@ -421,7 +465,7 @@ impl TunAdapter for WintunDevice {
                     "128.0.0.0",
                     "0.0.0.0",
                     "if",
-                    &idx.to_string()
+                    &idx.to_string(),
                 ])
                 .status()?
         } else {
@@ -457,7 +501,7 @@ impl TunAdapter for WintunDevice {
                     "128.0.0.0",
                     "0.0.0.0",
                     "if",
-                    &idx.to_string()
+                    &idx.to_string(),
                 ])
                 .status()?
         } else {
@@ -490,7 +534,10 @@ impl TunAdapter for WintunDevice {
             routes.push("128.0.0.0/1".to_string());
         }
 
-        info!("Set default route via {} (split-tunnel: 0.0.0.0/1 + 128.0.0.0/1)", self.name);
+        info!(
+            "Set default route via {} (split-tunnel: 0.0.0.0/1 + 128.0.0.0/1)",
+            self.name
+        );
         Ok(())
     }
 
@@ -535,7 +582,7 @@ impl TunAdapter for WintunDevice {
                 &format!(
                     "Set-DnsClientServerAddress -InterfaceAlias '{}' -ServerAddresses @('{}')",
                     self.name, dns_str
-                )
+                ),
             ])
             .status()?;
 
@@ -544,10 +591,13 @@ impl TunAdapter for WintunDevice {
             let primary = &dns_servers[0];
             let status = Command::new("netsh")
                 .args([
-                    "interface", "ip", "set", "dns",
+                    "interface",
+                    "ip",
+                    "set",
+                    "dns",
                     &self.name,
                     "static",
-                    primary
+                    primary,
                 ])
                 .status()?;
 
@@ -556,10 +606,13 @@ impl TunAdapter for WintunDevice {
                 if dns_servers.len() > 1 {
                     let _ = Command::new("netsh")
                         .args([
-                            "interface", "ip", "add", "dns",
+                            "interface",
+                            "ip",
+                            "add",
+                            "dns",
                             &self.name,
                             &dns_servers[1],
-                            "index=2"
+                            "index=2",
                         ])
                         .status();
                 }
@@ -617,9 +670,7 @@ impl Drop for WintunDevice {
                 debug!("Removing route: {}", route);
                 if route.starts_with("-host ") {
                     let host_ip = route.strip_prefix("-host ").unwrap();
-                    let _ = Command::new("route")
-                        .args(["delete", host_ip])
-                        .status();
+                    let _ = Command::new("route").args(["delete", host_ip]).status();
                 } else if route == "0.0.0.0/1" {
                     let _ = Command::new("route")
                         .args(["delete", "0.0.0.0", "mask", "128.0.0.0"])
@@ -632,7 +683,9 @@ impl Drop for WintunDevice {
                     // Parse CIDR notation
                     let parts: Vec<&str> = route.split('/').collect();
                     if parts.len() == 2 {
-                        if let (Ok(dest), Ok(prefix_len)) = (parts[0].parse::<Ipv4Addr>(), parts[1].parse::<u8>()) {
+                        if let (Ok(dest), Ok(prefix_len)) =
+                            (parts[0].parse::<Ipv4Addr>(), parts[1].parse::<u8>())
+                        {
                             let netmask_val: u32 = if prefix_len == 0 {
                                 0
                             } else {

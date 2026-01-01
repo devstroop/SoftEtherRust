@@ -51,7 +51,12 @@ pub trait TunAdapter: Send + Sync {
     fn set_up(&mut self) -> std::io::Result<()>;
 
     /// Add a route through this device via a gateway IP.
-    fn add_route(&self, dest: Ipv4Addr, netmask: Ipv4Addr, gateway: Ipv4Addr) -> std::io::Result<()>;
+    fn add_route(
+        &self,
+        dest: Ipv4Addr,
+        netmask: Ipv4Addr,
+        gateway: Ipv4Addr,
+    ) -> std::io::Result<()>;
 
     /// Add a route directly through this interface (no gateway IP needed).
     fn add_route_via_interface(&self, dest: Ipv4Addr, prefix_len: u8) -> std::io::Result<()>;
@@ -59,7 +64,11 @@ pub trait TunAdapter: Send + Sync {
     /// Set as the default route.
     /// `vpn_server_ip` is used to add a host route for the VPN server through the original gateway
     /// to prevent routing loops.
-    fn set_default_route(&self, gateway: Ipv4Addr, vpn_server_ip: Option<Ipv4Addr>) -> std::io::Result<()>;
+    fn set_default_route(
+        &self,
+        gateway: Ipv4Addr,
+        vpn_server_ip: Option<Ipv4Addr>,
+    ) -> std::io::Result<()>;
 
     /// Configure DNS servers.
     /// This sets the system to use the specified DNS servers.

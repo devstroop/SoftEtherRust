@@ -33,70 +33,70 @@ pub const UDP_ACCEL_MAX_VERSION: u32 = 2;
 pub struct UdpAccel {
     /// Protocol version (1 or 2).
     pub version: u32,
-    
+
     /// Whether this is client mode (vs server mode).
     pub client_mode: bool,
-    
+
     /// My encryption key (V1 - 20 bytes).
     pub my_key: [u8; UDP_ACCELERATION_COMMON_KEY_SIZE_V1],
-    
+
     /// My encryption key (V2 - 128 bytes).
     pub my_key_v2: [u8; UDP_ACCELERATION_COMMON_KEY_SIZE_V2],
-    
+
     /// Server's encryption key (V1).
     pub your_key: [u8; UDP_ACCELERATION_COMMON_KEY_SIZE_V1],
-    
+
     /// Server's encryption key (V2).
     pub your_key_v2: [u8; UDP_ACCELERATION_COMMON_KEY_SIZE_V2],
-    
+
     /// My local IP address.
     pub my_ip: IpAddr,
-    
+
     /// My local UDP port.
     pub my_port: u16,
-    
+
     /// Server's IP address.
     pub your_ip: Option<IpAddr>,
-    
+
     /// Server's UDP port.
     pub your_port: Option<u16>,
-    
+
     /// My cookie (random identifier).
     pub my_cookie: u32,
-    
+
     /// Server's cookie.
     pub your_cookie: Option<u32>,
-    
+
     /// Whether encryption is enabled.
     pub encryption: bool,
-    
+
     /// Whether to use HMAC for integrity.
     pub use_hmac: bool,
-    
+
     /// Whether plaintext mode (no encryption).
     pub plain_text_mode: bool,
-    
+
     /// Fast disconnect detection.
     pub fast_detect: bool,
-    
+
     /// Whether UDP acceleration is usable.
     pub is_usable: bool,
-    
+
     /// The UDP socket (if bound).
     socket: Option<Arc<TokioUdpSocket>>,
-    
+
     /// IV for next packet (V1).
     pub next_iv: [u8; UDP_ACCELERATION_COMMON_KEY_SIZE_V1],
-    
+
     /// IV for next packet (V2).
     pub next_iv_v2: [u8; 12],
-    
+
     /// Disable NAT-T (NAT traversal).
     pub no_nat_t: bool,
-    
+
     /// NAT-T transaction ID.
     pub nat_t_tran_id: u64,
-    
+
     /// IPv6 mode.
     pub is_ipv6: bool,
 }
@@ -115,36 +115,32 @@ impl UdpAccel {
             Some(IpAddr::V6(ip)) => SocketAddr::new(IpAddr::V6(ip), 0),
             None => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
         };
-        
-        let std_socket = UdpSocket::bind(bind_addr)
-            .map_err(|e| Error::Io(e))?;
-        
+
+        let std_socket = UdpSocket::bind(bind_addr).map_err(|e| Error::Io(e))?;
+
         // Set non-blocking for tokio
-        std_socket.set_nonblocking(true)
-            .map_err(|e| Error::Io(e))?;
-        
-        let local_addr = std_socket.local_addr()
-            .map_err(|e| Error::Io(e))?;
-        
-        let tokio_socket = TokioUdpSocket::from_std(std_socket)
-            .map_err(|e| Error::Io(e))?;
-        
+        std_socket.set_nonblocking(true).map_err(|e| Error::Io(e))?;
+
+        let local_addr = std_socket.local_addr().map_err(|e| Error::Io(e))?;
+
+        let tokio_socket = TokioUdpSocket::from_std(std_socket).map_err(|e| Error::Io(e))?;
+
         // Generate random keys
         let my_key: [u8; UDP_ACCELERATION_COMMON_KEY_SIZE_V1] = crypto::random_bytes();
         let my_key_v2: [u8; UDP_ACCELERATION_COMMON_KEY_SIZE_V2] = crypto::random_bytes();
         let next_iv: [u8; UDP_ACCELERATION_COMMON_KEY_SIZE_V1] = crypto::random_bytes();
         let next_iv_v2: [u8; 12] = crypto::random_bytes();
-        
+
         // Generate random cookie
         let my_cookie: u32 = rand::random::<u32>() | 1; // Ensure non-zero
-        
+
         let is_ipv6 = local_addr.is_ipv6();
-        
+
         debug!(
             "Created UDP acceleration: local_addr={}, client_mode={}, no_nat_t={}",
             local_addr, client_mode, no_nat_t
         );
-        
+
         Ok(Self {
             version: UDP_ACCEL_VERSION_2, // Default to V2
             client_mode,
@@ -171,7 +167,7 @@ impl UdpAccel {
             is_ipv6,
         })
     }
-    
+
     /// Initialize the client side with server information.
     ///
     /// This is called after receiving the server's UDP acceleration response.
@@ -186,11 +182,13 @@ impl UdpAccel {
         if !self.client_mode {
             return Err(Error::invalid_state("init_client called on server mode"));
         }
-        
+
         if server_port == 0 || server_cookie == 0 || client_cookie == 0 {
-            return Err(Error::invalid_response("Invalid server UDP acceleration parameters"));
+            return Err(Error::invalid_response(
+                "Invalid server UDP acceleration parameters",
+            ));
         }
-        
+
         // Set server key based on version
         if self.version == UDP_ACCEL_VERSION_2 {
             if server_key.len() != UDP_ACCELERATION_COMMON_KEY_SIZE_V2 {
@@ -211,11 +209,11 @@ impl UdpAccel {
             }
             self.your_key.copy_from_slice(server_key);
         }
-        
+
         self.your_ip = Some(server_ip);
         self.your_port = Some(server_port);
         self.your_cookie = Some(server_cookie);
-        
+
         // Verify our cookie matches what server echoed back
         if client_cookie != self.my_cookie {
             warn!(
@@ -225,22 +223,22 @@ impl UdpAccel {
             // This is not necessarily an error - just update our cookie
             self.my_cookie = client_cookie;
         }
-        
+
         self.is_usable = true;
-        
+
         info!(
             "UDP acceleration initialized: server={}:{}, version={}",
             server_ip, server_port, self.version
         );
-        
+
         Ok(())
     }
-    
+
     /// Get the UDP socket for sending/receiving.
     pub fn socket(&self) -> Option<&Arc<TokioUdpSocket>> {
         self.socket.as_ref()
     }
-    
+
     /// Get the server address if initialized.
     pub fn server_addr(&self) -> Option<SocketAddr> {
         match (self.your_ip, self.your_port) {
@@ -248,16 +246,20 @@ impl UdpAccel {
             _ => None,
         }
     }
-    
+
     /// Calculate the MSS (Maximum Segment Size) for UDP acceleration.
     pub fn calc_mss(&self) -> u16 {
         // Base MTU minus IP and UDP headers
-        let mut mss = if self.is_ipv6 { 1280 - 40 - 8 } else { 1500 - 20 - 8 };
-        
+        let mut mss = if self.is_ipv6 {
+            1280 - 40 - 8
+        } else {
+            1500 - 20 - 8
+        };
+
         // Subtract UDP acceleration overhead
         // Cookie (4) + Tick (8) + MyTick (8) + SeqNo (4) + IV (based on version)
         mss -= 4 + 8 + 8 + 4;
-        
+
         if self.version == UDP_ACCEL_VERSION_2 {
             // ChaCha20-Poly1305: 12-byte nonce, 16-byte tag
             mss -= 12 + 16;
@@ -269,13 +271,16 @@ impl UdpAccel {
                 mss -= 20;
             }
         }
-        
+
         mss as u16
     }
-    
+
     /// Check if UDP acceleration is ready to use.
     pub fn is_ready(&self) -> bool {
-        self.is_usable && self.socket.is_some() && self.your_ip.is_some() && self.your_port.is_some()
+        self.is_usable
+            && self.socket.is_some()
+            && self.your_ip.is_some()
+            && self.your_port.is_some()
     }
 }
 
@@ -308,7 +313,7 @@ impl UdpAccelAuthParams {
         } else {
             accel.my_ip
         };
-        
+
         Self {
             enabled: true,
             max_version: UDP_ACCEL_MAX_VERSION,
@@ -365,7 +370,7 @@ impl Default for UdpAccelServerResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_udp_accel_creation() {
         let accel = UdpAccel::new(None, true, false).unwrap();
@@ -374,7 +379,7 @@ mod tests {
         assert_eq!(accel.version, UDP_ACCEL_VERSION_2);
         assert!(!accel.is_usable);
     }
-    
+
     #[tokio::test]
     async fn test_udp_accel_auth_params() {
         let accel = UdpAccel::new(None, true, false).unwrap();
@@ -383,26 +388,34 @@ mod tests {
         assert_eq!(params.max_version, UDP_ACCEL_MAX_VERSION);
         assert_eq!(params.client_port, accel.my_port);
     }
-    
+
     #[tokio::test]
     async fn test_udp_accel_init_client() {
         let mut accel = UdpAccel::new(None, true, false).unwrap();
-        
+
         let server_key = [0u8; UDP_ACCELERATION_COMMON_KEY_SIZE_V2];
         let server_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
         let server_port = 8080u16;
         let server_cookie = 12345u32;
         let client_cookie = accel.my_cookie;
-        
-        accel.init_client(&server_key, server_ip, server_port, server_cookie, client_cookie).unwrap();
-        
+
+        accel
+            .init_client(
+                &server_key,
+                server_ip,
+                server_port,
+                server_cookie,
+                client_cookie,
+            )
+            .unwrap();
+
         assert!(accel.is_usable);
         assert!(accel.is_ready());
         assert_eq!(accel.your_ip, Some(server_ip));
         assert_eq!(accel.your_port, Some(server_port));
         assert_eq!(accel.your_cookie, Some(server_cookie));
     }
-    
+
     #[tokio::test]
     async fn test_calc_mss() {
         let accel = UdpAccel::new(None, true, false).unwrap();

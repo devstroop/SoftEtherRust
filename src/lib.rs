@@ -38,15 +38,15 @@
 //! }
 //! ```
 
-pub mod crypto;
-pub mod protocol;
-pub mod packet;
-pub mod tunnel;
 pub mod adapter;
 pub mod client;
-pub mod net;
-pub mod error;
 pub mod config;
+pub mod crypto;
+pub mod error;
+pub mod net;
+pub mod packet;
+pub mod protocol;
+pub mod tunnel;
 
 // FFI module for C/iOS/Android interop
 #[cfg(feature = "ffi")]

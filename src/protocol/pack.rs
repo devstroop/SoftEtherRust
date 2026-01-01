@@ -13,10 +13,10 @@
 //!   - UNISTR (3): `[size:u32] [utf8_bytes... 0x00]`
 //!   - INT64 (4): `[value:u64]`
 
+use super::constants::*;
+use crate::error::{Error, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::collections::HashMap;
-use crate::error::{Error, Result};
-use super::constants::*;
 
 /// Pack value types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -326,10 +326,7 @@ impl Pack {
 
         let num_elements = buf.get_u32();
         if num_elements as usize > MAX_ELEMENTS {
-            return Err(Error::pack(format!(
-                "Too many elements: {}",
-                num_elements
-            )));
+            return Err(Error::pack(format!("Too many elements: {}", num_elements)));
         }
 
         let mut pack = Pack::new();

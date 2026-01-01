@@ -32,13 +32,13 @@
 //! - Avoid intermediate allocations
 //! - Wrap IP packets in Ethernet frames in-place
 
+use super::constants::*;
+use crate::error::{Error, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use std::io::{Read, Write};
-use crate::error::{Error, Result};
-use super::constants::*;
 
 /// Tunnel protocol constants.
 pub struct TunnelConstants;
@@ -72,7 +72,8 @@ pub fn is_compressed(data: &[u8]) -> bool {
 pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
     let mut decoder = ZlibDecoder::new(data);
     let mut decompressed = Vec::with_capacity(data.len() * 2);
-    decoder.read_to_end(&mut decompressed)
+    decoder
+        .read_to_end(&mut decompressed)
         .map_err(|e| Error::Protocol(format!("Decompression failed: {}", e)))?;
     Ok(decompressed)
 }
@@ -92,9 +93,11 @@ pub fn decompress_into(data: &[u8], buffer: &mut [u8]) -> Result<usize> {
 /// Compress data with zlib.
 pub fn compress(data: &[u8]) -> Result<Vec<u8>> {
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(data)
+    encoder
+        .write_all(data)
         .map_err(|e| Error::Protocol(format!("Compression failed: {}", e)))?;
-    encoder.finish()
+    encoder
+        .finish()
         .map_err(|e| Error::Protocol(format!("Compression finish failed: {}", e)))
 }
 
@@ -270,10 +273,7 @@ impl TunnelCodec {
                         frames.push(TunnelFrame::Data(Vec::new()));
                         continue;
                     } else if header as usize > TunnelConstants::MAX_BLOCKS {
-                        return Err(Error::protocol(format!(
-                            "Too many blocks: {}",
-                            header
-                        )));
+                        return Err(Error::protocol(format!("Too many blocks: {}", header)));
                     } else {
                         // Data frame
                         self.remaining_blocks = header as usize;
@@ -383,11 +383,11 @@ impl TunnelCodec {
     pub fn encode_keepalive(&self) -> Bytes {
         TunnelFrame::keepalive(rand::random::<usize>() % 64 + 1).encode()
     }
-    
+
     // =========================================================================
     // Zero-copy methods (inspired by SoftEtherZig)
     // =========================================================================
-    
+
     /// Encode a single IP packet wrapped in Ethernet directly into a buffer.
     ///
     /// This is the most efficient path for sending:
@@ -412,30 +412,30 @@ impl TunnelCodec {
         if ip_packet.is_empty() || ip_packet.len() > MAX_PACKET_SIZE {
             return None;
         }
-        
+
         let eth_len = 14 + ip_packet.len();
         let total_len = 4 + 4 + eth_len; // num_blocks + block_size + eth_frame
-        
+
         if buffer.len() < total_len {
             return None;
         }
-        
+
         // Determine IP version
         let ip_version = (ip_packet[0] >> 4) & 0x0F;
         if ip_version != 4 && ip_version != 6 {
             return None;
         }
-        
+
         // num_blocks = 1
         buffer[0..4].copy_from_slice(&1u32.to_be_bytes());
-        
+
         // block_size = eth_len
         buffer[4..8].copy_from_slice(&(eth_len as u32).to_be_bytes());
-        
+
         // Ethernet header (14 bytes)
-        buffer[8..14].copy_from_slice(dst_mac);  // dst MAC
+        buffer[8..14].copy_from_slice(dst_mac); // dst MAC
         buffer[14..20].copy_from_slice(src_mac); // src MAC
-        
+
         // EtherType
         if ip_version == 4 {
             buffer[20] = 0x08;
@@ -444,13 +444,13 @@ impl TunnelCodec {
             buffer[20] = 0x86;
             buffer[21] = 0xDD;
         }
-        
+
         // IP packet (single copy)
         buffer[22..22 + ip_packet.len()].copy_from_slice(ip_packet);
-        
+
         Some(&buffer[..total_len])
     }
-    
+
     /// Encode multiple Ethernet frames into a buffer using zero-copy.
     ///
     /// # Arguments
@@ -459,30 +459,27 @@ impl TunnelCodec {
     ///
     /// Returns the slice of the buffer that was written.
     #[inline]
-    pub fn encode_batch_direct<'a>(
-        frames: &[&[u8]],
-        buffer: &'a mut [u8],
-    ) -> Option<&'a [u8]> {
+    pub fn encode_batch_direct<'a>(frames: &[&[u8]], buffer: &'a mut [u8]) -> Option<&'a [u8]> {
         if frames.is_empty() {
             return None;
         }
-        
+
         // Calculate total size needed
         let mut total_size: usize = 4; // num_blocks
         for frame in frames {
             total_size += 4 + frame.len(); // size + data
         }
-        
+
         if buffer.len() < total_size {
             return None;
         }
-        
+
         let mut offset: usize = 0;
-        
+
         // Write number of blocks
         buffer[offset..offset + 4].copy_from_slice(&(frames.len() as u32).to_be_bytes());
         offset += 4;
-        
+
         // Write each block
         for frame in frames {
             buffer[offset..offset + 4].copy_from_slice(&(frame.len() as u32).to_be_bytes());
@@ -490,10 +487,10 @@ impl TunnelCodec {
             buffer[offset..offset + frame.len()].copy_from_slice(frame);
             offset += frame.len();
         }
-        
+
         Some(&buffer[..offset])
     }
-    
+
     /// Encode a keep-alive packet directly into a buffer.
     ///
     /// # Arguments
@@ -506,25 +503,25 @@ impl TunnelCodec {
     ) -> Option<&'a [u8]> {
         let padding_size = padding_size.min(TunnelConstants::MAX_KEEPALIVE_SIZE);
         let total_size = 8 + padding_size;
-        
+
         if buffer.len() < total_size {
             return None;
         }
-        
+
         // KEEP_ALIVE_MAGIC
         buffer[0..4].copy_from_slice(&TunnelConstants::KEEPALIVE_MAGIC.to_be_bytes());
-        
+
         // Padding size
         buffer[4..8].copy_from_slice(&(padding_size as u32).to_be_bytes());
-        
+
         // Random padding
         if padding_size > 0 {
             crate::crypto::fill_random(&mut buffer[8..8 + padding_size]);
         }
-        
+
         Some(&buffer[..total_size])
     }
-    
+
     /// Decode blocks from a buffer without allocation.
     ///
     /// Uses a callback to process each block, avoiding the need to collect into a Vec.
@@ -540,16 +537,16 @@ impl TunnelCodec {
     {
         self.buffer.extend_from_slice(data);
         let mut block_count = 0;
-        
+
         loop {
             match &self.state {
                 DecodeState::Header => {
                     if self.buffer.remaining() < 4 {
                         return Ok(block_count);
                     }
-                    
+
                     let header = self.buffer.get_u32();
-                    
+
                     if header == TunnelConstants::KEEPALIVE_MAGIC {
                         if self.buffer.remaining() < 4 {
                             return Ok(block_count);
@@ -568,42 +565,45 @@ impl TunnelCodec {
                         self.state = DecodeState::DataBlocks;
                     }
                 }
-                
+
                 DecodeState::DataBlocks => {
                     while self.remaining_blocks > 0 {
                         if self.buffer.remaining() < 4 {
                             return Ok(block_count);
                         }
-                        
+
                         let block_size = (&self.buffer[..4]).get_u32() as usize;
-                        
+
                         if block_size == 0 {
                             self.buffer.advance(4);
                             self.remaining_blocks -= 1;
                             continue;
                         }
-                        
+
                         if block_size > TunnelConstants::MAX_PACKET_SIZE * 2 {
-                            return Err(Error::protocol(format!("Packet too large: {}", block_size)));
+                            return Err(Error::protocol(format!(
+                                "Packet too large: {}",
+                                block_size
+                            )));
                         }
-                        
+
                         if self.buffer.remaining() < 4 + block_size {
                             return Ok(block_count);
                         }
-                        
+
                         self.buffer.advance(4);
-                        
+
                         // Call callback with the block data (zero-copy reference)
                         callback(&self.buffer[..block_size]);
-                        
+
                         self.buffer.advance(block_size);
                         self.remaining_blocks -= 1;
                         block_count += 1;
                     }
-                    
+
                     self.state = DecodeState::Header;
                 }
-                
+
                 DecodeState::KeepalivePadding { size } => {
                     let size = *size;
                     if self.buffer.remaining() < size {
@@ -708,209 +708,188 @@ mod tests {
         assert_eq!(frames.len(), 1);
         assert!(frames[0].packets().unwrap().is_empty());
     }
-    
+
     // =========================================================================
     // Zero-copy method tests
     // =========================================================================
-    
+
     #[test]
     fn test_encode_single_packet_direct_ipv4() {
         // Minimal IPv4 packet
         let ip_packet: [u8; 20] = [
             0x45, 0x00, 0x00, 0x14, // version=4, IHL=5, total_len=20
-            0x00, 0x00, 0x00, 0x00,
-            0x40, 0x06, 0x00, 0x00,
-            0xC0, 0xA8, 0x01, 0x64, // src: 192.168.1.100
+            0x00, 0x00, 0x00, 0x00, 0x40, 0x06, 0x00, 0x00, 0xC0, 0xA8, 0x01,
+            0x64, // src: 192.168.1.100
             0xC0, 0xA8, 0x01, 0x01, // dst: 192.168.1.1
         ];
         let dst_mac = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
         let src_mac = [0x02, 0x00, 0x5E, 0x00, 0x00, 0x01];
         let mut buffer = [0u8; 2048];
-        
-        let result = TunnelCodec::encode_single_packet_direct(
-            &ip_packet,
-            &dst_mac,
-            &src_mac,
-            &mut buffer,
-        );
-        
+
+        let result =
+            TunnelCodec::encode_single_packet_direct(&ip_packet, &dst_mac, &src_mac, &mut buffer);
+
         assert!(result.is_some());
         let encoded = result.unwrap();
-        
+
         // Total: 4 (num_blocks) + 4 (block_size) + 14 (eth) + 20 (ip) = 42
         assert_eq!(encoded.len(), 42);
-        
+
         // Verify num_blocks = 1
         assert_eq!(&encoded[0..4], &[0, 0, 0, 1]);
-        
+
         // Verify block_size = 34 (14 + 20)
         assert_eq!(&encoded[4..8], &[0, 0, 0, 34]);
-        
+
         // Verify dst MAC
         assert_eq!(&encoded[8..14], &dst_mac);
-        
+
         // Verify src MAC
         assert_eq!(&encoded[14..20], &src_mac);
-        
+
         // Verify EtherType is IPv4
         assert_eq!(&encoded[20..22], &[0x08, 0x00]);
-        
+
         // Verify IP packet is intact
         assert_eq!(&encoded[22..], &ip_packet);
     }
-    
+
     #[test]
     fn test_encode_single_packet_direct_ipv6() {
         // Minimal IPv6 packet
         let mut ip_packet = [0u8; 40];
         ip_packet[0] = 0x60; // version=6
-        
+
         let dst_mac = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
         let src_mac = [0x02, 0x00, 0x5E, 0x00, 0x00, 0x01];
         let mut buffer = [0u8; 2048];
-        
-        let result = TunnelCodec::encode_single_packet_direct(
-            &ip_packet,
-            &dst_mac,
-            &src_mac,
-            &mut buffer,
-        );
-        
+
+        let result =
+            TunnelCodec::encode_single_packet_direct(&ip_packet, &dst_mac, &src_mac, &mut buffer);
+
         assert!(result.is_some());
         let encoded = result.unwrap();
-        
+
         // Verify EtherType is IPv6
         assert_eq!(&encoded[20..22], &[0x86, 0xDD]);
     }
-    
+
     #[test]
     fn test_encode_single_packet_direct_invalid_version() {
         let ip_packet = [0x00u8; 20]; // Invalid IP version
         let dst_mac = [0xFF; 6];
         let src_mac = [0x02; 6];
         let mut buffer = [0u8; 2048];
-        
-        let result = TunnelCodec::encode_single_packet_direct(
-            &ip_packet,
-            &dst_mac,
-            &src_mac,
-            &mut buffer,
-        );
-        
+
+        let result =
+            TunnelCodec::encode_single_packet_direct(&ip_packet, &dst_mac, &src_mac, &mut buffer);
+
         assert!(result.is_none());
     }
-    
+
     #[test]
     fn test_encode_single_packet_direct_buffer_too_small() {
         let ip_packet = [0x45u8; 20];
         let dst_mac = [0xFF; 6];
         let src_mac = [0x02; 6];
         let mut buffer = [0u8; 30]; // Too small
-        
-        let result = TunnelCodec::encode_single_packet_direct(
-            &ip_packet,
-            &dst_mac,
-            &src_mac,
-            &mut buffer,
-        );
-        
+
+        let result =
+            TunnelCodec::encode_single_packet_direct(&ip_packet, &dst_mac, &src_mac, &mut buffer);
+
         assert!(result.is_none());
     }
-    
+
     #[test]
     fn test_encode_batch_direct() {
         let frame1: &[u8] = b"frame1";
         let frame2: &[u8] = b"frame2";
         let frames: &[&[u8]] = &[frame1, frame2];
         let mut buffer = [0u8; 1024];
-        
+
         let result = TunnelCodec::encode_batch_direct(frames, &mut buffer);
-        
+
         assert!(result.is_some());
         let encoded = result.unwrap();
-        
+
         // Verify num_blocks = 2
         assert_eq!(&encoded[0..4], &[0, 0, 0, 2]);
-        
+
         // Verify first block size = 6
         assert_eq!(&encoded[4..8], &[0, 0, 0, 6]);
-        
+
         // Verify first block data
         assert_eq!(&encoded[8..14], b"frame1");
-        
+
         // Verify second block size = 6
         assert_eq!(&encoded[14..18], &[0, 0, 0, 6]);
-        
+
         // Verify second block data
         assert_eq!(&encoded[18..24], b"frame2");
     }
-    
+
     #[test]
     fn test_encode_keepalive_direct() {
         let mut buffer = [0u8; 100];
-        
+
         let result = TunnelCodec::encode_keepalive_direct(32, &mut buffer);
-        
+
         assert!(result.is_some());
         let encoded = result.unwrap();
-        
+
         assert_eq!(encoded.len(), 8 + 32);
-        
+
         // Verify magic
         assert_eq!(&encoded[0..4], &[0xFF, 0xFF, 0xFF, 0xFF]);
-        
+
         // Verify padding size
         assert_eq!(&encoded[4..8], &[0, 0, 0, 32]);
     }
-    
+
     #[test]
     fn test_decode_with_callback() {
         let frame1 = Bytes::from_static(b"packet1");
         let frame2 = Bytes::from_static(b"packet2");
         let frame = TunnelFrame::batch(vec![frame1.clone(), frame2.clone()]);
         let encoded = frame.encode();
-        
+
         let mut codec = TunnelCodec::new();
         let mut received: Vec<Vec<u8>> = Vec::new();
-        
-        let count = codec.decode_with_callback(&encoded, |data| {
-            received.push(data.to_vec());
-        }).unwrap();
-        
+
+        let count = codec
+            .decode_with_callback(&encoded, |data| {
+                received.push(data.to_vec());
+            })
+            .unwrap();
+
         assert_eq!(count, 2);
         assert_eq!(received[0], b"packet1");
         assert_eq!(received[1], b"packet2");
     }
-    
+
     #[test]
     fn test_roundtrip_direct_encode_decode() {
         // Encode using zero-copy
         let ip_packet: [u8; 20] = [
-            0x45, 0x00, 0x00, 0x14,
-            0x00, 0x00, 0x00, 0x00,
-            0x40, 0x06, 0x00, 0x00,
-            0xC0, 0xA8, 0x01, 0x64,
-            0xC0, 0xA8, 0x01, 0x01,
+            0x45, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0x40, 0x06, 0x00, 0x00, 0xC0, 0xA8,
+            0x01, 0x64, 0xC0, 0xA8, 0x01, 0x01,
         ];
         let dst_mac = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
         let src_mac = [0x02, 0x00, 0x5E, 0x00, 0x00, 0x01];
         let mut buffer = [0u8; 2048];
-        
-        let encoded = TunnelCodec::encode_single_packet_direct(
-            &ip_packet,
-            &dst_mac,
-            &src_mac,
-            &mut buffer,
-        ).unwrap();
-        
+
+        let encoded =
+            TunnelCodec::encode_single_packet_direct(&ip_packet, &dst_mac, &src_mac, &mut buffer)
+                .unwrap();
+
         // Decode
         let mut codec = TunnelCodec::new();
         let frames = codec.feed(encoded).unwrap();
-        
+
         assert_eq!(frames.len(), 1);
         let packets = frames[0].packets().unwrap();
         assert_eq!(packets.len(), 1);
-        
+
         // Verify Ethernet frame
         let eth_frame = &packets[0];
         assert_eq!(&eth_frame[0..6], &dst_mac);
