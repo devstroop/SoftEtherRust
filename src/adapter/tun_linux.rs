@@ -5,6 +5,7 @@ use std::io::{self, Read, Write};
 use std::net::Ipv4Addr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::process::Command;
+use std::sync::Mutex;
 
 use libc::{
     c_char, c_int, c_short, c_void, close, ioctl, open, read, write,
@@ -39,6 +40,29 @@ const IFF_UP: c_short = 0x1;
 /// IFF_RUNNING - Interface is running.
 const IFF_RUNNING: c_short = 0x40;
 
+/// Get the current default gateway from the routing table.
+/// Returns None if no default gateway is found.
+pub fn get_default_gateway() -> Option<Ipv4Addr> {
+    // Use ip route to get the default gateway, excluding our TUN interfaces
+    let output = Command::new("sh")
+        .args(["-c", "ip route show default | grep -v 'tun' | head -1 | awk '{print $3}'"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let gateway_str = String::from_utf8_lossy(&output.stdout);
+    let gateway_str = gateway_str.trim();
+    
+    if gateway_str.is_empty() {
+        return None;
+    }
+
+    gateway_str.parse().ok()
+}
+
 /// Interface request structure.
 #[repr(C)]
 struct IfReq {
@@ -67,6 +91,10 @@ pub struct TunDevice {
     fd: OwnedFd,
     name: String,
     mtu: u16,
+    /// Routes added by this device (for cleanup on drop)
+    routes_added: Mutex<Vec<String>>,
+    /// Original default gateway (saved for host route cleanup)
+    original_gateway: Mutex<Option<Ipv4Addr>>,
 }
 
 impl TunDevice {
@@ -112,6 +140,8 @@ impl TunDevice {
                 fd: OwnedFd::from_raw_fd(fd),
                 name,
                 mtu: 1400,
+                routes_added: Mutex::new(Vec::new()),
+                original_gateway: Mutex::new(None),
             })
         }
     }
@@ -143,6 +173,10 @@ impl TunDevice {
 impl TunAdapter for TunDevice {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
     }
 
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -301,39 +335,194 @@ impl TunAdapter for TunDevice {
         Ok(())
     }
 
-    fn set_default_route(&self, gateway: Ipv4Addr) -> io::Result<()> {
-        // First, delete the existing default route
-        let _ = Command::new("ip")
-            .args(["route", "del", "default"])
-            .status();
-
-        // Add new default route
+    fn add_route_via_interface(&self, dest: Ipv4Addr, prefix_len: u8) -> io::Result<()> {
+        let route_str = format!("{}/{}", dest, prefix_len);
         let status = Command::new("ip")
             .args([
                 "route",
                 "add",
-                "default",
-                "via",
-                &gateway.to_string(),
+                &route_str,
                 "dev",
                 &self.name,
             ])
             .status()?;
 
         if !status.success() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Failed to set default route",
-            ));
+            warn!("Failed to add route to {} via interface {}", route_str, self.name);
+        } else {
+            info!("Added route: {} via interface {}", route_str, self.name);
+            if let Ok(mut routes) = self.routes_added.lock() {
+                routes.push(route_str);
+            }
         }
 
-        info!("Set default route via {} on {}", gateway, self.name);
+        Ok(())
+    }
+
+    fn set_default_route(&self, _gateway: Ipv4Addr, vpn_server_ip: Option<Ipv4Addr>) -> io::Result<()> {
+        // On Linux, we use the same "split-tunnel" approach as macOS:
+        // Add two more-specific routes that cover the entire IPv4 space:
+        // - 0.0.0.0/1 covers 0.0.0.0 - 127.255.255.255
+        // - 128.0.0.0/1 covers 128.0.0.0 - 255.255.255.255
+
+        // CRITICAL: First, add a host route for the VPN server through the original gateway
+        if let Some(server_ip) = vpn_server_ip {
+            if let Some(orig_gateway) = get_default_gateway() {
+                info!("Adding host route for VPN server {} via original gateway {}", server_ip, orig_gateway);
+                let status = Command::new("ip")
+                    .args([
+                        "route",
+                        "add",
+                        &server_ip.to_string(),
+                        "via",
+                        &orig_gateway.to_string(),
+                    ])
+                    .status()?;
+
+                if status.success() {
+                    // Save original gateway for cleanup
+                    if let Ok(mut gw) = self.original_gateway.lock() {
+                        *gw = Some(orig_gateway);
+                    }
+                    // Track the host route for cleanup
+                    if let Ok(mut routes) = self.routes_added.lock() {
+                        routes.push(format!("host:{}", server_ip));
+                    }
+                    info!("Added host route: {} via {}", server_ip, orig_gateway);
+                } else {
+                    warn!("Failed to add host route for VPN server (may already exist)");
+                }
+            } else {
+                warn!("Could not determine original default gateway - VPN traffic may not route correctly");
+            }
+        }
+        
+        // Add route for 0.0.0.0/1 (first half of IPv4 space)
+        let status1 = Command::new("ip")
+            .args([
+                "route",
+                "add",
+                "0.0.0.0/1",
+                "dev",
+                &self.name,
+            ])
+            .status()?;
+
+        if !status1.success() {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Failed to add route 0.0.0.0/1",
+            ));
+        }
+        if let Ok(mut routes) = self.routes_added.lock() {
+            routes.push("0.0.0.0/1".to_string());
+        }
+
+        // Add route for 128.0.0.0/1 (second half of IPv4 space)
+        let status2 = Command::new("ip")
+            .args([
+                "route",
+                "add",
+                "128.0.0.0/1",
+                "dev",
+                &self.name,
+            ])
+            .status()?;
+
+        if !status2.success() {
+            // Rollback first route
+            let _ = Command::new("ip")
+                .args(["route", "del", "0.0.0.0/1"])
+                .status();
+            if let Ok(mut routes) = self.routes_added.lock() {
+                routes.pop();
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Failed to add route 128.0.0.0/1",
+            ));
+        }
+        if let Ok(mut routes) = self.routes_added.lock() {
+            routes.push("128.0.0.0/1".to_string());
+        }
+
+        info!("Set default route via {} (split-tunnel: 0.0.0.0/1 + 128.0.0.0/1)", self.name);
+        Ok(())
+    }
+
+    fn configure_dns(&self, dns1: Option<Ipv4Addr>, dns2: Option<Ipv4Addr>) -> io::Result<()> {
+        // On Linux, we modify /etc/resolv.conf or use resolvconf/systemd-resolved
+        
+        let dns_servers: Vec<String> = [dns1, dns2]
+            .iter()
+            .filter_map(|&d| d.map(|ip| ip.to_string()))
+            .collect();
+        
+        if dns_servers.is_empty() {
+            debug!("No DNS servers to configure");
+            return Ok(());
+        }
+
+        // Try systemd-resolved first (modern systems)
+        for dns in &dns_servers {
+            let status = Command::new("resolvectl")
+                .args(["dns", &self.name, dns])
+                .status();
+            
+            if status.is_ok() && status.unwrap().success() {
+                info!("Configured DNS {} via resolvectl", dns);
+                continue;
+            }
+            
+            // Fall back to systemd-resolve (older name)
+            let status = Command::new("systemd-resolve")
+                .args(["--interface", &self.name, "--set-dns", dns])
+                .status();
+            
+            if status.is_ok() && status.unwrap().success() {
+                info!("Configured DNS {} via systemd-resolve", dns);
+            }
+        }
+
+        // Also set domain routing for all domains through this interface
+        let _ = Command::new("resolvectl")
+            .args(["domain", &self.name, "~."])
+            .status();
+
+        info!("Configured DNS servers: {:?}", dns_servers);
+        Ok(())
+    }
+
+    fn restore_dns(&self) -> io::Result<()> {
+        // systemd-resolved automatically removes DNS config when interface goes down
+        // For resolvconf-based systems, we would need to restore the backup
+        debug!("DNS configuration will be restored when interface is removed");
         Ok(())
     }
 }
 
 impl Drop for TunDevice {
     fn drop(&mut self) {
+        // Restore DNS first
+        let _ = self.restore_dns();
+        
+        // Clean up routes we added
+        if let Ok(routes) = self.routes_added.lock() {
+            for route in routes.iter() {
+                debug!("Removing route: {}", route);
+                // Handle host routes differently
+                if route.starts_with("host:") {
+                    let host_ip = route.strip_prefix("host:").unwrap();
+                    let _ = Command::new("ip")
+                        .args(["route", "del", host_ip])
+                        .status();
+                } else {
+                    let _ = Command::new("ip")
+                        .args(["route", "del", route])
+                        .status();
+                }
+            }
+        }
         debug!("Closing TUN device: {}", self.name);
     }
 }

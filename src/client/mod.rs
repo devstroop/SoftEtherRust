@@ -81,6 +81,12 @@ impl VpnClient {
         self.state = VpnState::Connecting;
         self.running.store(true, Ordering::SeqCst);
 
+        // Warn if max_connections > 1 (not yet supported)
+        if self.config.max_connections > 1 {
+            warn!("max_connections={} configured but multi-connection is not yet implemented. Using single connection.", 
+                  self.config.max_connections);
+        }
+
         info!(
             "Connecting to {}:{} (hub: {})",
             self.config.server, self.config.port, self.config.hub
@@ -235,8 +241,9 @@ impl VpnClient {
         debug!("Redirect server hello: {:?}", redirect_hello);
         
         // Build connection options from config
+        // NOTE: Force max_connections=1 because multi-connection data handling is not yet implemented.
         let options = ConnectionOptions {
-            max_connections: self.config.max_connections,
+            max_connections: 1, // Force single connection until multi-conn is implemented
             use_encrypt: self.config.use_encrypt,
             use_compress: self.config.use_compress,
             udp_accel: self.config.udp_accel,
@@ -374,8 +381,11 @@ impl VpnClient {
         info!("Using authentication type: {:?}", auth_type);
 
         // Build connection options from config
+        // NOTE: Force max_connections=1 because multi-connection data handling is not yet implemented.
+        // With max_connections > 1, the server uses half-connection mode and may distribute packets
+        // across connections, causing DHCP and other protocols to fail.
         let options = ConnectionOptions {
-            max_connections: self.config.max_connections,
+            max_connections: 1, // Force single connection until multi-conn is implemented
             use_encrypt: self.config.use_encrypt,
             use_compress: self.config.use_compress,
             udp_accel: self.config.udp_accel,

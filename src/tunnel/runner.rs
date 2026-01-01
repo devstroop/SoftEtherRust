@@ -15,7 +15,11 @@ use tokio::sync::mpsc;
 use tokio::time::{interval, timeout};
 use tracing::{debug, error, info, warn};
 
-use crate::adapter::{TunAdapter, UtunDevice};
+use crate::adapter::TunAdapter;
+#[cfg(target_os = "macos")]
+use crate::adapter::UtunDevice;
+#[cfg(target_os = "linux")]
+use crate::adapter::TunDevice;
 use crate::client::VpnConnection;
 use crate::error::{Error, Result};
 use crate::protocol::{TunnelCodec, is_compressed, decompress, decompress_into, compress};
@@ -116,7 +120,11 @@ impl TunnelRunner {
             dhcp_config.ip, dhcp_config.gateway, dhcp_config.dns1);
 
         // Step 2: Create TUN device
+        #[cfg(target_os = "macos")]
         let mut tun = UtunDevice::new(None)
+            .map_err(|e| Error::TunDevice(format!("Failed to create TUN: {}", e)))?;
+        #[cfg(target_os = "linux")]
+        let mut tun = TunDevice::new(None)
             .map_err(|e| Error::TunDevice(format!("Failed to create TUN: {}", e)))?;
         info!("Created TUN device: {}", tun.name());
 
@@ -140,7 +148,7 @@ impl TunnelRunner {
     /// Configure routes for VPN traffic.
     ///
     /// This sets up routing so traffic to the VPN subnet goes through the TUN device.
-    fn configure_routes(&self, tun: &UtunDevice, dhcp_config: &DhcpConfig) -> Result<()> {
+    fn configure_routes(&self, tun: &impl TunAdapter, dhcp_config: &DhcpConfig) -> Result<()> {
         // If explicit routes are configured, use those
         if !self.config.routes.is_empty() {
             for route in &self.config.routes {
@@ -366,7 +374,7 @@ impl TunnelRunner {
     async fn run_data_loop(
         &self,
         conn: &mut VpnConnection,
-        tun: &mut UtunDevice,
+        tun: &mut impl TunAdapter,
         dhcp_config: &DhcpConfig,
     ) -> Result<()> {
         let mut state = DataLoopState::new(self.mac);
@@ -405,8 +413,8 @@ impl TunnelRunner {
         let mut last_activity = Instant::now();
 
         // Zero-copy TUN reader using fixed buffer
-        // Layout: [4-byte utun header][14-byte ethernet header][IP packet]
-        // We read at offset 18 to leave room for prepending headers
+        // macOS utun: [4-byte protocol header][IP packet]
+        // Linux tun:  [IP packet] (no header with IFF_NO_PI)
         let (tun_tx, mut tun_rx) = mpsc::channel::<(usize, [u8; 2048])>(64);
         let tun_fd = tun.raw_fd();
         let running = self.running.clone();
@@ -437,7 +445,13 @@ impl TunnelRunner {
                         )
                     };
 
-                    if n > 4 {
+                    // macOS utun has 4-byte header, Linux tun doesn't
+                    #[cfg(target_os = "macos")]
+                    let min_len = 4;
+                    #[cfg(target_os = "linux")]
+                    let min_len = 1;
+
+                    if n > min_len as isize {
                         // Send the buffer with length - receiver will extract IP packet
                         // Channel copies the fixed buffer (unavoidable for cross-thread)
                         if tun_tx.blocking_send((n as usize, read_buf)).is_err() {
@@ -458,9 +472,13 @@ impl TunnelRunner {
             tokio::select! {
                 // Packet from TUN device (from local applications)
                 Some((len, tun_buf)) = tun_rx.recv() => {
-                    // tun_buf layout: [4-byte utun header][IP packet]
-                    // IP packet starts at offset 4
+                    // macOS utun: [4-byte header][IP packet] - IP starts at offset 4
+                    // Linux tun:  [IP packet] - IP starts at offset 0
+                    #[cfg(target_os = "macos")]
                     let ip_packet = &tun_buf[4..len];
+                    #[cfg(target_os = "linux")]
+                    let ip_packet = &tun_buf[..len];
+                    
                     if ip_packet.is_empty() {
                         continue;
                     }
@@ -677,18 +695,34 @@ impl TunnelRunner {
                     );
                     
                     if dst_ip == our_ip || dst_ip.is_broadcast() || dst_ip.is_multicast() {
-                        // Zero-copy write: build utun header + IP packet in pre-allocated buffer
-                        let total_len = 4 + ip_packet.len();
-                        if total_len <= tun_buf.len() {
-                            // AF_INET = 2 in network byte order
-                            tun_buf[0..4].copy_from_slice(&(libc::AF_INET as u32).to_be_bytes());
-                            tun_buf[4..total_len].copy_from_slice(ip_packet);
-                            
+                        // Write to TUN device
+                        // macOS utun: needs 4-byte protocol header
+                        // Linux tun: raw IP packet (IFF_NO_PI)
+                        #[cfg(target_os = "macos")]
+                        {
+                            let total_len = 4 + ip_packet.len();
+                            if total_len <= tun_buf.len() {
+                                // AF_INET = 2 in network byte order
+                                tun_buf[0..4].copy_from_slice(&(libc::AF_INET as u32).to_be_bytes());
+                                tun_buf[4..total_len].copy_from_slice(ip_packet);
+                                
+                                unsafe {
+                                    libc::write(
+                                        tun_fd,
+                                        tun_buf.as_ptr() as *const libc::c_void,
+                                        total_len,
+                                    );
+                                }
+                            }
+                        }
+                        #[cfg(target_os = "linux")]
+                        {
+                            // Linux: write raw IP packet directly
                             unsafe {
                                 libc::write(
                                     tun_fd,
-                                    tun_buf.as_ptr() as *const libc::c_void,
-                                    total_len,
+                                    ip_packet.as_ptr() as *const libc::c_void,
+                                    ip_packet.len(),
                                 );
                             }
                         }
@@ -698,17 +732,31 @@ impl TunnelRunner {
             0x86DD => {
                 // IPv6
                 let ip_packet = &frame[14..];
-                let total_len = 4 + ip_packet.len();
-                if total_len <= tun_buf.len() {
-                    // AF_INET6 = 30 on macOS in network byte order
-                    tun_buf[0..4].copy_from_slice(&(libc::AF_INET6 as u32).to_be_bytes());
-                    tun_buf[4..total_len].copy_from_slice(ip_packet);
-                    
+                #[cfg(target_os = "macos")]
+                {
+                    let total_len = 4 + ip_packet.len();
+                    if total_len <= tun_buf.len() {
+                        // AF_INET6 = 30 on macOS in network byte order
+                        tun_buf[0..4].copy_from_slice(&(libc::AF_INET6 as u32).to_be_bytes());
+                        tun_buf[4..total_len].copy_from_slice(ip_packet);
+                        
+                        unsafe {
+                            libc::write(
+                                tun_fd,
+                                tun_buf.as_ptr() as *const libc::c_void,
+                                total_len,
+                            );
+                        }
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    // Linux: write raw IP packet directly
                     unsafe {
                         libc::write(
                             tun_fd,
-                            tun_buf.as_ptr() as *const libc::c_void,
-                            total_len,
+                            ip_packet.as_ptr() as *const libc::c_void,
+                            ip_packet.len(),
                         );
                     }
                 }
