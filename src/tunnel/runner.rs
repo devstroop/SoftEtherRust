@@ -856,32 +856,55 @@ impl TunnelRunner {
         debug!("DHCP DISCOVER: {:02X?}", &discover[..std::cmp::min(64, discover.len())]);
         self.send_frame_multi(conn_mgr, &discover, &mut send_buf).await?;
 
-        // Current index for round-robin reading across receive connections
-        let mut current_recv_idx = 0;
+        let mut last_send = Instant::now();
+        let mut poll_idx = 0;
+        
+        // Use longer timeout per read - we want to actually wait for data
+        // With 1 connection, we can afford to wait longer
+        let per_conn_timeout_ms = if recv_conn_indices.len() <= 1 { 100 } else {
+            std::cmp::max(10, 100 / recv_conn_indices.len() as u64)
+        };
 
-        // Wait for OFFER
+        // Wait for OFFER/ACK
         loop {
             if Instant::now() > deadline {
-                return Err(Error::TimeoutMessage("DHCP timeout - no OFFER received".into()));
+                return Err(Error::TimeoutMessage("DHCP timeout - no response received".into()));
             }
 
-            // Try reading from each receive connection in round-robin fashion
-            // with a short timeout so we can check all connections
-            let mut got_data = false;
-            
+            // Retry DHCP if no response for 1 second (server may be slow)
+            if last_send.elapsed() > Duration::from_millis(1000) {
+                if dhcp.state() == DhcpState::DiscoverSent {
+                    warn!("DHCP timeout, retrying DISCOVER");
+                    let discover = dhcp.build_discover();
+                    self.send_frame_multi(conn_mgr, &discover, &mut send_buf).await?;
+                } else if dhcp.state() == DhcpState::RequestSent {
+                    warn!("DHCP timeout, retrying REQUEST");
+                    if let Some(request) = dhcp.build_request() {
+                        self.send_frame_multi(conn_mgr, &request, &mut send_buf).await?;
+                    }
+                }
+                last_send = Instant::now();
+            }
+
+            if recv_conn_indices.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            }
+
+            // Poll each connection with very short timeout
             for _ in 0..recv_conn_indices.len() {
-                let conn_idx = recv_conn_indices[current_recv_idx % recv_conn_indices.len()];
-                current_recv_idx += 1;
+                let conn_idx = recv_conn_indices[poll_idx % recv_conn_indices.len()];
+                poll_idx += 1;
                 
-                let recv_conn = conn_mgr.get_mut(conn_idx)
-                    .ok_or_else(|| Error::ConnectionFailed("Receive connection not found".into()))?;
+                let recv_conn = match conn_mgr.get_mut(conn_idx) {
+                    Some(c) => c,
+                    None => continue,
+                };
                 
-                // Very short timeout to quickly poll each connection
-                match timeout(Duration::from_millis(100), recv_conn.conn.read(&mut buf)).await {
+                match timeout(Duration::from_millis(per_conn_timeout_ms), recv_conn.conn.read(&mut buf)).await {
                     Ok(Ok(n)) if n > 0 => {
                         recv_conn.touch();
                         recv_conn.bytes_received += n as u64;
-                        got_data = true;
                         
                         debug!("Received {} bytes from tunnel (connection {})", n, conn_idx);
                         
@@ -927,6 +950,7 @@ impl TunnelRunner {
                                             if let Some(request) = dhcp.build_request() {
                                                 info!("Sending DHCP REQUEST");
                                                 self.send_frame_multi(conn_mgr, &request, &mut send_buf).await?;
+                                                last_send = Instant::now();
                                             }
                                         }
                                     }
@@ -934,33 +958,11 @@ impl TunnelRunner {
                             }
                         }
                     }
-                    Ok(Ok(_)) => {
-                        // Connection closed or zero bytes
-                        // Don't warn for zero bytes, it's normal
-                    }
+                    Ok(Ok(_)) => {} // Zero bytes
                     Ok(Err(e)) => {
                         warn!("Read error on connection {}: {}", conn_idx, e);
                     }
-                    Err(_) => {
-                        // Timeout on this connection, try next
-                    }
-                }
-            }
-            
-            // If we didn't get data from any connection after checking all, wait a bit and retry DHCP
-            if !got_data {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                
-                // Retry DISCOVER/REQUEST if needed
-                if dhcp.state() == DhcpState::DiscoverSent {
-                    warn!("DHCP timeout, retrying DISCOVER");
-                    let discover = dhcp.build_discover();
-                    self.send_frame_multi(conn_mgr, &discover, &mut send_buf).await?;
-                } else if dhcp.state() == DhcpState::RequestSent {
-                    warn!("DHCP timeout, retrying REQUEST");
-                    if let Some(request) = dhcp.build_request() {
-                        self.send_frame_multi(conn_mgr, &request, &mut send_buf).await?;
-                    }
+                    Err(_) => {} // Timeout, try next
                 }
             }
         }
@@ -1182,28 +1184,29 @@ impl TunnelRunner {
                     debug!("TUN -> VPN: {} bytes", ip_packet.len());
                 }
 
-                // Data from VPN connections - check each receive connection
-                // Use biased select to prioritize TUN and keepalive, then check VPN connections
+                // Data from VPN connections - poll ALL receive connections with short global timeout
                 result = async {
                     if recv_conn_indices.is_empty() {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        tokio::time::sleep(Duration::from_millis(10)).await;
                         return Ok::<Option<(usize, usize)>, std::io::Error>(None);
                     }
                     
-                    // Round-robin through connections starting from poll_start_idx
-                    // Use very short timeout per connection to check all quickly
+                    // Fast round-robin poll with minimal per-connection timeout
+                    // Total cycle time should be ~1-2ms regardless of connection count
+                    let timeout_per_conn = Duration::from_micros(
+                        std::cmp::max(50, 1000 / num_recv as u64)
+                    );
+                    
+                    // Check all connections, starting from last successful one
                     for i in 0..num_recv {
                         let buf_idx = (poll_start_idx + i) % num_recv;
                         let conn_idx = recv_conn_indices[buf_idx];
                         let buf = &mut recv_bufs[buf_idx];
                         
                         if let Some(conn) = conn_mgr.get_mut(conn_idx) {
-                            match tokio::time::timeout(
-                                Duration::from_micros(100), // 0.1ms timeout
-                                conn.conn.read(buf)
-                            ).await {
+                            match tokio::time::timeout(timeout_per_conn, conn.conn.read(buf)).await {
                                 Ok(Ok(n)) if n > 0 => {
-                                    // Update start index for next round
+                                    // Update start index - next time start from next connection
                                     poll_start_idx = (buf_idx + 1) % num_recv;
                                     return Ok(Some((conn_idx, n)));
                                 }
