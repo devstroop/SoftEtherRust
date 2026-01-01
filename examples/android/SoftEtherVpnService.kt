@@ -19,10 +19,10 @@ import java.net.InetAddress
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 
-class RustVpnService : VpnService(), SoftEtherBridge.Listener {
+class SoftEtherVpnService : VpnService(), SoftEtherBridge.Listener {
     
     companion object {
-        private const val TAG = "RustVpnService"
+        private const val TAG = "SoftEtherVpnService"
         private const val NOTIFICATION_CHANNEL_ID = "vpn_channel"
         private const val NOTIFICATION_ID = 1
         
