@@ -1,9 +1,11 @@
 //! SoftEther VPN client implementation.
 
+mod concurrent_reader;
 mod connection;
 mod multi_connection;
 mod state;
 
+pub use concurrent_reader::{ConcurrentReader, ReceivedPacket};
 pub use connection::VpnConnection;
 pub use multi_connection::{ConnectionManager, ManagedConnection, TcpDirection, ConnectionStats};
 pub use state::VpnState;
