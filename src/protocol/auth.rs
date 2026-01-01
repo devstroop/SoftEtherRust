@@ -160,11 +160,7 @@ impl AuthResult {
             success: true,
             error: 0,
             error_message: None,
-            session_key: pack
-                .get_data("session_key")
-                .cloned()
-                .unwrap_or_default()
-                .into(),
+            session_key: pack.get_data("session_key").cloned().unwrap_or_default(),
             redirect: None,
             direction,
         })

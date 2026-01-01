@@ -349,7 +349,7 @@ impl Pack {
 
         // Read name length
         let name_len = buf.get_u32() as usize;
-        if name_len < 1 || name_len > 4096 {
+        if !(1..=4096).contains(&name_len) {
             return Err(Error::pack(format!("Invalid name length: {}", name_len)));
         }
 

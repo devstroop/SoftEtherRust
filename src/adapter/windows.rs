@@ -110,36 +110,27 @@ impl WintunDevice {
                 debug!("Creating new Wintun adapter");
                 Adapter::create(&wintun, "SoftEther VPN", "SoftEther Rust", None)
                     .map_err(|e| {
-                        io::Error::new(
-                            io::ErrorKind::Other,
+                        io::Error::other(
                             format!("Failed to create Wintun adapter: {}. Make sure you're running as Administrator.", e),
                         )
                     })?
             }
         };
 
-        let name = adapter.get_name().map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to get adapter name: {}", e),
-            )
-        })?;
+        let name = adapter
+            .get_name()
+            .map_err(|e| io::Error::other(format!("Failed to get adapter name: {}", e)))?;
 
         // Start a session with ring buffer capacity (must be power of 2, between 128KB and 64MB)
         // Using 4MB for good performance
         let session = adapter
             .start_session(wintun::MAX_RING_CAPACITY)
-            .map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Failed to start session: {}", e),
-                )
-            })?;
+            .map_err(|e| io::Error::other(format!("Failed to start session: {}", e)))?;
 
         info!("Created Wintun device: {}", name);
 
         Ok(Self {
-            _adapter: adapter.into(),
+            _adapter: adapter,
             session: Arc::new(session),
             name,
             mtu: 1500,
@@ -160,10 +151,10 @@ impl WintunDevice {
         let status = Command::new("netsh").args(args).status()?;
 
         if !status.success() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("netsh command failed: {:?}", args),
-            ));
+            return Err(io::Error::other(format!(
+                "netsh command failed: {:?}",
+                args
+            )));
         }
 
         Ok(())
@@ -184,10 +175,7 @@ impl TunAdapter for WintunDevice {
                 buf[..len].copy_from_slice(&bytes[..len]);
                 Ok(len)
             }
-            Err(e) => Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("Receive failed: {}", e),
-            )),
+            Err(e) => Err(io::Error::other(format!("Receive failed: {}", e))),
         }
     }
 
@@ -196,7 +184,7 @@ impl TunAdapter for WintunDevice {
         let mut packet = self
             .session
             .allocate_send_packet(buf.len() as u16)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Allocate failed: {}", e)))?;
+            .map_err(|e| io::Error::other(format!("Allocate failed: {}", e)))?;
 
         packet.bytes_mut().copy_from_slice(buf);
         self.session.send_packet(packet);
@@ -294,10 +282,10 @@ impl TunAdapter for WintunDevice {
                 .status()?;
 
             if !status.success() {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Failed to configure {} with IP {}", self.name, ip),
-                ));
+                return Err(io::Error::other(format!(
+                    "Failed to configure {} with IP {}",
+                    self.name, ip
+                )));
             }
         }
 
@@ -322,10 +310,10 @@ impl TunAdapter for WintunDevice {
                 .status()?;
 
             if !status.success() {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Failed to bring up {}", self.name),
-                ));
+                return Err(io::Error::other(format!(
+                    "Failed to bring up {}",
+                    self.name
+                )));
             }
         }
 
@@ -482,10 +470,7 @@ impl TunAdapter for WintunDevice {
         };
 
         if !status1.success() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Failed to add route 0.0.0.0/1",
-            ));
+            return Err(io::Error::other("Failed to add route 0.0.0.0/1"));
         }
         if let Ok(mut routes) = self.routes_added.lock() {
             routes.push("0.0.0.0/1".to_string());
@@ -525,10 +510,7 @@ impl TunAdapter for WintunDevice {
             if let Ok(mut routes) = self.routes_added.lock() {
                 routes.pop();
             }
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Failed to add route 128.0.0.0/1",
-            ));
+            return Err(io::Error::other("Failed to add route 128.0.0.0/1"));
         }
         if let Ok(mut routes) = self.routes_added.lock() {
             routes.push("128.0.0.0/1".to_string());

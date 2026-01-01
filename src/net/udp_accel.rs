@@ -116,14 +116,14 @@ impl UdpAccel {
             None => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
         };
 
-        let std_socket = UdpSocket::bind(bind_addr).map_err(|e| Error::Io(e))?;
+        let std_socket = UdpSocket::bind(bind_addr).map_err(Error::Io)?;
 
         // Set non-blocking for tokio
-        std_socket.set_nonblocking(true).map_err(|e| Error::Io(e))?;
+        std_socket.set_nonblocking(true).map_err(Error::Io)?;
 
-        let local_addr = std_socket.local_addr().map_err(|e| Error::Io(e))?;
+        let local_addr = std_socket.local_addr().map_err(Error::Io)?;
 
-        let tokio_socket = TokioUdpSocket::from_std(std_socket).map_err(|e| Error::Io(e))?;
+        let tokio_socket = TokioUdpSocket::from_std(std_socket).map_err(Error::Io)?;
 
         // Generate random keys
         let my_key: [u8; UDP_ACCELERATION_COMMON_KEY_SIZE_V1] = crypto::random_bytes();

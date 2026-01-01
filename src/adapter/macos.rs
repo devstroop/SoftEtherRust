@@ -242,10 +242,10 @@ impl TunAdapter for UtunDevice {
             .status()?;
 
         if !status.success() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to set MTU on {}", self.name),
-            ));
+            return Err(io::Error::other(format!(
+                "Failed to set MTU on {}",
+                self.name
+            )));
         }
 
         self.mtu = mtu;
@@ -268,10 +268,10 @@ impl TunAdapter for UtunDevice {
             .status()?;
 
         if !status.success() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to configure {} with IP {}", self.name, ip),
-            ));
+            return Err(io::Error::other(format!(
+                "Failed to configure {} with IP {}",
+                self.name, ip
+            )));
         }
 
         info!(
@@ -285,10 +285,10 @@ impl TunAdapter for UtunDevice {
         let status = Command::new("ifconfig").args([&self.name, "up"]).status()?;
 
         if !status.success() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to bring up {}", self.name),
-            ));
+            return Err(io::Error::other(format!(
+                "Failed to bring up {}",
+                self.name
+            )));
         }
 
         info!("Interface {} is up", self.name);
@@ -394,10 +394,7 @@ impl TunAdapter for UtunDevice {
             .status()?;
 
         if !status1.success() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Failed to add route 0.0.0.0/1",
-            ));
+            return Err(io::Error::other("Failed to add route 0.0.0.0/1"));
         }
         if let Ok(mut routes) = self.routes_added.lock() {
             routes.push("0.0.0.0/1".to_string());
@@ -416,10 +413,7 @@ impl TunAdapter for UtunDevice {
             if let Ok(mut routes) = self.routes_added.lock() {
                 routes.pop();
             }
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Failed to add route 128.0.0.0/1",
-            ));
+            return Err(io::Error::other("Failed to add route 128.0.0.0/1"));
         }
         if let Ok(mut routes) = self.routes_added.lock() {
             routes.push("128.0.0.0/1".to_string());

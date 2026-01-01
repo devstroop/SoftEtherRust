@@ -497,10 +497,7 @@ impl TunnelCodec {
     /// * `padding_size` - Size of random padding (0-512)
     /// * `buffer` - Pre-allocated buffer (at least 8 + padding_size)
     #[inline]
-    pub fn encode_keepalive_direct<'a>(
-        padding_size: usize,
-        buffer: &'a mut [u8],
-    ) -> Option<&'a [u8]> {
+    pub fn encode_keepalive_direct(padding_size: usize, buffer: &mut [u8]) -> Option<&[u8]> {
         let padding_size = padding_size.min(TunnelConstants::MAX_KEEPALIVE_SIZE);
         let total_size = 8 + padding_size;
 

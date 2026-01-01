@@ -158,7 +158,7 @@ impl VpnClient {
             }
             // Update actual server address and port for additional connections
             actual_server_addr = redirect_server.clone();
-            actual_server_port = redirect_port as u16;
+            actual_server_port = redirect_port;
 
             // Send empty Pack acknowledgment
             let ack_pack = Pack::new();
@@ -266,7 +266,7 @@ impl VpnClient {
     ) -> Result<(VpnConnection, AuthResult)> {
         // Create a modified config for the redirect server
         let redirect_server = redirect.ip_string();
-        let redirect_port = redirect.port as u16;
+        let redirect_port = redirect.port;
 
         debug!(server = %redirect_server, port = redirect_port, "Connecting to cluster server");
 

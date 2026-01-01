@@ -127,6 +127,7 @@ impl Sha0 {
         let mut d = self.state[3];
         let mut e = self.state[4];
 
+        #[allow(clippy::needless_range_loop)]
         for i in 0..80 {
             let (f, k) = if i < 20 {
                 ((b & c) | ((!b) & d), K[0])

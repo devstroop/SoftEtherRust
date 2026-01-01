@@ -82,7 +82,7 @@ pub enum VpnConnection {
     /// Plain TCP connection.
     Plain(TcpStream),
     /// TLS-encrypted connection.
-    Tls(TlsStream<TcpStream>),
+    Tls(Box<TlsStream<TcpStream>>),
 }
 
 impl VpnConnection {
@@ -154,7 +154,7 @@ impl VpnConnection {
             .map_err(|e| Error::Tls(format!("TLS handshake failed: {}", e)))?;
 
         info!("TLS connection established");
-        Ok(VpnConnection::Tls(tls_stream))
+        Ok(VpnConnection::Tls(Box::new(tls_stream)))
     }
 
     /// Read data from the connection.

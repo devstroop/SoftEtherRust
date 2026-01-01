@@ -408,10 +408,7 @@ impl TunAdapter for TunDevice {
             .status()?;
 
         if !status1.success() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Failed to add/replace route 0.0.0.0/1",
-            ));
+            return Err(io::Error::other("Failed to add/replace route 0.0.0.0/1"));
         }
         if let Ok(mut routes) = self.routes_added.lock() {
             routes.push("0.0.0.0/1".to_string());
@@ -430,10 +427,7 @@ impl TunAdapter for TunDevice {
             if let Ok(mut routes) = self.routes_added.lock() {
                 routes.pop();
             }
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Failed to add/replace route 128.0.0.0/1",
-            ));
+            return Err(io::Error::other("Failed to add/replace route 128.0.0.0/1"));
         }
         if let Ok(mut routes) = self.routes_added.lock() {
             routes.push("128.0.0.0/1".to_string());

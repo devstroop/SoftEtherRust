@@ -14,7 +14,7 @@
 //! ## Example
 //!
 //! ```rust,no_run
-//! use softether_rust::{VpnClient, VpnConfig, crypto};
+//! use softether::{VpnClient, VpnConfig, crypto};
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
