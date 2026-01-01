@@ -4,11 +4,18 @@
 # This builds the Rust library for iOS:
 # - aarch64-apple-ios (device only)
 # Note: Simulator builds skipped - Network Extension doesn't work on simulator
+#
+# Output is placed directly in the parent WorxVPN-iOS project:
+# - ../Frameworks/SoftEtherVPN.xcframework
+# - ../WorxVPNExtension/SoftEtherVPN.h
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
+
+# Project root is parent of SoftEtherRust submodule
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # Colors for output
 RED='\033[0;31m'
@@ -75,6 +82,23 @@ build_ios() {
         -output target/ios/SoftEtherVPN.xcframework
     
     log_info "iOS build complete: target/ios/SoftEtherVPN.xcframework"
+    
+    # Copy to WorxVPN-iOS project
+    log_info "Installing to WorxVPN-iOS project..."
+    
+    # Create Frameworks directory if needed
+    mkdir -p "$PROJECT_ROOT/Frameworks"
+    
+    # Copy XCFramework
+    rm -rf "$PROJECT_ROOT/Frameworks/SoftEtherVPN.xcframework"
+    cp -R target/ios/SoftEtherVPN.xcframework "$PROJECT_ROOT/Frameworks/"
+    log_info "  Copied XCFramework to Frameworks/"
+    
+    # Copy header to extension
+    cp include/SoftEtherVPN.h "$PROJECT_ROOT/WorxVPNExtension/"
+    log_info "  Copied SoftEtherVPN.h to WorxVPNExtension/"
+    
+    log_info "Installation complete!"
 }
 
 # Generate headers

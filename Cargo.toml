@@ -94,10 +94,10 @@ name = "vpnclient"
 path = "src/main.rs"
 
 [profile.release]
-lto = true
+lto = false
 codegen-units = 1
 panic = "abort"
-strip = true
+strip = false
 opt-level = 3
 
 [profile.dev]
