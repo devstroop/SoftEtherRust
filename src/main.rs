@@ -1,143 +1,273 @@
-//! SoftEther VPN Client CLI Application
+//! SoftEther VPN Client - Command Line Interface
+//!
+//! A high-performance SoftEther VPN client written in Rust.
 
-use anyhow::{Context, Result};
-use base64::Engine as _;
-use clap::Parser;
-use tracing::{error, info};
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
-use vpnclient::{shared_config, VpnClient, DEFAULT_CONFIG_FILE};
+use std::path::PathBuf;
+use std::process;
+
+use clap::{Parser, Subcommand};
+use tracing::{error, info, warn, Level};
+use tracing_subscriber::fmt::format::FmtSpan;
+
+use softether_rust::{crypto, VpnClient, VpnConfig};
 
 #[derive(Parser)]
-#[command(name = "vpnclient")]
-#[command(about = "SoftEther VPN Client (Rust)")]
+#[command(name = "softether-rust")]
+#[command(author = "SoftEther Rust Team")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
+#[command(about = "A high-performance SoftEther VPN client", long_about = None)]
 struct Cli {
     /// Configuration file path
-    #[arg(short, long, default_value = DEFAULT_CONFIG_FILE)]
-    config: String,
+    #[arg(short, long, value_name = "FILE")]
+    config: Option<PathBuf>,
 
-    /// Enable verbose logging
+    /// Enable verbose output
     #[arg(short, long)]
     verbose: bool,
 
-    /// Generate password hash (usage: --gen-hash <username> <password>)
-    #[arg(long)]
-    gen_hash: bool,
+    /// Enable debug output
+    #[arg(short, long)]
+    debug: bool,
 
-    /// Username for hash generation
-    #[arg(long, requires = "gen_hash")]
-    username: Option<String>,
+    #[command(subcommand)]
+    command: Commands,
+}
 
-    /// Password for hash generation
-    #[arg(long, requires = "gen_hash")]
-    password: Option<String>,
+#[derive(Subcommand)]
+enum Commands {
+    /// Connect to a VPN server
+    Connect {
+        /// Server hostname or IP address
+        #[arg(short, long)]
+        server: Option<String>,
+
+        /// Server port
+        #[arg(short, long, default_value = "443")]
+        port: Option<u16>,
+
+        /// Hub name
+        #[arg(short = 'H', long)]
+        hub: Option<String>,
+
+        /// Username
+        #[arg(short, long)]
+        username: Option<String>,
+
+        /// Password hash (hex-encoded, generate with 'hash' command)
+        #[arg(long)]
+        password_hash: Option<String>,
+
+        /// Disable TLS (for testing only, not recommended)
+        #[arg(long)]
+        no_tls: bool,
+
+        /// Verify TLS certificate (default: skip verification)
+        #[arg(long)]
+        verify_tls: bool,
+    },
+
+    /// Generate password hash for authentication
+    Hash {
+        /// Username (required for hash computation)
+        #[arg(short, long)]
+        username: String,
+
+        /// Password (will prompt securely if not provided)
+        #[arg(short, long)]
+        password: Option<String>,
+    },
+
+    /// Disconnect from the VPN
+    Disconnect,
+
+    /// Show connection status
+    Status,
+
+    /// Generate a sample configuration file
+    GenConfig {
+        /// Output file path
+        #[arg(short, long, default_value = "config.json")]
+        output: PathBuf,
+    },
+}
+
+fn init_logging(verbose: bool, debug: bool) {
+    let level = if debug {
+        Level::DEBUG
+    } else if verbose {
+        Level::INFO
+    } else {
+        Level::WARN
+    };
+
+    tracing_subscriber::fmt()
+        .with_max_level(level)
+        .with_span_events(FmtSpan::CLOSE)
+        .with_target(false)
+        .init();
+}
+
+fn load_config(path: Option<&PathBuf>) -> Result<Option<VpnConfig>, Box<dyn std::error::Error>> {
+    if let Some(path) = path {
+        let content = std::fs::read_to_string(path)?;
+        let config: VpnConfig = serde_json::from_str(&content)?;
+        Ok(Some(config))
+    } else {
+        Ok(None)
+    }
+}
+
+fn prompt_password() -> String {
+    rpassword::prompt_password("Password: ").unwrap_or_default()
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     let cli = Cli::parse();
+    init_logging(cli.verbose, cli.debug);
 
-    // Initialize tracing with env overrides
-    // Priority: RUST_LOG (standard), then RUST_LOG_LEVEL (custom, e.g., "debug"), then --verbose flag
-    // Timestamps: disabled by default, set RUST_LOG_TIME=1 to enable
-    let fallback = if cli.verbose { "debug" } else { "info" };
-    let default_level = std::env::var("RUST_LOG_LEVEL").unwrap_or_else(|_| fallback.to_string());
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .or_else(|_| tracing_subscriber::EnvFilter::try_new(default_level.clone()))
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(fallback));
-
-    // Check if timestamps should be enabled (disabled by default for clean logs)
-    // Set RUST_LOG_TIME=1 to enable timestamps
-    let enable_time = std::env::var("RUST_LOG_TIME")
-        .ok()
-        .and_then(|v| v.parse::<u8>().ok())
-        .unwrap_or(0)
-        != 0;
-
-    if enable_time {
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(fmt::layer().with_target(true))
-            .init();
-    } else {
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(fmt::layer().with_target(true).without_time())
-            .init();
+    if let Err(e) = run(cli).await {
+        error!("Error: {}", e);
+        process::exit(1);
     }
-
-    // Bridge log crate to tracing (ignore error if already initialized)
-    let _ = tracing_log::LogTracer::init();
-
-    // Handle hash generation mode
-    if cli.gen_hash {
-        let username = cli.username.context("Username required for --gen-hash")?;
-        let password = cli.password.context("Password required for --gen-hash")?;
-
-        // Generate password hash using SoftEther method (SHA-0 of password + uppercase username)
-        let hash = cedar::ClientAuth::hash_password_with_username(&password, &username);
-
-        // Encode to base64 for storage
-        let encoded_hash = base64::prelude::BASE64_STANDARD.encode(&hash);
-
-        println!("✓ Password hash generated successfully");
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("Username: {}", username);
-        println!("Password Hash (base64):");
-        println!("{}", encoded_hash);
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-        println!("Add this to your config.json:");
-        println!("  \"username\": \"{}\",", username);
-        println!("  \"hashed_password\": \"{}\"\n", encoded_hash);
-        println!("Example config:");
-        println!("{{");
-        println!("  \"host\": \"vpn.example.com\",");
-        println!("  \"port\": 443,");
-        println!("  \"hub_name\": \"VPN\",");
-        println!("  \"username\": \"{}\",", username);
-        println!("  \"auth\": {{");
-        println!("    \"Password\": {{");
-        println!("      \"hashed_password\": \"{}\"", encoded_hash);
-        println!("    }}");
-        println!("  }}");
-        println!("}}");
-        return Ok(());
-    }
-
-    // Single entrypoint: connect using the provided config
-    connect(&cli.config).await
 }
 
-/// Connect to VPN server
-async fn connect(config_path: &str) -> Result<()> {
-    info!("Loading configuration from: {}", config_path);
+async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    // Load config file if provided
+    let file_config = load_config(cli.config.as_ref())?;
 
-    // Parse shared ClientConfig (skip_tls_verify is controlled by config file)
-    let cc: shared_config::ClientConfig = shared_config::io::load_json(config_path)
-        .with_context(|| format!("Failed to load configuration from: {config_path}"))?;
-
-    // Show TLS verification status from config
-    if cc.skip_tls_verify {
-        info!("⚠️  TLS certificate verification is DISABLED (skip_tls_verify=true in config)");
-    } else {
-        info!("🔒 TLS certificate verification is ENABLED");
-    }
-
-    let mut vpn_client = VpnClient::from_shared_config(cc)?;
-    // Run like the classic vpnclient: connect and keep running until interrupted
-    match vpn_client.run_until_interrupted().await {
-        Ok(()) => {
-            info!("VPN session ended");
-            if std::env::var("RUST_FORCE_EXIT_ON_CTRL_C").ok().as_deref() == Some("1") {
-                // Give log a moment to flush then exit the process to avoid lingering background tasks
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                std::process::exit(0);
+    match cli.command {
+        Commands::Hash { username, password } => {
+            // Get password (prompt if not provided)
+            let password = password.unwrap_or_else(prompt_password);
+            
+            if password.is_empty() {
+                return Err("Password cannot be empty".into());
             }
-            Ok(())
+
+            // Compute hash
+            let hash = crypto::hash_password(&password, &username);
+            let hash_hex = hex::encode(hash);
+
+            println!("Password hash for user '{}':", username);
+            println!("{}", hash_hex);
+            println!();
+            println!("Add this to your config.json:");
+            println!("  \"password_hash\": \"{}\"", hash_hex);
         }
-        Err(e) => {
-            error!("❌ VPN session error: {}", e);
-            Err(e)
+
+        Commands::Connect {
+            server,
+            port,
+            hub,
+            username,
+            password_hash,
+            no_tls,
+            verify_tls,
+        } => {
+            // Build config from file and/or command line args
+            let config = if let Some(mut config) = file_config {
+                // Override with command line args
+                if let Some(s) = server {
+                    config.server = s;
+                }
+                if let Some(p) = port {
+                    config.port = p;
+                }
+                if let Some(h) = hub {
+                    config.hub = h;
+                }
+                if let Some(u) = username {
+                    config.username = u;
+                }
+                if let Some(h) = password_hash {
+                    let bytes = hex::decode(&h).map_err(|e| format!("Invalid password hash (must be 40 hex chars): {}", e))?;
+                    if bytes.len() != 20 {
+                        return Err(format!("Password hash must be 20 bytes (40 hex chars), got {} bytes", bytes.len()).into());
+                    }
+                    config.password_hash.copy_from_slice(&bytes);
+                }
+                if verify_tls {
+                    config.skip_tls_verify = false;
+                }
+                config
+            } else {
+                // Require server, hub, username, and password_hash from command line
+                let server = server.ok_or("Server address is required (use -s or config file)")?;
+                let hub = hub.ok_or("Hub name is required (use -H or config file)")?;
+                let username = username.ok_or("Username is required (use -u or config file)")?;
+                let password_hash_str = password_hash.ok_or(
+                    "Password hash is required (use --password-hash or config file). Generate with: vpnclient hash -u <username>"
+                )?;
+                let password_hash_bytes = hex::decode(&password_hash_str)
+                    .map_err(|e| format!("Invalid password hash (must be 40 hex chars): {}", e))?;
+                if password_hash_bytes.len() != 20 {
+                    return Err(format!("Password hash must be 20 bytes (40 hex chars), got {} bytes", password_hash_bytes.len()).into());
+                }
+                let mut password_hash = [0u8; 20];
+                password_hash.copy_from_slice(&password_hash_bytes);
+
+                VpnConfig {
+                    server,
+                    port: port.unwrap_or(443),
+                    hub,
+                    username,
+                    password_hash,
+                    skip_tls_verify: !verify_tls,
+                    ..Default::default()
+                }
+            };
+
+            // Warn if --no-tls is used (SoftEther requires TLS)
+            if no_tls {
+                warn!("--no-tls flag is ignored. SoftEther protocol requires TLS/HTTPS.");
+            }
+
+            // Validate config
+            config.validate()?;
+
+            info!("Connecting to {}:{}", config.server, config.port);
+            info!("Hub: {}, Username: {}", config.hub, config.username);
+
+            let mut client = VpnClient::new(config);
+            
+            match client.connect().await {
+                Ok(()) => {
+                    info!("Disconnected");
+                }
+                Err(e) => {
+                    error!("Connection failed: {}", e);
+                    return Err(e.into());
+                }
+            }
+        }
+
+        Commands::Disconnect => {
+            info!("Disconnect command - not implemented yet (requires daemon mode)");
+        }
+
+        Commands::Status => {
+            info!("Status command - not implemented yet (requires daemon mode)");
+        }
+
+        Commands::GenConfig { output } => {
+            let sample_config = VpnConfig {
+                server: "vpn.example.com".to_string(),
+                port: 443,
+                hub: "VPN".to_string(),
+                username: "your_username".to_string(),
+                password_hash: [0u8; 20], // Generate with: vpnclient hash -u your_username
+                ..Default::default()
+            };
+
+            let json = serde_json::to_string_pretty(&sample_config)?;
+            std::fs::write(&output, json)?;
+            println!("Sample configuration written to {:?}", output);
+            println!();
+            println!("To generate your password hash, run:");
+            println!("  vpnclient hash -u your_username -p your_password");
         }
     }
+
+    Ok(())
 }
