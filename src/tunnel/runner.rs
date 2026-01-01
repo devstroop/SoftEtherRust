@@ -42,6 +42,8 @@ pub struct TunnelConfig {
     pub routes: Vec<RouteConfig>,
     /// Whether to compress outgoing packets (must match auth setting).
     pub use_compress: bool,
+    /// VPN server IP address (used for host route when default_route is true).
+    pub vpn_server_ip: Option<Ipv4Addr>,
 }
 
 /// Route configuration.
@@ -62,6 +64,7 @@ impl Default for TunnelConfig {
             default_route: false,
             routes: Vec::new(),
             use_compress: false,
+            vpn_server_ip: None,
         }
     }
 }
@@ -194,7 +197,7 @@ impl TunnelRunner {
         // If default route is requested, also set that
         if self.config.default_route {
             if let Some(gateway) = dhcp_config.gateway {
-                tun.set_default_route(gateway)
+                tun.set_default_route(gateway, self.config.vpn_server_ip)
                     .map_err(|e| Error::TunDevice(format!("Failed to set default route: {}", e)))?;
             }
         }

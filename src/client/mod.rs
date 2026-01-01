@@ -86,6 +86,9 @@ impl VpnClient {
             self.config.server, self.config.port, self.config.hub
         );
 
+        // Resolve initial server IP for routing
+        let initial_server_ip = self.resolve_server_ip(&self.config.server)?;
+
         // Establish connection
         let mut conn = VpnConnection::connect(&self.config).await?;
         info!("TCP connection established");
@@ -116,14 +119,20 @@ impl VpnClient {
         let mut auth_result = self.authenticate(&mut conn, &hello).await?;
         info!("Authentication successful");
 
-        // Track the actual connection to use
+        // Track the actual connection to use and server IP
         let mut active_conn = conn;
+        let mut actual_server_ip = initial_server_ip;
 
         // Handle cluster redirect if needed
         if let Some(redirect) = auth_result.redirect.take() {
             let redirect_server = redirect.ip_string();
             let redirect_port = redirect.port;
             info!("Cluster redirect to {}:{}", redirect_server, redirect_port);
+            
+            // Update actual server IP to redirect server
+            if let Ok(ip) = redirect_server.parse::<Ipv4Addr>() {
+                actual_server_ip = ip;
+            }
             
             // Send empty Pack acknowledgment
             let ack_pack = Pack::new();
@@ -175,6 +184,7 @@ impl VpnClient {
             default_route: self.config.routing.default_route,
             routes,
             use_compress: self.config.use_compress,
+            vpn_server_ip: Some(actual_server_ip),
         };
         
         let mut runner = TunnelRunner::new(tunnel_config);
@@ -377,11 +387,22 @@ impl VpnClient {
         // Build UDP acceleration params if we have an active UDP accel instance
         let udp_accel_params = self.udp_accel.as_ref().map(UdpAccelAuthParams::from_udp_accel);
 
-        // Build authentication pack with pre-computed hash (already raw bytes)
+        // Decode password hash from hex string
+        let password_hash_vec = hex::decode(&self.config.password_hash)
+            .map_err(|e| Error::Config(format!("Invalid password_hash hex: {}", e)))?;
+        if password_hash_vec.len() != 20 {
+            return Err(Error::Config(format!(
+                "password_hash must be 20 bytes (40 hex chars), got {} bytes",
+                password_hash_vec.len()
+            )));
+        }
+        let password_hash_bytes: [u8; 20] = password_hash_vec.try_into().unwrap();
+
+        // Build authentication pack with decoded hash
         let auth_pack = AuthPack::new(
             &self.config.hub,
             &self.config.username,
-            &self.config.password_hash,
+            &password_hash_bytes,
             auth_type,
             &hello.random,
             &options,
@@ -610,6 +631,35 @@ impl VpnClient {
 
         info!("Tunnel data loop ended");
         Ok(())
+    }
+
+    /// Resolve a hostname or IP string to an Ipv4Addr.
+    fn resolve_server_ip(&self, server: &str) -> Result<Ipv4Addr> {
+        // First try to parse as IP address directly
+        if let Ok(ip) = server.parse::<Ipv4Addr>() {
+            return Ok(ip);
+        }
+        
+        // Try to parse as generic IpAddr (handles IPv4 and IPv6)
+        if let Ok(std::net::IpAddr::V4(ip)) = server.parse::<std::net::IpAddr>() {
+            return Ok(ip);
+        }
+        
+        // Resolve hostname using DNS
+        use std::net::ToSocketAddrs;
+        let addr_str = format!("{}:443", server);
+        match addr_str.to_socket_addrs() {
+            Ok(mut addrs) => {
+                // Find first IPv4 address
+                for addr in addrs.by_ref() {
+                    if let std::net::SocketAddr::V4(v4) = addr {
+                        return Ok(*v4.ip());
+                    }
+                }
+                Err(Error::ConnectionFailed(format!("No IPv4 address found for {}", server)))
+            }
+            Err(e) => Err(Error::ConnectionFailed(format!("Failed to resolve {}: {}", server, e))),
+        }
     }
 
     /// Disconnect from the VPN server.

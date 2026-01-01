@@ -18,16 +18,16 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     // Generate password hash (do this once, store the hash)
+//!     // Generate password hash (do this once, store the hex string)
 //!     let password_hash = crypto::hash_password("password", "user");
-//!     let hash_hex = hex::encode(password_hash);
+//!     let password_hash_hex = hex::encode(password_hash);
 //!
 //!     let config = VpnConfig {
 //!         server: "vpn.example.com".to_string(),
 //!         port: 443,
 //!         hub: "VPN".to_string(),
 //!         username: "user".to_string(),
-//!         password_hash: hash_hex,
+//!         password_hash: password_hash_hex,
 //!         ..Default::default()
 //!     };
 //!

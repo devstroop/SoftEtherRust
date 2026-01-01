@@ -5,6 +5,7 @@ use std::io::{self};
 use std::net::Ipv4Addr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::process::Command;
+use std::sync::Mutex;
 
 use libc::{
     c_char, c_int, c_void, close, connect, getsockopt, ioctl, setsockopt, sockaddr,
@@ -28,11 +29,38 @@ const UTUN_CONTROL_NAME: &[u8] = b"com.apple.net.utun_control\0";
 /// utun socket option for interface name.
 const UTUN_OPT_IFNAME: c_int = 2;
 
+/// Get the current default gateway from the routing table.
+/// Returns None if no default gateway is found.
+pub fn get_default_gateway() -> Option<Ipv4Addr> {
+    // Use netstat to get the default gateway, excluding utun interfaces
+    let output = Command::new("sh")
+        .args(["-c", "netstat -rn | grep '^default' | grep -v 'utun' | head -1 | awk '{print $2}'"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let gateway_str = String::from_utf8_lossy(&output.stdout);
+    let gateway_str = gateway_str.trim();
+    
+    if gateway_str.is_empty() {
+        return None;
+    }
+
+    gateway_str.parse().ok()
+}
+
 /// macOS utun device.
 pub struct UtunDevice {
     fd: OwnedFd,
     name: String,
     mtu: u16,
+    /// Routes added by this device (for cleanup on drop)
+    routes_added: Mutex<Vec<String>>,
+    /// Original default gateway (saved for host route cleanup)
+    original_gateway: Mutex<Option<Ipv4Addr>>,
 }
 
 impl UtunDevice {
@@ -124,6 +152,8 @@ impl UtunDevice {
                 fd: OwnedFd::from_raw_fd(fd),
                 name,
                 mtu: 1500,
+                routes_added: Mutex::new(Vec::new()),
+                original_gateway: Mutex::new(None),
             })
         }
     }
@@ -283,58 +313,147 @@ impl TunAdapter for UtunDevice {
     }
 
     fn add_route_via_interface(&self, dest: Ipv4Addr, prefix_len: u8) -> io::Result<()> {
+        let route_str = format!("{}/{}", dest, prefix_len);
         let status = Command::new("route")
             .args([
                 "-n",
                 "add",
                 "-net",
-                &format!("{}/{}", dest, prefix_len),
+                &route_str,
                 "-interface",
                 &self.name,
             ])
             .status()?;
 
         if !status.success() {
-            warn!("Failed to add route to {}/{} via interface {}", dest, prefix_len, self.name);
+            warn!("Failed to add route to {} via interface {}", route_str, self.name);
         } else {
-            info!("Added route: {}/{} via interface {}", dest, prefix_len, self.name);
+            info!("Added route: {} via interface {}", route_str, self.name);
+            if let Ok(mut routes) = self.routes_added.lock() {
+                routes.push(route_str);
+            }
         }
 
         Ok(())
     }
 
-    fn set_default_route(&self, gateway: Ipv4Addr) -> io::Result<()> {
-        // First, delete the existing default route
-        let _ = Command::new("route")
-            .args(["-n", "delete", "default"])
-            .status();
+    fn set_default_route(&self, _gateway: Ipv4Addr, vpn_server_ip: Option<Ipv4Addr>) -> io::Result<()> {
+        // On macOS, we use the "split-tunnel" approach for default routing:
+        // Instead of replacing the default route (which can break connectivity),
+        // we add two more-specific routes that cover the entire IPv4 space:
+        // - 0.0.0.0/1 covers 0.0.0.0 - 127.255.255.255
+        // - 128.0.0.0/1 covers 128.0.0.0 - 255.255.255.255
+        // These are more specific than the default route (0.0.0.0/0), so they
+        // take precedence, but don't delete the original default route.
 
-        // Add new default route
-        let status = Command::new("route")
+        // CRITICAL: First, add a host route for the VPN server through the original gateway
+        // This prevents a routing loop where VPN traffic itself gets routed through the VPN
+        if let Some(server_ip) = vpn_server_ip {
+            if let Some(orig_gateway) = get_default_gateway() {
+                info!("Adding host route for VPN server {} via original gateway {}", server_ip, orig_gateway);
+                let status = Command::new("route")
+                    .args([
+                        "-n",
+                        "add",
+                        "-host",
+                        &server_ip.to_string(),
+                        &orig_gateway.to_string(),
+                    ])
+                    .status()?;
+
+                if status.success() {
+                    // Save original gateway for cleanup
+                    if let Ok(mut gw) = self.original_gateway.lock() {
+                        *gw = Some(orig_gateway);
+                    }
+                    // Track the host route for cleanup
+                    if let Ok(mut routes) = self.routes_added.lock() {
+                        routes.push(format!("-host {}", server_ip));
+                    }
+                    info!("Added host route: {} via {}", server_ip, orig_gateway);
+                } else {
+                    warn!("Failed to add host route for VPN server (may already exist)");
+                }
+            } else {
+                warn!("Could not determine original default gateway - VPN traffic may not route correctly");
+            }
+        }
+        
+        // Add route for 0.0.0.0/1 (first half of IPv4 space)
+        let status1 = Command::new("route")
             .args([
                 "-n",
                 "add",
-                "default",
-                &gateway.to_string(),
+                "-net",
+                "0.0.0.0/1",
                 "-interface",
                 &self.name,
             ])
             .status()?;
 
-        if !status.success() {
+        if !status1.success() {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
-                "Failed to set default route",
+                "Failed to add route 0.0.0.0/1",
             ));
         }
+        if let Ok(mut routes) = self.routes_added.lock() {
+            routes.push("0.0.0.0/1".to_string());
+        }
 
-        info!("Set default route via {} on {}", gateway, self.name);
+        // Add route for 128.0.0.0/1 (second half of IPv4 space)
+        let status2 = Command::new("route")
+            .args([
+                "-n",
+                "add",
+                "-net",
+                "128.0.0.0/1",
+                "-interface",
+                &self.name,
+            ])
+            .status()?;
+
+        if !status2.success() {
+            // Rollback first route
+            let _ = Command::new("route")
+                .args(["-n", "delete", "-net", "0.0.0.0/1"])
+                .status();
+            if let Ok(mut routes) = self.routes_added.lock() {
+                routes.pop();
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Failed to add route 128.0.0.0/1",
+            ));
+        }
+        if let Ok(mut routes) = self.routes_added.lock() {
+            routes.push("128.0.0.0/1".to_string());
+        }
+
+        info!("Set default route via {} (split-tunnel: 0.0.0.0/1 + 128.0.0.0/1)", self.name);
         Ok(())
     }
 }
 
 impl Drop for UtunDevice {
     fn drop(&mut self) {
+        // Clean up routes we added
+        if let Ok(routes) = self.routes_added.lock() {
+            for route in routes.iter() {
+                debug!("Removing route: {}", route);
+                // Handle host routes differently
+                if route.starts_with("-host ") {
+                    let host_ip = route.strip_prefix("-host ").unwrap();
+                    let _ = Command::new("route")
+                        .args(["-n", "delete", "-host", host_ip])
+                        .status();
+                } else {
+                    let _ = Command::new("route")
+                        .args(["-n", "delete", "-net", route])
+                        .status();
+                }
+            }
+        }
         debug!("Closing utun device: {}", self.name);
     }
 }

@@ -181,11 +181,12 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     config.username = u;
                 }
                 if let Some(h) = password_hash {
+                    // Validate it's valid hex
                     let bytes = hex::decode(&h).map_err(|e| format!("Invalid password hash (must be 40 hex chars): {}", e))?;
                     if bytes.len() != 20 {
                         return Err(format!("Password hash must be 20 bytes (40 hex chars), got {} bytes", bytes.len()).into());
                     }
-                    config.password_hash.copy_from_slice(&bytes);
+                    config.password_hash = h;
                 }
                 if verify_tls {
                     config.skip_tls_verify = false;
@@ -199,20 +200,19 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let password_hash_str = password_hash.ok_or(
                     "Password hash is required (use --password-hash or config file). Generate with: vpnclient hash -u <username>"
                 )?;
+                // Validate it's valid hex
                 let password_hash_bytes = hex::decode(&password_hash_str)
                     .map_err(|e| format!("Invalid password hash (must be 40 hex chars): {}", e))?;
                 if password_hash_bytes.len() != 20 {
                     return Err(format!("Password hash must be 20 bytes (40 hex chars), got {} bytes", password_hash_bytes.len()).into());
                 }
-                let mut password_hash = [0u8; 20];
-                password_hash.copy_from_slice(&password_hash_bytes);
 
                 VpnConfig {
                     server,
                     port: port.unwrap_or(443),
                     hub,
                     username,
-                    password_hash,
+                    password_hash: password_hash_str,
                     skip_tls_verify: !verify_tls,
                     ..Default::default()
                 }
@@ -256,7 +256,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 port: 443,
                 hub: "VPN".to_string(),
                 username: "your_username".to_string(),
-                password_hash: [0u8; 20], // Generate with: vpnclient hash -u your_username
+                password_hash: "0000000000000000000000000000000000000000".to_string(), // Generate with: vpnclient hash -u your_username
                 ..Default::default()
             };
 

@@ -5,35 +5,6 @@ use std::net::Ipv4Addr;
 use std::path::Path;
 use std::time::Duration;
 
-/// Serde module for hex-encoding [u8; 20] arrays.
-mod hex_hash {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S>(bytes: &[u8; 20], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&hex::encode(bytes))
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 20], D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
-        if bytes.len() != 20 {
-            return Err(serde::de::Error::custom(format!(
-                "password_hash must be 20 bytes (40 hex chars), got {} bytes",
-                bytes.len()
-            )));
-        }
-        let mut arr = [0u8; 20];
-        arr.copy_from_slice(&bytes);
-        Ok(arr)
-    }
-}
-
 /// VPN client configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -61,10 +32,9 @@ pub struct VpnConfig {
     /// Username for authentication.
     pub username: String,
 
-    /// Pre-computed password hash (raw 20-byte SHA-0, hex-encoded in JSON).
+    /// Pre-computed password hash (40-char hex string of SHA-0 hash).
     /// Generate using: vpnclient hash -u <username> -p <password>
-    #[serde(with = "hex_hash")]
-    pub password_hash: [u8; 20],
+    pub password_hash: String,
 
     // ─────────────────────────────────────────────────────────────────────────
     // TLS
@@ -205,7 +175,7 @@ impl Default for VpnConfig {
             timeout_seconds: 30,
             // Authentication
             username: String::new(),
-            password_hash: [0u8; 20],
+            password_hash: String::new(),
             // TLS
             skip_tls_verify: true, // SoftEther often uses self-signed certs
             // Tunnel Features
@@ -227,7 +197,7 @@ impl Default for VpnConfig {
 
 impl VpnConfig {
     /// Create a new configuration with required fields.
-    pub fn new(server: String, hub: String, username: String, password_hash: [u8; 20]) -> Self {
+    pub fn new(server: String, hub: String, username: String, password_hash: String) -> Self {
         Self {
             server,
             hub,
@@ -315,11 +285,7 @@ impl VpnConfig {
             self.username = val;
         }
         if let Ok(val) = std::env::var("SOFTETHER_PASSWORD_HASH") {
-            if let Ok(bytes) = hex::decode(&val) {
-                if bytes.len() == 20 {
-                    self.password_hash.copy_from_slice(&bytes);
-                }
-            }
+            self.password_hash = val;
         }
     }
 }
@@ -345,7 +311,7 @@ mod tests {
             "vpn.example.com".into(),
             "VPN".into(),
             "user".into(),
-            "T2kl2mB84H5y2tn7n9qf65/8jXI=".into(), // base64 hash
+            "0000000000000000000000000000000000000001".into(),
         );
         assert!(config.validate().is_ok());
     }
@@ -356,7 +322,7 @@ mod tests {
             "vpn.example.com".into(),
             "VPN".into(),
             "user".into(),
-            "T2kl2mB84H5y2tn7n9qf65/8jXI=".into(),
+            "0000000000000000000000000000000000000001".into(),
         );
         let json = config.to_json().unwrap();
         let parsed = VpnConfig::from_json(&json).unwrap();
