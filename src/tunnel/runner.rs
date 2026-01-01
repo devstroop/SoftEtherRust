@@ -1119,10 +1119,11 @@ impl TunnelRunner {
     /// Process an incoming frame with zero-copy TUN write (Unix only).
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[inline]
+    #[allow(unused_variables)] // tun_buf is only used on macOS, not Linux
     fn process_frame_zerocopy(
         &self,
         tun_fd: i32,
-        _tun_buf: &mut [u8],
+        tun_buf: &mut [u8],
         arp: &mut ArpHandler,
         frame: &[u8],
         our_ip: Ipv4Addr,
