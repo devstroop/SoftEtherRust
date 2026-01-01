@@ -430,7 +430,7 @@ async fn connect_and_run(
     }
 
     // Authenticate
-    let auth_result = match authenticate(&mut conn, &config, &hello).await {
+    let auth_result = match authenticate(&mut conn, &config, &hello, &callbacks).await {
         Ok(r) => {
             log_message(&callbacks, 1, "[RUST] Authentication successful");
             r
@@ -518,11 +518,11 @@ async fn connect_and_run(
 fn create_session_from_auth(_auth: &AuthResult, server_ip: Ipv4Addr) -> SoftEtherSession {
     // DHCP configuration will be received later via protocol - for now return placeholder
     // The actual IP configuration is obtained via DHCP exchange in the tunnel
-    let mut server_ip_str = [0i8; 64];
+    let mut server_ip_str = [0 as std::ffi::c_char; 64];
     let ip_string = format!("{}", server_ip);
     for (i, b) in ip_string.bytes().enumerate() {
         if i < 63 {
-            server_ip_str[i] = b as i8;
+            server_ip_str[i] = b as std::ffi::c_char;
         }
     }
 
@@ -678,10 +678,22 @@ async fn authenticate(
     conn: &mut VpnConnection,
     config: &crate::config::VpnConfig,
     hello: &HelloResponse,
+    callbacks: &SoftEtherCallbacks,
 ) -> crate::error::Result<AuthResult> {
+    // Log helper
+    fn log_msg(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
+        if let Some(cb) = callbacks.on_log {
+            if let Ok(cstr) = std::ffi::CString::new(msg) {
+                cb(callbacks.context, level, cstr.as_ptr());
+            }
+        }
+    }
+
     let auth_type = if hello.use_secure_password {
+        log_msg(callbacks, 1, "[RUST] Using SecurePassword auth type");
         AuthType::SecurePassword
     } else {
+        log_msg(callbacks, 1, "[RUST] Using Password auth type");
         AuthType::Password
     };
 
@@ -695,36 +707,47 @@ async fn authenticate(
         qos: true,
     };
 
+    log_msg(callbacks, 1, &format!("[RUST] Password hash length: {}", config.password_hash.len()));
+
     // Decode password hash - it might be base64 or hex
     let password_hash_bytes: [u8; 20] =
         if config.password_hash.len() == 28 && config.password_hash.ends_with('=') {
             // Base64 encoded
+            log_msg(callbacks, 1, "[RUST] Decoding base64 password hash");
             use base64::Engine;
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(&config.password_hash)
                 .map_err(|e| {
+                    log_msg(callbacks, 3, &format!("[RUST] Base64 decode error: {}", e));
                     crate::error::Error::Config(format!("Invalid base64 password hash: {}", e))
                 })?;
 
             if decoded.len() != 20 {
+                log_msg(callbacks, 3, &format!("[RUST] Hash length wrong: {} bytes", decoded.len()));
                 return Err(crate::error::Error::Config(format!(
                     "Password hash must be 20 bytes, got {}",
                     decoded.len()
                 )));
             }
+            log_msg(callbacks, 1, "[RUST] Base64 hash decoded successfully");
             decoded.try_into().unwrap()
         } else if config.password_hash.len() == 40 {
             // Hex encoded
+            log_msg(callbacks, 1, "[RUST] Decoding hex password hash");
             let decoded = hex::decode(&config.password_hash).map_err(|e| {
+                log_msg(callbacks, 3, &format!("[RUST] Hex decode error: {}", e));
                 crate::error::Error::Config(format!("Invalid hex password hash: {}", e))
             })?;
+            log_msg(callbacks, 1, "[RUST] Hex hash decoded successfully");
             decoded.try_into().unwrap()
         } else {
+            log_msg(callbacks, 3, &format!("[RUST] Invalid hash format: len={}", config.password_hash.len()));
             return Err(crate::error::Error::Config(
                 "Password hash must be 20 bytes as base64 (28 chars) or hex (40 chars)".into(),
             ));
         };
 
+    log_msg(callbacks, 1, "[RUST] Building auth pack...");
     let auth_pack = AuthPack::new(
         &config.hub,
         &config.username,
@@ -743,21 +766,27 @@ async fn authenticate(
     let host = format!("{}:{}", config.server, config.port);
     let request_bytes = request.build(&host);
 
+    log_msg(callbacks, 1, &format!("[RUST] Sending auth request ({} bytes)...", request_bytes.len()));
     conn.write_all(&request_bytes).await?;
 
     let mut codec = HttpCodec::new();
     let mut buf = vec![0u8; 8192];
 
+    log_msg(callbacks, 1, "[RUST] Waiting for auth response...");
     loop {
         let n = conn.read(&mut buf).await?;
+        log_msg(callbacks, 1, &format!("[RUST] Received {} bytes", n));
         if n == 0 {
+            log_msg(callbacks, 3, "[RUST] Connection closed during auth");
             return Err(crate::error::Error::ConnectionFailed(
                 "Connection closed during authentication".into(),
             ));
         }
 
         if let Some(response) = codec.feed(&buf[..n])? {
+            log_msg(callbacks, 1, &format!("[RUST] HTTP response status: {}", response.status_code));
             if response.status_code != 200 {
+                log_msg(callbacks, 3, &format!("[RUST] Auth failed: HTTP {}", response.status_code));
                 return Err(crate::error::Error::AuthenticationFailed(format!(
                     "Server returned status {}",
                     response.status_code
@@ -765,10 +794,12 @@ async fn authenticate(
             }
 
             if !response.body.is_empty() {
+                log_msg(callbacks, 1, &format!("[RUST] Response body: {} bytes", response.body.len()));
                 let pack = crate::protocol::Pack::deserialize(&response.body)?;
                 let result = AuthResult::from_pack(&pack)?;
 
                 if result.error > 0 {
+                    log_msg(callbacks, 3, &format!("[RUST] Auth error code: {}", result.error));
                     if result.error == 20 {
                         return Err(crate::error::Error::UserAlreadyLoggedIn);
                     }
@@ -778,8 +809,10 @@ async fn authenticate(
                     )));
                 }
 
+                log_msg(callbacks, 1, &format!("[RUST] Auth success! Session key: {} bytes", result.session_key.len()));
                 return Ok(result);
             } else {
+                log_msg(callbacks, 3, "[RUST] Empty auth response body");
                 return Err(crate::error::Error::ServerError(
                     "Empty authentication response".into(),
                 ));
