@@ -832,27 +832,23 @@ impl TunnelRunner {
     /// Perform DHCP through the tunnel using ConnectionManager.
     async fn perform_dhcp_multi(&self, conn_mgr: &mut ConnectionManager) -> Result<DhcpConfig> {
         let mut dhcp = DhcpClient::new(self.mac);
-        let mut codec = TunnelCodec::new();
+        // One codec per receive connection for stateful parsing
+        let num_conns = conn_mgr.connection_count();
+        let mut codecs: Vec<TunnelCodec> = (0..num_conns).map(|_| TunnelCodec::new()).collect();
         let mut buf = vec![0u8; 65536];
         let mut send_buf = vec![0u8; 2048];
 
         let deadline = Instant::now() + Duration::from_secs(self.config.dhcp_timeout);
 
-        // In half-connection mode, find the receive connection
-        // Primary is ClientToServer (send-only), additional is ServerToClient (receive)
-        let recv_conn_idx = if conn_mgr.is_half_connection() {
-            // Find the first receive-capable connection
-            let connections = conn_mgr.all_connections();
-            connections.iter()
-                .position(|c| c.direction.can_recv())
-                .unwrap_or(0)
-        } else {
-            0 // Single connection mode - use primary
-        };
+        // Get all receive-capable connection indices
+        let recv_conn_indices: Vec<usize> = conn_mgr.all_connections()
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.direction.can_recv())
+            .map(|(i, _)| i)
+            .collect();
         
-        info!("DHCP: using connection {} for receiving (direction: {:?})", 
-              recv_conn_idx, 
-              conn_mgr.get_mut(recv_conn_idx).map(|c| c.direction).unwrap_or(crate::client::TcpDirection::Both));
+        info!("DHCP: using {} receive connections: {:?}", recv_conn_indices.len(), recv_conn_indices);
 
         // Send DHCP DISCOVER
         let discover = dhcp.build_discover();
@@ -860,88 +856,110 @@ impl TunnelRunner {
         debug!("DHCP DISCOVER: {:02X?}", &discover[..std::cmp::min(64, discover.len())]);
         self.send_frame_multi(conn_mgr, &discover, &mut send_buf).await?;
 
+        // Current index for round-robin reading across receive connections
+        let mut current_recv_idx = 0;
+
         // Wait for OFFER
         loop {
             if Instant::now() > deadline {
                 return Err(Error::TimeoutMessage("DHCP timeout - no OFFER received".into()));
             }
 
-            // Read from receive-capable connection
-            let recv_conn = conn_mgr.get_mut(recv_conn_idx)
-                .ok_or_else(|| Error::ConnectionFailed("Receive connection not found".into()))?;
+            // Try reading from each receive connection in round-robin fashion
+            // with a short timeout so we can check all connections
+            let mut got_data = false;
             
-            match timeout(Duration::from_secs(3), recv_conn.conn.read(&mut buf)).await {
-                Ok(Ok(n)) if n > 0 => {
-                    recv_conn.touch();
-                    recv_conn.bytes_received += n as u64;
-                    
-                    debug!("Received {} bytes from tunnel (connection {})", n, recv_conn_idx);
-                    // Decode tunnel frames
-                    let frames = codec.feed(&buf[..n])?;
-                    for frame in frames {
-                        if frame.is_keepalive() {
-                            debug!("Received keepalive frame");
-                            continue;
-                        }
-                        if let Some(packets) = frame.packets() {
-                            for packet in packets {
-                                // Check if packet is compressed and decompress if needed
-                                let packet_data: Vec<u8> = if is_compressed(packet) {
-                                    match decompress(packet) {
-                                        Ok(decompressed) => {
-                                            debug!("Decompressed {} -> {} bytes", packet.len(), decompressed.len());
-                                            decompressed
+            for _ in 0..recv_conn_indices.len() {
+                let conn_idx = recv_conn_indices[current_recv_idx % recv_conn_indices.len()];
+                current_recv_idx += 1;
+                
+                let recv_conn = conn_mgr.get_mut(conn_idx)
+                    .ok_or_else(|| Error::ConnectionFailed("Receive connection not found".into()))?;
+                
+                // Very short timeout to quickly poll each connection
+                match timeout(Duration::from_millis(100), recv_conn.conn.read(&mut buf)).await {
+                    Ok(Ok(n)) if n > 0 => {
+                        recv_conn.touch();
+                        recv_conn.bytes_received += n as u64;
+                        got_data = true;
+                        
+                        debug!("Received {} bytes from tunnel (connection {})", n, conn_idx);
+                        
+                        // Decode tunnel frames
+                        let frames = codecs[conn_idx].feed(&buf[..n])?;
+                        for frame in frames {
+                            if frame.is_keepalive() {
+                                debug!("Received keepalive frame");
+                                continue;
+                            }
+                            if let Some(packets) = frame.packets() {
+                                for packet in packets {
+                                    // Check if packet is compressed and decompress if needed
+                                    let packet_data: Vec<u8> = if is_compressed(packet) {
+                                        match decompress(packet) {
+                                            Ok(decompressed) => {
+                                                debug!("Decompressed {} -> {} bytes", packet.len(), decompressed.len());
+                                                decompressed
+                                            }
+                                            Err(e) => {
+                                                warn!("Decompression failed: {}", e);
+                                                continue;
+                                            }
                                         }
-                                        Err(e) => {
-                                            warn!("Decompression failed: {}", e);
-                                            continue;
-                                        }
+                                    } else {
+                                        packet.to_vec()
+                                    };
+                                    
+                                    // Log packet details
+                                    if packet_data.len() >= 14 {
+                                        let ethertype = format!("0x{:02X}{:02X}", packet_data[12], packet_data[13]);
+                                        debug!("Packet: {} bytes, ethertype={}", packet_data.len(), ethertype);
                                     }
-                                } else {
-                                    packet.to_vec()
-                                };
-                                
-                                // Log packet details
-                                if packet_data.len() >= 14 {
-                                    let ethertype = format!("0x{:02X}{:02X}", packet_data[12], packet_data[13]);
-                                    debug!("Packet: {} bytes, ethertype={}", packet_data.len(), ethertype);
-                                }
-                                
-                                // Check if this is a DHCP response (UDP port 68)
-                                if self.is_dhcp_response(&packet_data) {
-                                    info!("DHCP response packet detected!");
-                                    if dhcp.process_response(&packet_data) {
-                                        // Got ACK
-                                        return Ok(dhcp.config().clone());
-                                    } else if dhcp.state() == DhcpState::DiscoverSent {
-                                        // Got OFFER, send REQUEST
-                                        if let Some(request) = dhcp.build_request() {
-                                            info!("Sending DHCP REQUEST");
-                                            self.send_frame_multi(conn_mgr, &request, &mut send_buf).await?;
+                                    
+                                    // Check if this is a DHCP response (UDP port 68)
+                                    if self.is_dhcp_response(&packet_data) {
+                                        info!("DHCP response packet detected on connection {}!", conn_idx);
+                                        if dhcp.process_response(&packet_data) {
+                                            // Got ACK
+                                            return Ok(dhcp.config().clone());
+                                        } else if dhcp.state() == DhcpState::DiscoverSent {
+                                            // Got OFFER, send REQUEST
+                                            if let Some(request) = dhcp.build_request() {
+                                                info!("Sending DHCP REQUEST");
+                                                self.send_frame_multi(conn_mgr, &request, &mut send_buf).await?;
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                     }
+                    Ok(Ok(_)) => {
+                        // Connection closed or zero bytes
+                        // Don't warn for zero bytes, it's normal
+                    }
+                    Ok(Err(e)) => {
+                        warn!("Read error on connection {}: {}", conn_idx, e);
+                    }
+                    Err(_) => {
+                        // Timeout on this connection, try next
+                    }
                 }
-                Ok(Ok(_)) => {
-                    return Err(Error::ConnectionFailed("Connection closed during DHCP".into()));
-                }
-                Ok(Err(e)) => {
-                    return Err(Error::Io(e));
-                }
-                Err(_) => {
-                    // Timeout, retry DISCOVER if still in initial state
-                    if dhcp.state() == DhcpState::DiscoverSent {
-                        warn!("DHCP timeout, retrying DISCOVER");
-                        let discover = dhcp.build_discover();
-                        self.send_frame_multi(conn_mgr, &discover, &mut send_buf).await?;
-                    } else if dhcp.state() == DhcpState::RequestSent {
-                        warn!("DHCP timeout, retrying REQUEST");
-                        if let Some(request) = dhcp.build_request() {
-                            self.send_frame_multi(conn_mgr, &request, &mut send_buf).await?;
-                        }
+            }
+            
+            // If we didn't get data from any connection after checking all, wait a bit and retry DHCP
+            if !got_data {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                
+                // Retry DISCOVER/REQUEST if needed
+                if dhcp.state() == DhcpState::DiscoverSent {
+                    warn!("DHCP timeout, retrying DISCOVER");
+                    let discover = dhcp.build_discover();
+                    self.send_frame_multi(conn_mgr, &discover, &mut send_buf).await?;
+                } else if dhcp.state() == DhcpState::RequestSent {
+                    warn!("DHCP timeout, retrying REQUEST");
+                    if let Some(request) = dhcp.build_request() {
+                        self.send_frame_multi(conn_mgr, &request, &mut send_buf).await?;
                     }
                 }
             }
@@ -995,8 +1013,19 @@ impl TunnelRunner {
         let num_conns = conn_mgr.connection_count();
         let mut codecs: Vec<TunnelCodec> = (0..num_conns).map(|_| TunnelCodec::new()).collect();
         
-        // Pre-allocated buffers
-        let mut net_buf = vec![0u8; 65536];
+        // Get receive connection indices
+        let recv_conn_indices: Vec<usize> = conn_mgr.all_connections().iter()
+            .enumerate()
+            .filter(|(_, c)| c.direction.can_recv())
+            .map(|(i, _)| i)
+            .collect();
+        
+        let num_recv = recv_conn_indices.len();
+        // One buffer per receive connection
+        let mut recv_bufs: Vec<Vec<u8>> = (0..num_recv).map(|_| vec![0u8; 65536]).collect();
+        // Track current polling index for round-robin
+        let mut poll_start_idx = 0;
+        
         let mut send_buf = vec![0u8; 4096];
         let mut decomp_buf = vec![0u8; 4096];
         let mut tun_write_buf = vec![0u8; 2048];
@@ -1061,8 +1090,8 @@ impl TunnelRunner {
             }
         });
 
-        info!("Data loop started (multi-connection mode, {} connections), press Ctrl+C to disconnect", 
-              conn_mgr.connection_count());
+        info!("Data loop started (multi-connection mode, {} connections, {} recv), press Ctrl+C to disconnect", 
+              conn_mgr.connection_count(), num_recv);
 
         let our_ip = dhcp_config.ip;
         let use_compress = self.config.use_compress;
@@ -1153,24 +1182,47 @@ impl TunnelRunner {
                     debug!("TUN -> VPN: {} bytes", ip_packet.len());
                 }
 
-                // Data from VPN connection
-                // In half-connection mode, read from the receive-capable connection
+                // Data from VPN connections - check each receive connection
+                // Use biased select to prioritize TUN and keepalive, then check VPN connections
                 result = async {
-                    // Find the receive connection index
-                    let recv_idx = if conn_mgr.is_half_connection() {
-                        conn_mgr.all_connections().iter()
-                            .position(|c| c.direction.can_recv())
-                            .unwrap_or(0)
-                    } else {
-                        0
-                    };
+                    if recv_conn_indices.is_empty() {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        return Ok::<Option<(usize, usize)>, std::io::Error>(None);
+                    }
                     
-                    let recv_conn = conn_mgr.get_mut(recv_idx).unwrap();
-                    let n = recv_conn.conn.read(&mut net_buf).await?;
-                    Ok::<(usize, usize), std::io::Error>((recv_idx, n))
+                    // Round-robin through connections starting from poll_start_idx
+                    // Use very short timeout per connection to check all quickly
+                    for i in 0..num_recv {
+                        let buf_idx = (poll_start_idx + i) % num_recv;
+                        let conn_idx = recv_conn_indices[buf_idx];
+                        let buf = &mut recv_bufs[buf_idx];
+                        
+                        if let Some(conn) = conn_mgr.get_mut(conn_idx) {
+                            match tokio::time::timeout(
+                                Duration::from_micros(100), // 0.1ms timeout
+                                conn.conn.read(buf)
+                            ).await {
+                                Ok(Ok(n)) if n > 0 => {
+                                    // Update start index for next round
+                                    poll_start_idx = (buf_idx + 1) % num_recv;
+                                    return Ok(Some((conn_idx, n)));
+                                }
+                                Ok(Ok(_)) => continue,
+                                Ok(Err(e)) => return Err(e),
+                                Err(_) => continue, // Timeout, try next
+                            }
+                        }
+                    }
+                    
+                    // No data on any connection
+                    Ok(None)
                 } => {
                     match result {
-                        Ok((recv_idx, n)) if n > 0 => {
+                        Ok(Some((recv_idx, n))) => {
+                            // Find buffer index
+                            let buf_idx = recv_conn_indices.iter().position(|&i| i == recv_idx).unwrap_or(0);
+                            let data = &recv_bufs[buf_idx][..n];
+                            
                             // Update stats
                             if let Some(conn) = conn_mgr.get_mut(recv_idx) {
                                 conn.bytes_received += n as u64;
@@ -1178,7 +1230,7 @@ impl TunnelRunner {
                             }
                             
                             // Use codec for this connection
-                            match codecs.get_mut(recv_idx).map(|c| c.feed(&net_buf[..n])) {
+                            match codecs.get_mut(recv_idx).map(|c| c.feed(data)) {
                                 Some(Ok(frames)) => {
                                     for frame in frames {
                                         if frame.is_keepalive() {
@@ -1228,9 +1280,8 @@ impl TunnelRunner {
                             
                             last_activity = Instant::now();
                         }
-                        Ok(_) => {
-                            info!("Connection closed by server");
-                            break;
+                        Ok(None) => {
+                            // No data, continue
                         }
                         Err(e) => {
                             error!("Network read error: {}", e);
@@ -1263,6 +1314,7 @@ impl TunnelRunner {
         }
 
         info!("Data loop ended");
+        
         tun_reader.abort();
         Ok(())
     }
