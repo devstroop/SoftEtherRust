@@ -59,6 +59,7 @@ hickory-resolver = "0.24"
 
 # IP utilities
 ipnet = "2.10"
+futures = "0.3.31"
 
 # For TUN device
 [target.'cfg(target_os = "macos")'.dependencies]

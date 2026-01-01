@@ -1,9 +1,11 @@
 //! SoftEther VPN client implementation.
 
 mod connection;
+mod multi_connection;
 mod state;
 
 pub use connection::VpnConnection;
+pub use multi_connection::{ConnectionManager, ManagedConnection, TcpDirection, ConnectionStats};
 pub use state::VpnState;
 
 use std::net::Ipv4Addr;
@@ -81,6 +83,11 @@ impl VpnClient {
         self.state = VpnState::Connecting;
         self.running.store(true, Ordering::SeqCst);
 
+        // Log multi-connection configuration
+        if self.config.max_connections > 1 {
+            info!("Multi-connection mode enabled: max_connections={}", self.config.max_connections);
+        }
+
         info!(
             "Connecting to {}:{} (hub: {})",
             self.config.server, self.config.port, self.config.hub
@@ -122,6 +129,9 @@ impl VpnClient {
         // Track the actual connection to use and server IP
         let mut active_conn = conn;
         let mut actual_server_ip = initial_server_ip;
+        // Track the actual server address and port (may change after redirect)
+        let mut actual_server_addr = self.config.server.clone();
+        let mut actual_server_port = self.config.port;
 
         // Handle cluster redirect if needed
         if let Some(redirect) = auth_result.redirect.take() {
@@ -133,6 +143,9 @@ impl VpnClient {
             if let Ok(ip) = redirect_server.parse::<Ipv4Addr>() {
                 actual_server_ip = ip;
             }
+            // Update actual server address and port for additional connections
+            actual_server_addr = redirect_server.clone();
+            actual_server_port = redirect_port as u16;
             
             // Send empty Pack acknowledgment
             let ack_pack = Pack::new();
@@ -164,6 +177,16 @@ impl VpnClient {
 
         info!("Session established with key length: {} bytes", auth_result.session_key.len());
 
+        // Create ConnectionManager for multi-connection support
+        // Pass the actual server address (after redirect) for additional connections
+        let mut conn_mgr = ConnectionManager::new(
+            active_conn, 
+            &self.config, 
+            &auth_result,
+            &actual_server_addr,
+            actual_server_port,
+        );
+        
         // Start tunnel
         self.state = VpnState::EstablishingTunnel;
         info!("VPN tunnel established successfully");
@@ -197,10 +220,13 @@ impl VpnClient {
             running.store(false, Ordering::SeqCst);
         });
         
-        // Run the tunnel
-        match runner.run(&mut active_conn).await {
+        // Run the tunnel with multi-connection support
+        match runner.run_multi(&mut conn_mgr).await {
             Ok(()) => {
                 info!("Tunnel stopped cleanly");
+                let stats = conn_mgr.stats();
+                info!("Connection stats: {} connections, {} bytes sent, {} bytes received",
+                      stats.total_connections, stats.total_bytes_sent, stats.total_bytes_received);
             }
             Err(e) => {
                 error!("Tunnel error: {}", e);
@@ -235,6 +261,7 @@ impl VpnClient {
         debug!("Redirect server hello: {:?}", redirect_hello);
         
         // Build connection options from config
+        // Multi-connection support: use actual max_connections value
         let options = ConnectionOptions {
             max_connections: self.config.max_connections,
             use_encrypt: self.config.use_encrypt,
@@ -374,6 +401,8 @@ impl VpnClient {
         info!("Using authentication type: {:?}", auth_type);
 
         // Build connection options from config
+        // Multi-connection support: use actual max_connections value
+        // With max_connections > 1, the server uses half-connection mode
         let options = ConnectionOptions {
             max_connections: self.config.max_connections,
             use_encrypt: self.config.use_encrypt,
@@ -455,8 +484,12 @@ impl VpnClient {
                     if pack.contains("session_key") {
                         debug!("session_key found!");
                     }
+                    if let Some(direction) = pack.get_int("direction") {
+                        debug!("Direction in pack: {}", direction);
+                    }
                     
                     let result = AuthResult::from_pack(&pack)?;
+                    debug!("Auth result direction: {}", result.direction);
 
                     // Check for errors
                     if result.error > 0 {

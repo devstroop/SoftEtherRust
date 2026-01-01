@@ -16,11 +16,15 @@ pub use utun::UtunDevice;
 pub use tun_linux::TunDevice;
 
 use std::net::Ipv4Addr;
+use std::os::fd::RawFd;
 
 /// Generic TUN device trait.
 pub trait TunAdapter: Send + Sync {
     /// Get the device name.
     fn name(&self) -> &str;
+
+    /// Get the raw file descriptor.
+    fn raw_fd(&self) -> RawFd;
 
     /// Read a packet from the device.
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
