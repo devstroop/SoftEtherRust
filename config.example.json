@@ -2,12 +2,21 @@
   "server": "vpn.example.com",
   "port": 443,
   "hub": "DEFAULT",
-  "username": "user1",
-  "password_hash": "base64-of-20-byte-sha0",
-  "skip_tls_verify": false,
-  "use_compress": true,
+  "username": "your_username",
+  "password_hash": "0000000000000000000000000000000000000000",
+  "skip_tls_verify": true,
+  "nat_traversal": false,
   "use_encrypt": true,
-  "max_connections": 2,
-  "secure_nat": false,
-  "udp_acceleration": false
+  "use_compress": true,
+  "udp_accel": false,
+  "max_connections": 1,
+  "mtu": 1400,
+  "routing": {
+    "default_route": false,
+    "accept_pushed_routes": true,
+    "ipv4_include": [],
+    "ipv4_exclude": []
+  },
+  "qos": false,
+  "timeout_seconds": 30
 }

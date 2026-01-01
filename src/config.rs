@@ -1,546 +1,423 @@
-//! Configuration management for SoftEther VPN client
+//! Configuration types for the SoftEther VPN client.
 
-use crate::{DEFAULT_HUB, DEFAULT_MAX_CONNECTIONS, DEFAULT_PORT};
-use anyhow::{Context, Result};
-use base64::prelude::*;
-use cedar::AuthType;
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::net::Ipv4Addr;
 use std::path::Path;
+use std::time::Duration;
 
-/// VPN client configuration
+/// Serde module for hex-encoding [u8; 20] arrays.
+mod hex_hash {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8; 20], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 20], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        if bytes.len() != 20 {
+            return Err(serde::de::Error::custom(format!(
+                "password_hash must be 20 bytes (40 hex chars), got {} bytes",
+                bytes.len()
+            )));
+        }
+        let mut arr = [0u8; 20];
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    }
+}
+
+/// VPN client configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct VpnConfig {
-    /// Server hostname or IP address
-    pub host: String,
+    // ─────────────────────────────────────────────────────────────────────────
+    // Connection
+    // ─────────────────────────────────────────────────────────────────────────
 
-    /// Server port (default: 443)
-    #[serde(default = "default_port")]
+    /// VPN server hostname or IP address.
+    pub server: String,
+
+    /// Server port (default: 443).
     pub port: u16,
 
-    /// Virtual hub name (default: "DEFAULT")
-    #[serde(default = "default_hub")]
-    pub hub_name: String,
+    /// Virtual Hub name.
+    pub hub: String,
 
-    /// Username for authentication
+    /// Connection timeout in seconds (default: 30).
+    pub timeout_seconds: u64,
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Authentication
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Username for authentication.
     pub username: String,
 
-    /// Authentication configuration
-    #[serde(flatten)]
-    pub auth: AuthConfig,
+    /// Pre-computed password hash (raw 20-byte SHA-0, hex-encoded in JSON).
+    /// Generate using: vpnclient hash -u <username> -p <password>
+    #[serde(with = "hex_hash")]
+    pub password_hash: [u8; 20],
 
-    /// Connection options
-    #[serde(default)]
-    pub connection: ConnectionConfig,
+    // ─────────────────────────────────────────────────────────────────────────
+    // TLS
+    // ─────────────────────────────────────────────────────────────────────────
 
-    /// Client options
-    #[serde(default)]
-    pub client: ClientConfig,
-}
-
-/// Authentication configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "auth_type", rename_all = "snake_case")]
-pub enum AuthConfig {
-    /// Anonymous authentication
-    Anonymous,
-
-    /// Password authentication
-    Password {
-        /// Base64-encoded SHA1 hashed password
-        hashed_password: String,
-    },
-
-    /// Certificate authentication
-    Certificate {
-        /// Path to certificate file
-        cert_file: String,
-        /// Path to private key file
-        key_file: String,
-    },
-
-    /// Secure device authentication
-    SecureDevice {
-        /// Certificate name on the device
-        cert_name: String,
-        /// Key name on the device
-        key_name: String,
-    },
-}
-
-/// Connection configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectionConfig {
-    /// Maximum number of connections
-    #[serde(default = "default_max_connections")]
-    pub max_connections: u32,
-
-    /// Connection timeout in seconds
-    #[serde(default = "default_timeout")]
-    pub timeout: u32,
-
-    /// Enable compression
-    #[serde(default = "default_true")]
-    pub use_compression: bool,
-
-    /// Enable encryption
-    #[serde(default = "default_true")]
-    pub use_encryption: bool,
-
-    /// Enable UDP acceleration (uses UDP ports 67/68 when enabled)
-    #[serde(default)]
-    pub udp_acceleration: bool,
-
-    /// Skip TLS certificate verification (insecure)
-    #[serde(default)]
+    /// Skip TLS certificate verification (default: true).
+    /// Set to false to require valid server certificates.
+    /// Most SoftEther servers use self-signed certificates.
     pub skip_tls_verify: bool,
 
-    /// HTTP proxy configuration
-    #[serde(default)]
-    pub proxy: Option<ProxyConfig>,
+    // ─────────────────────────────────────────────────────────────────────────
+    // Tunnel Features
+    // ─────────────────────────────────────────────────────────────────────────
 
-    /// Apply DNS servers provided by server (requires privileges)
-    #[serde(default)]
-    pub apply_dns: bool,
+    /// Enable tunnel data encryption (RC4, default: true).
+    /// Encrypts VPN packets inside the TLS tunnel (defense in depth).
+    pub use_encrypt: bool,
 
-    /// Use HalfConnection mode to split directions across TCP links
-    /// When enabled, the client hints the server to split send/receive directions.
-    /// Default: false
-    #[serde(default)]
-    pub half_connection: bool,
+    /// Enable compression (default: false).
+    /// Reduces bandwidth but increases CPU usage.
+    pub use_compress: bool,
 
-    /// Optional client_id for servers that require a specific client build id
-    #[serde(default)]
-    pub client_id: Option<u32>,
+    /// Enable UDP acceleration (default: false).
+    /// Uses UDP for data when possible (faster but may be blocked).
+    pub udp_accel: bool,
 
-    /// SecureNAT mode: when false (default), uses LocalBridge mode with L2 Ethernet frames.
-    /// When true, uses SecureNAT mode with L3 IP packets (NAT traversal).
-    /// Default: false (LocalBridge mode for better compatibility)
-    #[serde(default)]
-    pub secure_nat: bool,
+    /// Enable VoIP/QoS prioritization (default: true).
+    /// When enabled, VoIP packets get higher priority.
+    pub qos: bool,
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Session Mode
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Use NAT traversal mode (default: false = bridge/routing mode).
+    /// - false: Bridge mode - request bridge/routing permissions (L2 setups)
+    /// - true: NAT mode - no bridge routing requested
+    pub nat_traversal: bool,
+
+    /// Request monitor mode for packet capture (default: false).
+    /// Requires special server permissions.
+    pub monitor_mode: bool,
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Performance
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Maximum number of TCP connections (1-32, default: 1).
+    /// Higher values can improve throughput but use more resources.
+    pub max_connections: u8,
+
+    /// MTU size for the TUN device (default: 1400).
+    /// Used for packet handling, not sent to server.
+    pub mtu: u16,
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Routing
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Routing configuration for VPN traffic.
+    pub routing: RoutingConfig,
 }
 
-/// HTTP proxy configuration
+/// Routing configuration for VPN traffic.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProxyConfig {
-    /// Proxy hostname
-    pub host: String,
+#[serde(default)]
+pub struct RoutingConfig {
+    /// Set default route through VPN (all traffic, default: false).
+    /// When true, all internet traffic goes through the VPN.
+    pub default_route: bool,
 
-    /// Proxy port
-    pub port: u16,
+    /// Accept routes pushed by server via DHCP (default: true).
+    pub accept_pushed_routes: bool,
 
-    /// Proxy username (optional)
-    pub username: Option<String>,
-
-    /// Proxy password (optional)
-    pub password: Option<String>,
-}
-
-/// Client-specific configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClientConfig {
-    /// Local adapter MAC address (optional, will be generated if not provided)
-    pub adapter_mac: Option<String>,
-
-    /// Interface name for the virtual adapter
-    #[serde(default = "default_interface_name")]
-    pub interface_name: String,
-
-    /// macOS only: Network Service name to apply DNS to (e.g., "Wi-Fi", "Ethernet").
-    /// If not set, DNS is not auto-applied unless we can deduce the service.
+    /// IPv4 networks to include (CIDR format, e.g., "10.0.0.0/8").
+    /// Traffic to these networks will go through the VPN.
     #[serde(default)]
-    pub macos_dns_service_name: Option<String>,
+    pub ipv4_include: Vec<String>,
 
-    /// Enable detailed logging
+    /// IPv4 networks to exclude (CIDR format, e.g., "192.168.1.0/24").
+    /// Traffic to these networks will NOT go through the VPN.
     #[serde(default)]
-    pub verbose: bool,
+    pub ipv4_exclude: Vec<String>,
 
-    /// Log level
-    #[serde(default = "default_log_level")]
-    pub log_level: String,
-
-    /// DHCP: initial settle delay before first DISCOVER (ms)
-    #[serde(default = "default_dhcp_settle_ms")]
-    pub dhcp_settle_ms: u64,
-
-    /// DHCP: initial retry interval (ms)
-    #[serde(default = "default_dhcp_initial_ms")]
-    pub dhcp_initial_ms: u64,
-
-    /// DHCP: maximum retry interval cap (ms)
-    #[serde(default = "default_dhcp_max_ms")]
-    pub dhcp_max_ms: u64,
-
-    /// DHCP: jitter fraction applied to retry intervals (0.0..0.5)
-    #[serde(default = "default_dhcp_jitter_pct")]
-    pub dhcp_jitter_pct: f64,
-
-    /// macOS: start system DHCP kick after this delay (ms); if 0, start immediately in parallel
-    #[serde(default = "default_dhcp_fallback_after_ms")]
-    pub dhcp_fallback_after_ms: u64,
-
-    /// macOS: total duration to keep kicking DHCP (ms)
-    #[serde(default = "default_dhcp_kick_timeout_ms")]
-    pub dhcp_kick_timeout_ms: u64,
-
-    /// Static IPv4 address (optional, used as fallback if DHCP times out)
+    /// IPv6 networks to include (CIDR format).
     #[serde(default)]
-    pub static_ipv4: Option<String>,
+    pub ipv6_include: Vec<String>,
 
-    /// Static IPv4 netmask (optional, default: 255.255.255.0)
+    /// IPv6 networks to exclude (CIDR format).
     #[serde(default)]
-    pub static_ipv4_netmask: Option<String>,
-
-    /// Static IPv4 gateway (optional, default: first IP in subnet)
-    #[serde(default)]
-    pub static_ipv4_gateway: Option<String>,
-
-    /// DHCP timeout in seconds (after which we fall back to static IP if configured)
-    #[serde(default = "default_dhcp_timeout_secs")]
-    pub dhcp_timeout_secs: u64,
+    pub ipv6_exclude: Vec<String>,
 }
 
-// Default value functions
-fn default_port() -> u16 {
-    DEFAULT_PORT
-}
-fn default_hub() -> String {
-    DEFAULT_HUB.to_string()
-}
-fn default_max_connections() -> u32 {
-    DEFAULT_MAX_CONNECTIONS
-}
-fn default_timeout() -> u32 {
-    10000
-}
-fn default_true() -> bool {
-    true
-}
-fn default_interface_name() -> String {
-    "vpn0".to_string()
-}
-fn default_log_level() -> String {
-    "info".to_string()
-}
-fn default_dhcp_settle_ms() -> u64 {
-    200
-}
-fn default_dhcp_initial_ms() -> u64 {
-    800
-}
-fn default_dhcp_max_ms() -> u64 {
-    8000
-}
-fn default_dhcp_jitter_pct() -> f64 {
-    0.15
-}
-fn default_dhcp_fallback_after_ms() -> u64 {
-    6000
-}
-fn default_dhcp_kick_timeout_ms() -> u64 {
-    20000
-}
-fn default_dhcp_timeout_secs() -> u64 {
-    20 // Timeout after 20 seconds and fall back to static IP
-}
-
-impl Default for ConnectionConfig {
+impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
-            max_connections: default_max_connections(),
-            timeout: default_timeout(),
-            use_compression: true,
-            use_encryption: true,
-            udp_acceleration: false,
-            skip_tls_verify: false,
-            proxy: None,
-            apply_dns: false,
-            half_connection: false,
-            client_id: None,
-            secure_nat: false,
+            default_route: false,
+            accept_pushed_routes: true,
+            ipv4_include: Vec::new(),
+            ipv4_exclude: Vec::new(),
+            ipv6_include: Vec::new(),
+            ipv6_exclude: Vec::new(),
         }
     }
 }
 
-impl Default for ClientConfig {
+impl RoutingConfig {
+    /// Parse IPv4 CIDR strings into (Ipv4Addr, prefix_len) tuples.
+    pub fn parse_ipv4_cidrs(cidrs: &[String]) -> Vec<(Ipv4Addr, u8)> {
+        cidrs
+            .iter()
+            .filter_map(|cidr| Self::parse_ipv4_cidr(cidr))
+            .collect()
+    }
+
+    /// Parse a single IPv4 CIDR string.
+    fn parse_ipv4_cidr(cidr: &str) -> Option<(Ipv4Addr, u8)> {
+        let parts: Vec<&str> = cidr.split('/').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        let ip: Ipv4Addr = parts[0].parse().ok()?;
+        let prefix: u8 = parts[1].parse().ok()?;
+        if prefix > 32 {
+            return None;
+        }
+        Some((ip, prefix))
+    }
+}
+
+impl Default for VpnConfig {
     fn default() -> Self {
         Self {
-            adapter_mac: None,
-            interface_name: default_interface_name(),
-            macos_dns_service_name: None,
-            verbose: false,
-            log_level: default_log_level(),
-            dhcp_settle_ms: default_dhcp_settle_ms(),
-            dhcp_initial_ms: default_dhcp_initial_ms(),
-            dhcp_max_ms: default_dhcp_max_ms(),
-            dhcp_jitter_pct: default_dhcp_jitter_pct(),
-            dhcp_fallback_after_ms: default_dhcp_fallback_after_ms(),
-            dhcp_kick_timeout_ms: default_dhcp_kick_timeout_ms(),
-            static_ipv4: None,
-            static_ipv4_netmask: None,
-            static_ipv4_gateway: None,
-            dhcp_timeout_secs: default_dhcp_timeout_secs(),
+            // Connection
+            server: String::new(),
+            port: 443,
+            hub: String::new(),
+            timeout_seconds: 30,
+            // Authentication
+            username: String::new(),
+            password_hash: [0u8; 20],
+            // TLS
+            skip_tls_verify: true, // SoftEther often uses self-signed certs
+            // Tunnel Features
+            use_encrypt: true,
+            use_compress: false,
+            udp_accel: false,
+            qos: true,
+            // Session Mode
+            nat_traversal: false, // Bridge mode by default (common for L2 setups)
+            monitor_mode: false,
+            // Performance
+            max_connections: 1,
+            mtu: 1400,
+            // Routing
+            routing: RoutingConfig::default(),
         }
     }
 }
 
 impl VpnConfig {
-    /// Load configuration from a JSON file
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read config file: {}", path.as_ref().display()))?;
-
-        let config: VpnConfig = serde_json::from_str(&content)
-            .with_context(|| format!("Failed to parse config file: {}", path.as_ref().display()))?;
-
-        config.validate()?;
-        Ok(config)
-    }
-
-    /// Save configuration to a JSON file
-    pub fn to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let content =
-            serde_json::to_string_pretty(self).context("Failed to serialize configuration")?;
-
-        fs::write(&path, content)
-            .with_context(|| format!("Failed to write config file: {}", path.as_ref().display()))?;
-
-        Ok(())
-    }
-
-    /// Create a new configuration with password authentication
-    pub fn new_password(
-        host: String,
-        port: u16,
-        hub_name: String,
-        username: String,
-        hashed_password: String,
-    ) -> Self {
+    /// Create a new configuration with required fields.
+    pub fn new(server: String, hub: String, username: String, password_hash: [u8; 20]) -> Self {
         Self {
-            host,
-            port,
-            hub_name,
+            server,
+            hub,
             username,
-            auth: AuthConfig::Password { hashed_password },
-            connection: ConnectionConfig::default(),
-            client: ClientConfig::default(),
+            password_hash,
+            ..Default::default()
         }
     }
 
-    /// Create a new configuration with certificate authentication
-    pub fn new_certificate(
-        host: String,
-        port: u16,
-        hub_name: String,
-        username: String,
-        cert_file: String,
-        key_file: String,
-    ) -> Self {
-        Self {
-            host,
-            port,
-            hub_name,
-            username,
-            auth: AuthConfig::Certificate {
-                cert_file,
-                key_file,
-            },
-            connection: ConnectionConfig::default(),
-            client: ClientConfig::default(),
-        }
+    /// Load configuration from a JSON file.
+    pub fn from_file<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| crate::Error::Config(format!("Failed to read config file: {}", e)))?;
+        Self::from_json(&content)
     }
 
-    /// Create a new configuration with anonymous authentication
-    pub fn new_anonymous(host: String, port: u16, hub_name: String) -> Self {
-        Self {
-            host,
-            port,
-            hub_name,
-            username: "anonymous".to_string(),
-            auth: AuthConfig::Anonymous,
-            connection: ConnectionConfig::default(),
-            client: ClientConfig::default(),
-        }
+    /// Parse configuration from JSON string.
+    pub fn from_json(json: &str) -> crate::Result<Self> {
+        serde_json::from_str(json)
+            .map_err(|e| crate::Error::Config(format!("Failed to parse config JSON: {}", e)))
     }
 
-    /// Validate the configuration
-    pub fn validate(&self) -> Result<()> {
-        if self.host.is_empty() {
-            anyhow::bail!("Host cannot be empty");
-        }
+    /// Serialize configuration to JSON.
+    pub fn to_json(&self) -> crate::Result<String> {
+        serde_json::to_string_pretty(self)
+            .map_err(|e| crate::Error::Config(format!("Failed to serialize config: {}", e)))
+    }
 
+    /// Save configuration to a JSON file.
+    pub fn to_file<P: AsRef<Path>>(&self, path: P) -> crate::Result<()> {
+        let json = self.to_json()?;
+        std::fs::write(path, json)
+            .map_err(|e| crate::Error::Config(format!("Failed to write config file: {}", e)))
+    }
+
+    /// Get the connection timeout as a Duration.
+    pub fn connect_timeout(&self) -> Duration {
+        Duration::from_secs(self.timeout_seconds)
+    }
+
+    /// Validate the configuration.
+    pub fn validate(&self) -> crate::Result<()> {
+        if self.server.is_empty() {
+            return Err(crate::Error::Config("Server address is required".into()));
+        }
+        if self.hub.is_empty() {
+            return Err(crate::Error::Config("Hub name is required".into()));
+        }
+        if self.username.is_empty() {
+            return Err(crate::Error::Config("Username is required".into()));
+        }
+        if self.password_hash.is_empty() {
+            return Err(crate::Error::Config(
+                "Password hash is required. Generate with: vpnclient hash -u <username> -p <password>".into(),
+            ));
+        }
         if self.port == 0 {
-            anyhow::bail!("Port cannot be zero");
+            return Err(crate::Error::Config("Invalid port number".into()));
         }
-
-        if self.hub_name.is_empty() {
-            anyhow::bail!("Hub name cannot be empty");
-        }
-
-        if self.username.is_empty() && !matches!(self.auth, AuthConfig::Anonymous) {
-            anyhow::bail!("Username cannot be empty for non-anonymous authentication");
-        }
-
-        // Validate authentication configuration
-        match &self.auth {
-            AuthConfig::Password { hashed_password } => {
-                if hashed_password.is_empty() {
-                    anyhow::bail!("Hashed password cannot be empty");
-                }
-
-                // Validate base64 encoding and length
-                let decoded = base64::prelude::BASE64_STANDARD
-                    .decode(hashed_password)
-                    .context("Invalid base64 encoding in hashed password")?;
-
-                if decoded.len() != 20 {
-                    anyhow::bail!("Hashed password must be exactly 20 bytes (SHA1)");
-                }
-            }
-            AuthConfig::Certificate {
-                cert_file,
-                key_file,
-            } => {
-                if cert_file.is_empty() {
-                    anyhow::bail!("Certificate file path cannot be empty");
-                }
-                if key_file.is_empty() {
-                    anyhow::bail!("Key file path cannot be empty");
-                }
-            }
-            AuthConfig::SecureDevice {
-                cert_name,
-                key_name,
-            } => {
-                if cert_name.is_empty() {
-                    anyhow::bail!("Certificate name cannot be empty");
-                }
-                if key_name.is_empty() {
-                    anyhow::bail!("Key name cannot be empty");
-                }
-            }
-            AuthConfig::Anonymous => {
-                // No additional validation needed
-            }
-        }
-
-        // Validate connection configuration
-        if self.connection.max_connections == 0 {
-            anyhow::bail!("Max connections cannot be zero");
-        }
-
-        if self.connection.timeout == 0 {
-            anyhow::bail!("Timeout cannot be zero");
-        }
-
         Ok(())
     }
 
-    /// Get the authentication type
-    pub fn auth_type(&self) -> AuthType {
-        match &self.auth {
-            AuthConfig::Anonymous => AuthType::Anonymous,
-            AuthConfig::Password { .. } => AuthType::Password,
-            AuthConfig::Certificate { .. } => AuthType::Certificate,
-            AuthConfig::SecureDevice { .. } => AuthType::SecureDevice,
+    /// Merge with environment variables.
+    ///
+    /// Environment variables take precedence over existing values.
+    /// Supported variables:
+    /// - SOFTETHER_SERVER
+    /// - SOFTETHER_PORT
+    /// - SOFTETHER_HUB
+    /// - SOFTETHER_USER
+    /// - SOFTETHER_PASSWORD_HASH
+    pub fn merge_env(&mut self) {
+        if let Ok(val) = std::env::var("SOFTETHER_SERVER") {
+            self.server = val;
         }
-    }
-
-    /// Get the server address as a string
-    pub fn server_address(&self) -> String {
-        format!("{}:{}", self.host, self.port)
+        if let Ok(val) = std::env::var("SOFTETHER_PORT") {
+            if let Ok(port) = val.parse() {
+                self.port = port;
+            }
+        }
+        if let Ok(val) = std::env::var("SOFTETHER_HUB") {
+            self.hub = val;
+        }
+        if let Ok(val) = std::env::var("SOFTETHER_USER") {
+            self.username = val;
+        }
+        if let Ok(val) = std::env::var("SOFTETHER_PASSWORD_HASH") {
+            if let Ok(bytes) = hex::decode(&val) {
+                if bytes.len() == 20 {
+                    self.password_hash.copy_from_slice(&bytes);
+                }
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
 
     #[test]
-    fn test_config_creation() {
-        let config = VpnConfig::new_password(
-            "test.com".to_string(),
-            443,
-            "TEST".to_string(),
-            "user".to_string(),
-            base64::prelude::BASE64_STANDARD.encode(b"12345678901234567890"), // 20 bytes
-        );
-
-        assert_eq!(config.host, "test.com");
+    fn test_default_config() {
+        let config = VpnConfig::default();
         assert_eq!(config.port, 443);
-        assert_eq!(config.hub_name, "TEST");
-        assert_eq!(config.username, "user");
-        assert_eq!(config.auth_type(), AuthType::Password);
+        assert!(config.skip_tls_verify); // Default: skip TLS verify (self-signed)
+        assert_eq!(config.timeout_seconds, 30);
     }
 
     #[test]
     fn test_config_validation() {
-        let mut config = VpnConfig::new_password(
-            "test.com".to_string(),
-            443,
-            "TEST".to_string(),
-            "user".to_string(),
-            base64::prelude::BASE64_STANDARD.encode(b"12345678901234567890"),
-        );
-
-        assert!(config.validate().is_ok());
-
-        // Test empty host
-        config.host = String::new();
+        let config = VpnConfig::default();
         assert!(config.validate().is_err());
 
-        // Test zero port
-        config.host = "test.com".to_string();
-        config.port = 0;
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_config_serialization() -> Result<()> {
-        let config = VpnConfig::new_password(
-            "test.com".to_string(),
-            443,
-            "TEST".to_string(),
-            "user".to_string(),
-            base64::prelude::BASE64_STANDARD.encode(b"12345678901234567890"),
+        let config = VpnConfig::new(
+            "vpn.example.com".into(),
+            "VPN".into(),
+            "user".into(),
+            "T2kl2mB84H5y2tn7n9qf65/8jXI=".into(), // base64 hash
         );
-
-        let json = serde_json::to_string(&config)?;
-        let deserialized: VpnConfig = serde_json::from_str(&json)?;
-
-        assert_eq!(config.host, deserialized.host);
-        assert_eq!(config.port, deserialized.port);
-        assert_eq!(config.username, deserialized.username);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_config_file_operations() -> Result<()> {
-        let config = VpnConfig::new_password(
-            "test.com".to_string(),
-            443,
-            "TEST".to_string(),
-            "user".to_string(),
-            base64::prelude::BASE64_STANDARD.encode(b"12345678901234567890"),
-        );
-
-        let temp_file = NamedTempFile::new()?;
-        config.to_file(temp_file.path())?;
-
-        let loaded_config = VpnConfig::from_file(temp_file.path())?;
-        assert_eq!(config.host, loaded_config.host);
-        assert_eq!(config.port, loaded_config.port);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_anonymous_config() {
-        let config = VpnConfig::new_anonymous("test.com".to_string(), 443, "TEST".to_string());
-
-        assert_eq!(config.auth_type(), AuthType::Anonymous);
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_json_roundtrip() {
+        let config = VpnConfig::new(
+            "vpn.example.com".into(),
+            "VPN".into(),
+            "user".into(),
+            "T2kl2mB84H5y2tn7n9qf65/8jXI=".into(),
+        );
+        let json = config.to_json().unwrap();
+        let parsed = VpnConfig::from_json(&json).unwrap();
+        assert_eq!(config.server, parsed.server);
+        assert_eq!(config.hub, parsed.hub);
+    }
+
+    #[test]
+    fn test_routing_config_default() {
+        let routing = RoutingConfig::default();
+        assert!(!routing.default_route);
+        assert!(routing.accept_pushed_routes);
+        assert!(routing.ipv4_include.is_empty());
+        assert!(routing.ipv4_exclude.is_empty());
+    }
+
+    #[test]
+    fn test_parse_ipv4_cidrs() {
+        let cidrs = vec![
+            "10.0.0.0/8".to_string(),
+            "192.168.1.0/24".to_string(),
+            "172.16.0.0/12".to_string(),
+        ];
+        let parsed = RoutingConfig::parse_ipv4_cidrs(&cidrs);
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0], (Ipv4Addr::new(10, 0, 0, 0), 8));
+        assert_eq!(parsed[1], (Ipv4Addr::new(192, 168, 1, 0), 24));
+        assert_eq!(parsed[2], (Ipv4Addr::new(172, 16, 0, 0), 12));
+    }
+
+    #[test]
+    fn test_parse_ipv4_cidrs_invalid() {
+        let cidrs = vec![
+            "invalid".to_string(),
+            "10.0.0.0".to_string(),       // missing prefix
+            "10.0.0.0/33".to_string(),    // prefix too large
+            "10.0.0.0/8".to_string(),     // valid
+        ];
+        let parsed = RoutingConfig::parse_ipv4_cidrs(&cidrs);
+        assert_eq!(parsed.len(), 1); // Only valid one
+        assert_eq!(parsed[0], (Ipv4Addr::new(10, 0, 0, 0), 8));
+    }
+
+    #[test]
+    fn test_routing_config_json() {
+        let json = r#"{
+            "server": "vpn.example.com",
+            "hub": "VPN",
+            "username": "user",
+            "password_hash": "0000000000000000000000000000000000000001",
+            "routing": {
+                "default_route": true,
+                "accept_pushed_routes": false,
+                "ipv4_include": ["10.0.0.0/8"],
+                "ipv4_exclude": ["192.168.1.0/24"]
+            }
+        }"#;
+        let config = VpnConfig::from_json(json).unwrap();
+        assert!(config.routing.default_route);
+        assert!(!config.routing.accept_pushed_routes);
+        assert_eq!(config.routing.ipv4_include.len(), 1);
+        assert_eq!(config.routing.ipv4_exclude.len(), 1);
     }
 }

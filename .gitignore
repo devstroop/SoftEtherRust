@@ -1,26 +1,22 @@
-# Rust
-target/
+# Rust build artifacts
+/target/
 **/*.rs.bk
-**/*.profdata
-**/*.gcda
-**/*.gcno
-**/*.profraw
+Cargo.lock
 
-# IDE/Editor files
+# IDE
 .idea/
 .vscode/
 *.swp
-*.bak
+*.swo
 *~
+
+# OS files
 .DS_Store
 Thumbs.db
 
-# Config files (keep real config out of VCS)
+# Config with secrets
 config.json
 
-# SoftEther VPN
-SoftEtherVPN_Stable/
-SoftEther-Go/
-
-# Cargo
-# Commit Cargo.lock for binaries and cdylibs for reproducible builds
+# Debug artifacts
+*.log
+*.pdb

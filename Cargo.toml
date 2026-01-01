@@ -1,82 +1,86 @@
-[workspace]
-members = [
-    "libs/mayaqua",
-    "libs/cedar",
-    "libs/adapter",
-    "libs/virtual_tap_rust",
-    "softether_ffi",
-]
-resolver = "2"
-
-# Root package is the vpnclient binary
 [package]
-name = "vpnclient"
+name = "softether-rust"
 version = "0.1.0"
 edition = "2021"
-authors = ["SoftEther VPN Rust Team"]
+authors = ["SoftEther Rust Contributors"]
+description = "A high-performance SoftEther VPN client written in Rust"
 license = "Apache-2.0"
+repository = "https://github.com/yourusername/SoftEtherRust"
+keywords = ["vpn", "softether", "networking", "tunnel"]
+categories = ["network-programming"]
+rust-version = "1.75"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.44", features = ["full", "rt-multi-thread", "sync", "time", "io-util", "net", "macros"] }
+
+# TLS support
+tokio-rustls = "0.26"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2.2"
+webpki-roots = "0.26"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Cryptography (for SHA-0 we implement ourselves, but SHA-1/256 from ring)
+ring = "0.17"
+rand = "0.8"
+
+# Binary parsing
+bytes = "1.9"
+
+# Compression
+flate2 = "1.0"
+
+# Base64 encoding
+base64 = "0.22"
+
+# Hex encoding
+hex = "0.4"
+
+# CLI parsing
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Password prompting
+rpassword = "7.3"
+
+# DNS resolution
+hickory-resolver = "0.24"
+
+# IP utilities
+ipnet = "2.10"
+
+# For TUN device
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio-test = "0.4"
 
 [[bin]]
 name = "vpnclient"
 path = "src/main.rs"
 
-[dependencies]
-mayaqua = { path = "libs/mayaqua" }
-cedar = { path = "libs/cedar" }
-adapter = { path = "libs/adapter", optional = true }
-tokio = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-tracing-log = { workspace = true }
-anyhow = "1.0"
-clap = { version = "4.0", features = ["derive"] }
-base64 = { workspace = true }
-rand = { workspace = true }
-uuid = { workspace = true }
-native-tls = "0.2"
-x509-parser = "0.16"
-libc = "0.2"
-
-[features]
-default = ["adapter"]
-adapter = ["dep:adapter"]
-
-[workspace.package]
-version = "0.1.0"
-edition = "2021"
-authors = ["SoftEther VPN Rust Team"]
-license = "Apache-2.0"
-repository = "https://github.com/SoftEtherVPN/SoftEtherVPN-Rust"
-rust-version = "1.74"
-
-# Common dependencies across all crates
-[workspace.dependencies]
-tokio = { version = "1.47", features = ["full"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-log = "0.4"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
-tracing-log = "0.2"
-rand = "0.9"
-uuid = { version = "1.18", features = ["v4"] }
-sha1 = "0.10"
-hex = "0.4"
-base64 = "0.22"
-zeroize = { version = "1.8", features = ["zeroize_derive"] }
-subtle = "2.5"
-
-# Virtual workspace (no root crate)
-
 [profile.release]
-opt-level = 3
-lto = "thin"
+lto = true
 codegen-units = 1
-strip = "symbols"
 panic = "abort"
+strip = true
+opt-level = 3
 
-[profile.release.package.softether_ffi]
-opt-level = "z"
-
+[profile.dev]
+opt-level = 0
+debug = true
