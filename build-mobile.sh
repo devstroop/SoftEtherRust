@@ -91,19 +91,19 @@ build_ios() {
     # Create universal simulator library
     log_info "  Creating universal simulator library..."
     lipo -create \
-        target/aarch64-apple-ios-sim/release/libsoftethervpn.a \
-        target/x86_64-apple-ios/release/libsoftethervpn.a \
-        -output target/ios/libsoftethervpn_sim.a
+        target/aarch64-apple-ios-sim/release/libsoftether.a \
+        target/x86_64-apple-ios/release/libsoftether.a \
+        -output target/ios/libsoftether_sim.a
     
     # Copy device library
-    cp target/aarch64-apple-ios/release/libsoftethervpn.a target/ios/libsoftethervpn_device.a
+    cp target/aarch64-apple-ios/release/libsoftether.a target/ios/libsoftether_device.a
     
     # Create XCFramework
     log_info "  Creating XCFramework..."
     rm -rf target/ios/SoftEtherVPN.xcframework
     xcodebuild -create-xcframework \
-        -library target/ios/libsoftethervpn_device.a -headers include \
-        -library target/ios/libsoftethervpn_sim.a -headers include \
+        -library target/ios/libsoftether_device.a -headers include \
+        -library target/ios/libsoftether_sim.a -headers include \
         -output target/ios/SoftEtherVPN.xcframework
     
     log_info "iOS build complete: target/ios/SoftEtherVPN.xcframework"
@@ -147,10 +147,10 @@ build_android() {
     mkdir -p target/android/jniLibs/x86
     
     # Copy libraries
-    cp target/aarch64-linux-android/release/libsoftethervpn.so target/android/jniLibs/arm64-v8a/
-    cp target/armv7-linux-androideabi/release/libsoftethervpn.so target/android/jniLibs/armeabi-v7a/
-    cp target/x86_64-linux-android/release/libsoftethervpn.so target/android/jniLibs/x86_64/
-    cp target/i686-linux-android/release/libsoftethervpn.so target/android/jniLibs/x86/
+    cp target/aarch64-linux-android/release/libsoftether.so target/android/jniLibs/arm64-v8a/
+    cp target/armv7-linux-androideabi/release/libsoftether.so target/android/jniLibs/armeabi-v7a/
+    cp target/x86_64-linux-android/release/libsoftether.so target/android/jniLibs/x86_64/
+    cp target/i686-linux-android/release/libsoftether.so target/android/jniLibs/x86/
     
     log_info "Android build complete: target/android/jniLibs/"
 }
@@ -173,15 +173,15 @@ build_macos() {
     # Create universal binary
     log_info "  Creating universal library..."
     lipo -create \
-        target/aarch64-apple-darwin/release/libsoftethervpn.a \
-        target/x86_64-apple-darwin/release/libsoftethervpn.a \
-        -output target/macos/libsoftethervpn.a
+        target/aarch64-apple-darwin/release/libsoftether.a \
+        target/x86_64-apple-darwin/release/libsoftether.a \
+        -output target/macos/libsoftether.a
     
     # Also create dynamic library
     lipo -create \
-        target/aarch64-apple-darwin/release/libsoftethervpn.dylib \
-        target/x86_64-apple-darwin/release/libsoftethervpn.dylib \
-        -output target/macos/libsoftethervpn.dylib 2>/dev/null || true
+        target/aarch64-apple-darwin/release/libsoftether.dylib \
+        target/x86_64-apple-darwin/release/libsoftether.dylib \
+        -output target/macos/libsoftether.dylib 2>/dev/null || true
     
     log_info "macOS build complete: target/macos/"
 }

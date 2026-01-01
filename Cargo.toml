@@ -11,7 +11,7 @@ categories = ["network-programming"]
 rust-version = "1.75"
 
 [lib]
-name = "softethervpn"
+name = "softether"
 crate-type = ["lib", "staticlib", "cdylib"]
 
 [features]

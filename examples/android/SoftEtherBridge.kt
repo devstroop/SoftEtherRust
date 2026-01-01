@@ -4,7 +4,7 @@
 // Load the native library in your Application class or before use.
 //
 // Example:
-//   System.loadLibrary("softethervpn")
+//   System.loadLibrary("softether")
 
 package com.example.softether
 
@@ -19,7 +19,7 @@ class SoftEtherBridge {
     
     companion object {
         init {
-            System.loadLibrary("softethervpn")
+            System.loadLibrary("softether")
         }
         
         // Result codes (match C enum)

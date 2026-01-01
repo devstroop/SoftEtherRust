@@ -114,13 +114,13 @@ app/
     └── main/
         └── jniLibs/
             ├── arm64-v8a/
-            │   └── libsoftethervpn.so
+            │   └── libsoftether.so
             ├── armeabi-v7a/
-            │   └── libsoftethervpn.so
+            │   └── libsoftether.so
             ├── x86_64/
-            │   └── libsoftethervpn.so
+            │   └── libsoftether.so
             └── x86/
-                └── libsoftethervpn.so
+                └── libsoftether.so
 ```
 
 ### 2. Add the Kotlin Wrapper
