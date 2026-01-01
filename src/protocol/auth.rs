@@ -87,6 +87,8 @@ pub struct AuthResult {
     pub session_key: Bytes,
     /// Redirect information for cluster setup.
     pub redirect: Option<RedirectInfo>,
+    /// Connection direction for half-connection mode (0=both, 1=c2s, 2=s2c).
+    pub direction: u32,
 }
 
 /// Redirect information for cluster server setup.
@@ -122,6 +124,7 @@ impl AuthResult {
                 error_message,
                 session_key: Bytes::new(),
                 redirect: None,
+                direction: 0,
             });
         }
 
@@ -143,8 +146,12 @@ impl AuthResult {
                 error_message: None,
                 session_key: Bytes::new(),
                 redirect: Some(RedirectInfo { ip, port, ticket }),
+                direction: 0,
             });
         }
+
+        // Parse direction for half-connection mode (0=both, 1=c2s, 2=s2c)
+        let direction = pack.get_int("direction").unwrap_or(0);
 
         Ok(Self {
             success: true,
@@ -152,6 +159,7 @@ impl AuthResult {
             error_message: None,
             session_key: pack.get_data("session_key").cloned().unwrap_or_default().into(),
             redirect: None,
+            direction,
         })
     }
 

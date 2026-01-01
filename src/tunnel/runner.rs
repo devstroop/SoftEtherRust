@@ -5,6 +5,7 @@
 //! - DHCP discovery through tunnel
 //! - ARP for gateway MAC discovery
 //! - Bidirectional packet forwarding
+//! - Multi-connection support for half-connection mode
 
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,7 +21,7 @@ use crate::adapter::TunAdapter;
 use crate::adapter::UtunDevice;
 #[cfg(target_os = "linux")]
 use crate::adapter::TunDevice;
-use crate::client::VpnConnection;
+use crate::client::{VpnConnection, ConnectionManager};
 use crate::error::{Error, Result};
 use crate::protocol::{TunnelCodec, is_compressed, decompress, decompress_into, compress};
 
@@ -143,6 +144,56 @@ impl TunnelRunner {
 
         // Step 5: Run the data loop
         self.run_data_loop(conn, &mut tun, &dhcp_config).await
+    }
+
+    /// Run the tunnel with multi-connection support.
+    ///
+    /// This is similar to `run()` but uses a ConnectionManager that can handle
+    /// multiple TCP connections in half-connection mode.
+    pub async fn run_multi(&mut self, conn_mgr: &mut ConnectionManager) -> Result<()> {
+        info!("Starting tunnel runner (multi-connection) with MAC {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+            self.mac[0], self.mac[1], self.mac[2], self.mac[3], self.mac[4], self.mac[5]);
+
+        // Step 1: Establish additional connections BEFORE DHCP
+        // In half-connection mode, the server won't respond until all connections are established
+        if conn_mgr.needs_more_connections() {
+            conn_mgr.establish_additional_connections().await?;
+        }
+
+        // Step 2: Perform DHCP to get IP configuration
+        let dhcp_config = self.perform_dhcp_multi(conn_mgr).await?;
+        info!("DHCP complete: IP={}, Gateway={:?}, DNS={:?}",
+            dhcp_config.ip, dhcp_config.gateway, dhcp_config.dns1);
+
+        // Additional connections already established above
+        if conn_mgr.needs_more_connections() {
+            conn_mgr.establish_additional_connections().await?;
+        }
+
+        // Step 3: Create TUN device
+        #[cfg(target_os = "macos")]
+        let mut tun = UtunDevice::new(None)
+            .map_err(|e| Error::TunDevice(format!("Failed to create TUN: {}", e)))?;
+        #[cfg(target_os = "linux")]
+        let mut tun = TunDevice::new(None)
+            .map_err(|e| Error::TunDevice(format!("Failed to create TUN: {}", e)))?;
+        info!("Created TUN device: {}", tun.name());
+
+        // Step 4: Configure TUN device
+        tun.configure(dhcp_config.ip, dhcp_config.netmask)
+            .map_err(|e| Error::TunDevice(format!("Failed to configure TUN: {}", e)))?;
+        tun.set_up()
+            .map_err(|e| Error::TunDevice(format!("Failed to bring up TUN: {}", e)))?;
+        tun.set_mtu(self.config.mtu)
+            .map_err(|e| Error::TunDevice(format!("Failed to set MTU: {}", e)))?;
+
+        // Step 5: Set up routes
+        self.configure_routes(&tun, &dhcp_config)?;
+
+        info!("TUN device {} configured with IP {}", tun.name(), dhcp_config.ip);
+
+        // Step 6: Run the data loop with multi-connection support
+        self.run_data_loop_multi(conn_mgr, &mut tun, &dhcp_config).await
     }
 
     /// Configure routes for VPN traffic.
@@ -773,6 +824,446 @@ impl TunnelRunner {
             _ => {}
         }
 
+        Ok(())
+    }
+
+    // ========== Multi-Connection Support Methods ==========
+
+    /// Perform DHCP through the tunnel using ConnectionManager.
+    async fn perform_dhcp_multi(&self, conn_mgr: &mut ConnectionManager) -> Result<DhcpConfig> {
+        let mut dhcp = DhcpClient::new(self.mac);
+        let mut codec = TunnelCodec::new();
+        let mut buf = vec![0u8; 65536];
+        let mut send_buf = vec![0u8; 2048];
+
+        let deadline = Instant::now() + Duration::from_secs(self.config.dhcp_timeout);
+
+        // In half-connection mode, find the receive connection
+        // Primary is ClientToServer (send-only), additional is ServerToClient (receive)
+        let recv_conn_idx = if conn_mgr.is_half_connection() {
+            // Find the first receive-capable connection
+            let connections = conn_mgr.all_connections();
+            connections.iter()
+                .position(|c| c.direction.can_recv())
+                .unwrap_or(0)
+        } else {
+            0 // Single connection mode - use primary
+        };
+        
+        info!("DHCP: using connection {} for receiving (direction: {:?})", 
+              recv_conn_idx, 
+              conn_mgr.get_mut(recv_conn_idx).map(|c| c.direction).unwrap_or(crate::client::TcpDirection::Both));
+
+        // Send DHCP DISCOVER
+        let discover = dhcp.build_discover();
+        info!("Sending DHCP DISCOVER ({} bytes)", discover.len());
+        debug!("DHCP DISCOVER: {:02X?}", &discover[..std::cmp::min(64, discover.len())]);
+        self.send_frame_multi(conn_mgr, &discover, &mut send_buf).await?;
+
+        // Wait for OFFER
+        loop {
+            if Instant::now() > deadline {
+                return Err(Error::TimeoutMessage("DHCP timeout - no OFFER received".into()));
+            }
+
+            // Read from receive-capable connection
+            let recv_conn = conn_mgr.get_mut(recv_conn_idx)
+                .ok_or_else(|| Error::ConnectionFailed("Receive connection not found".into()))?;
+            
+            match timeout(Duration::from_secs(3), recv_conn.conn.read(&mut buf)).await {
+                Ok(Ok(n)) if n > 0 => {
+                    recv_conn.touch();
+                    recv_conn.bytes_received += n as u64;
+                    
+                    debug!("Received {} bytes from tunnel (connection {})", n, recv_conn_idx);
+                    // Decode tunnel frames
+                    let frames = codec.feed(&buf[..n])?;
+                    for frame in frames {
+                        if frame.is_keepalive() {
+                            debug!("Received keepalive frame");
+                            continue;
+                        }
+                        if let Some(packets) = frame.packets() {
+                            for packet in packets {
+                                // Check if packet is compressed and decompress if needed
+                                let packet_data: Vec<u8> = if is_compressed(packet) {
+                                    match decompress(packet) {
+                                        Ok(decompressed) => {
+                                            debug!("Decompressed {} -> {} bytes", packet.len(), decompressed.len());
+                                            decompressed
+                                        }
+                                        Err(e) => {
+                                            warn!("Decompression failed: {}", e);
+                                            continue;
+                                        }
+                                    }
+                                } else {
+                                    packet.to_vec()
+                                };
+                                
+                                // Log packet details
+                                if packet_data.len() >= 14 {
+                                    let ethertype = format!("0x{:02X}{:02X}", packet_data[12], packet_data[13]);
+                                    debug!("Packet: {} bytes, ethertype={}", packet_data.len(), ethertype);
+                                }
+                                
+                                // Check if this is a DHCP response (UDP port 68)
+                                if self.is_dhcp_response(&packet_data) {
+                                    info!("DHCP response packet detected!");
+                                    if dhcp.process_response(&packet_data) {
+                                        // Got ACK
+                                        return Ok(dhcp.config().clone());
+                                    } else if dhcp.state() == DhcpState::DiscoverSent {
+                                        // Got OFFER, send REQUEST
+                                        if let Some(request) = dhcp.build_request() {
+                                            info!("Sending DHCP REQUEST");
+                                            self.send_frame_multi(conn_mgr, &request, &mut send_buf).await?;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(Ok(_)) => {
+                    return Err(Error::ConnectionFailed("Connection closed during DHCP".into()));
+                }
+                Ok(Err(e)) => {
+                    return Err(Error::Io(e));
+                }
+                Err(_) => {
+                    // Timeout, retry DISCOVER if still in initial state
+                    if dhcp.state() == DhcpState::DiscoverSent {
+                        warn!("DHCP timeout, retrying DISCOVER");
+                        let discover = dhcp.build_discover();
+                        self.send_frame_multi(conn_mgr, &discover, &mut send_buf).await?;
+                    } else if dhcp.state() == DhcpState::RequestSent {
+                        warn!("DHCP timeout, retrying REQUEST");
+                        if let Some(request) = dhcp.build_request() {
+                            self.send_frame_multi(conn_mgr, &request, &mut send_buf).await?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Send an Ethernet frame through the tunnel using ConnectionManager.
+    async fn send_frame_multi(&self, conn_mgr: &mut ConnectionManager, frame: &[u8], buf: &mut [u8]) -> Result<()> {
+        // Compress if enabled
+        let data_to_send: std::borrow::Cow<[u8]> = if self.config.use_compress {
+            match compress(frame) {
+                Ok(compressed) => {
+                    debug!("Compressed {} -> {} bytes", frame.len(), compressed.len());
+                    std::borrow::Cow::Owned(compressed)
+                }
+                Err(e) => {
+                    warn!("Compression failed, sending uncompressed: {}", e);
+                    std::borrow::Cow::Borrowed(frame)
+                }
+            }
+        } else {
+            std::borrow::Cow::Borrowed(frame)
+        };
+        
+        // Encode as tunnel packet: [num_blocks=1][size][data]
+        let total_len = 4 + 4 + data_to_send.len();
+        if buf.len() < total_len {
+            return Err(Error::Protocol("Send buffer too small".into()));
+        }
+
+        buf[0..4].copy_from_slice(&1u32.to_be_bytes());
+        buf[4..8].copy_from_slice(&(data_to_send.len() as u32).to_be_bytes());
+        buf[8..8 + data_to_send.len()].copy_from_slice(&data_to_send);
+
+        conn_mgr.write_all(&buf[..total_len]).await?;
+        Ok(())
+    }
+
+    /// Run the main data forwarding loop with multi-connection support.
+    async fn run_data_loop_multi(
+        &self,
+        conn_mgr: &mut ConnectionManager,
+        tun: &mut impl TunAdapter,
+        dhcp_config: &DhcpConfig,
+    ) -> Result<()> {
+        let mut state = DataLoopState::new(self.mac);
+        let gateway = dhcp_config.gateway.unwrap_or(dhcp_config.ip);
+        state.configure(dhcp_config.ip, gateway);
+
+        // One codec per connection (for stateful frame parsing)
+        let num_conns = conn_mgr.connection_count();
+        let mut codecs: Vec<TunnelCodec> = (0..num_conns).map(|_| TunnelCodec::new()).collect();
+        
+        // Pre-allocated buffers
+        let mut net_buf = vec![0u8; 65536];
+        let mut send_buf = vec![0u8; 4096];
+        let mut decomp_buf = vec![0u8; 4096];
+        let mut tun_write_buf = vec![0u8; 2048];
+
+        // Set up ARP handler
+        let mut arp = ArpHandler::new(self.mac);
+        arp.configure(dhcp_config.ip, gateway);
+
+        // Send gratuitous ARP to announce our presence
+        let garp = arp.build_gratuitous_arp();
+        self.send_frame_multi(conn_mgr, &garp, &mut send_buf).await?;
+        debug!("Sent gratuitous ARP");
+
+        // Send ARP request for gateway
+        let gateway_arp = arp.build_gateway_request();
+        self.send_frame_multi(conn_mgr, &gateway_arp, &mut send_buf).await?;
+        debug!("Sent gateway ARP request");
+
+        let mut keepalive_interval = interval(Duration::from_secs(self.config.keepalive_interval));
+        let mut last_activity = Instant::now();
+
+        // Zero-copy TUN reader using fixed buffer
+        let (tun_tx, mut tun_rx) = mpsc::channel::<(usize, [u8; 2048])>(64);
+        let tun_fd = tun.raw_fd();
+        let running = self.running.clone();
+
+        // Spawn blocking TUN reader task
+        let tun_reader = tokio::task::spawn_blocking(move || {
+            let mut read_buf = [0u8; 2048];
+            
+            while running.load(Ordering::SeqCst) {
+                let mut poll_fds = [libc::pollfd {
+                    fd: tun_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                }];
+                
+                let poll_result = unsafe {
+                    libc::poll(poll_fds.as_mut_ptr(), 1, 5)
+                };
+                
+                if poll_result > 0 && (poll_fds[0].revents & libc::POLLIN) != 0 {
+                    let n = unsafe {
+                        libc::read(
+                            tun_fd,
+                            read_buf.as_mut_ptr() as *mut libc::c_void,
+                            read_buf.len(),
+                        )
+                    };
+
+                    #[cfg(target_os = "macos")]
+                    let min_len = 4;
+                    #[cfg(target_os = "linux")]
+                    let min_len = 1;
+
+                    if n > min_len as isize {
+                        if tun_tx.blocking_send((n as usize, read_buf)).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        info!("Data loop started (multi-connection mode, {} connections), press Ctrl+C to disconnect", 
+              conn_mgr.connection_count());
+
+        let our_ip = dhcp_config.ip;
+        let use_compress = self.config.use_compress;
+        let my_mac = self.mac;
+
+        while self.running.load(Ordering::SeqCst) {
+            tokio::select! {
+                // Packet from TUN device (from local applications)
+                Some((len, tun_buf)) = tun_rx.recv() => {
+                    #[cfg(target_os = "macos")]
+                    let ip_packet = &tun_buf[4..len];
+                    #[cfg(target_os = "linux")]
+                    let ip_packet = &tun_buf[..len];
+                    
+                    if ip_packet.is_empty() {
+                        continue;
+                    }
+                    
+                    let gateway_mac = arp.gateway_mac_or_broadcast();
+                    
+                    // Build tunnel frame
+                    let eth_len = 14 + ip_packet.len();
+                    let total_len = 8 + eth_len;
+                    
+                    if total_len > send_buf.len() {
+                        warn!("Packet too large: {}", ip_packet.len());
+                        continue;
+                    }
+                    
+                    let ip_version = (ip_packet[0] >> 4) & 0x0F;
+                    if ip_version != 4 && ip_version != 6 {
+                        continue;
+                    }
+                    
+                    if use_compress {
+                        // Compression path
+                        let eth_start = 8;
+                        send_buf[eth_start..eth_start + 6].copy_from_slice(&gateway_mac);
+                        send_buf[eth_start + 6..eth_start + 12].copy_from_slice(&my_mac);
+                        if ip_version == 4 {
+                            send_buf[eth_start + 12] = 0x08;
+                            send_buf[eth_start + 13] = 0x00;
+                        } else {
+                            send_buf[eth_start + 12] = 0x86;
+                            send_buf[eth_start + 13] = 0xDD;
+                        }
+                        send_buf[eth_start + 14..eth_start + 14 + ip_packet.len()]
+                            .copy_from_slice(ip_packet);
+                        
+                        let eth_frame = &send_buf[eth_start..eth_start + eth_len];
+                        
+                        match compress(eth_frame) {
+                            Ok(compressed) => {
+                                let comp_total = 8 + compressed.len();
+                                if comp_total <= send_buf.len() {
+                                    send_buf[0..4].copy_from_slice(&1u32.to_be_bytes());
+                                    send_buf[4..8].copy_from_slice(&(compressed.len() as u32).to_be_bytes());
+                                    send_buf[8..8 + compressed.len()].copy_from_slice(&compressed);
+                                    conn_mgr.write_all(&send_buf[..comp_total]).await?;
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Compression failed: {}", e);
+                                send_buf[0..4].copy_from_slice(&1u32.to_be_bytes());
+                                send_buf[4..8].copy_from_slice(&(eth_len as u32).to_be_bytes());
+                                conn_mgr.write_all(&send_buf[..total_len]).await?;
+                            }
+                        }
+                    } else {
+                        // Uncompressed path
+                        send_buf[0..4].copy_from_slice(&1u32.to_be_bytes());
+                        send_buf[4..8].copy_from_slice(&(eth_len as u32).to_be_bytes());
+                        send_buf[8..14].copy_from_slice(&gateway_mac);
+                        send_buf[14..20].copy_from_slice(&my_mac);
+                        if ip_version == 4 {
+                            send_buf[20] = 0x08;
+                            send_buf[21] = 0x00;
+                        } else {
+                            send_buf[20] = 0x86;
+                            send_buf[21] = 0xDD;
+                        }
+                        send_buf[22..22 + ip_packet.len()].copy_from_slice(ip_packet);
+                        
+                        conn_mgr.write_all(&send_buf[..total_len]).await?;
+                    }
+                    
+                    last_activity = Instant::now();
+                    debug!("TUN -> VPN: {} bytes", ip_packet.len());
+                }
+
+                // Data from VPN connection
+                // In half-connection mode, read from the receive-capable connection
+                result = async {
+                    // Find the receive connection index
+                    let recv_idx = if conn_mgr.is_half_connection() {
+                        conn_mgr.all_connections().iter()
+                            .position(|c| c.direction.can_recv())
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    
+                    let recv_conn = conn_mgr.get_mut(recv_idx).unwrap();
+                    let n = recv_conn.conn.read(&mut net_buf).await?;
+                    Ok::<(usize, usize), std::io::Error>((recv_idx, n))
+                } => {
+                    match result {
+                        Ok((recv_idx, n)) if n > 0 => {
+                            // Update stats
+                            if let Some(conn) = conn_mgr.get_mut(recv_idx) {
+                                conn.bytes_received += n as u64;
+                                conn.touch();
+                            }
+                            
+                            // Use codec for this connection
+                            match codecs.get_mut(recv_idx).map(|c| c.feed(&net_buf[..n])) {
+                                Some(Ok(frames)) => {
+                                    for frame in frames {
+                                        if frame.is_keepalive() {
+                                            debug!("Received keepalive");
+                                            continue;
+                                        }
+                                        
+                                        if let Some(packets) = frame.packets() {
+                                            for packet in packets {
+                                                let frame_data: &[u8] = if is_compressed(packet) {
+                                                    match decompress_into(packet, &mut decomp_buf) {
+                                                        Ok(len) => &decomp_buf[..len],
+                                                        Err(_) => continue,
+                                                    }
+                                                } else {
+                                                    packet
+                                                };
+                                                
+                                                if let Err(e) = self.process_frame_zerocopy(
+                                                    tun_fd,
+                                                    &mut tun_write_buf,
+                                                    &mut arp,
+                                                    frame_data,
+                                                    our_ip,
+                                                ) {
+                                                    error!("Process error: {}", e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Some(Err(e)) => {
+                                    error!("Decode error: {}", e);
+                                }
+                                None => {}
+                            }
+                            
+                            // Send any pending ARP replies
+                            if let Some(reply) = arp.build_pending_reply() {
+                                if let Err(e) = self.send_frame_multi(conn_mgr, &reply, &mut send_buf).await {
+                                    error!("Failed to send ARP reply: {}", e);
+                                } else {
+                                    debug!("Sent ARP reply");
+                                }
+                                arp.take_pending_reply();
+                            }
+                            
+                            last_activity = Instant::now();
+                        }
+                        Ok(_) => {
+                            info!("Connection closed by server");
+                            break;
+                        }
+                        Err(e) => {
+                            error!("Network read error: {}", e);
+                            break;
+                        }
+                    }
+                }
+
+                // Keepalive timer
+                _ = keepalive_interval.tick() => {
+                    if last_activity.elapsed() > Duration::from_secs(3) {
+                        let keepalive = TunnelCodec::encode_keepalive_direct(
+                            32,
+                            &mut send_buf,
+                        );
+                        if let Some(ka) = keepalive {
+                            conn_mgr.write_all(ka).await?;
+                            debug!("Sent keepalive");
+                        }
+                    }
+                    
+                    if arp.should_send_periodic_garp() {
+                        let garp = arp.build_gratuitous_arp();
+                        self.send_frame_multi(conn_mgr, &garp, &mut send_buf).await?;
+                        arp.mark_garp_sent();
+                        debug!("Sent periodic GARP");
+                    }
+                }
+            }
+        }
+
+        info!("Data loop ended");
+        tun_reader.abort();
         Ok(())
     }
 }

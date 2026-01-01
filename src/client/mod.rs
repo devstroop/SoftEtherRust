@@ -1,9 +1,11 @@
 //! SoftEther VPN client implementation.
 
 mod connection;
+mod multi_connection;
 mod state;
 
 pub use connection::VpnConnection;
+pub use multi_connection::{ConnectionManager, ManagedConnection, TcpDirection, ConnectionStats};
 pub use state::VpnState;
 
 use std::net::Ipv4Addr;
@@ -81,10 +83,9 @@ impl VpnClient {
         self.state = VpnState::Connecting;
         self.running.store(true, Ordering::SeqCst);
 
-        // Warn if max_connections > 1 (not yet supported)
+        // Log multi-connection configuration
         if self.config.max_connections > 1 {
-            warn!("max_connections={} configured but multi-connection is not yet implemented. Using single connection.", 
-                  self.config.max_connections);
+            info!("Multi-connection mode enabled: max_connections={}", self.config.max_connections);
         }
 
         info!(
@@ -128,6 +129,9 @@ impl VpnClient {
         // Track the actual connection to use and server IP
         let mut active_conn = conn;
         let mut actual_server_ip = initial_server_ip;
+        // Track the actual server address and port (may change after redirect)
+        let mut actual_server_addr = self.config.server.clone();
+        let mut actual_server_port = self.config.port;
 
         // Handle cluster redirect if needed
         if let Some(redirect) = auth_result.redirect.take() {
@@ -139,6 +143,9 @@ impl VpnClient {
             if let Ok(ip) = redirect_server.parse::<Ipv4Addr>() {
                 actual_server_ip = ip;
             }
+            // Update actual server address and port for additional connections
+            actual_server_addr = redirect_server.clone();
+            actual_server_port = redirect_port as u16;
             
             // Send empty Pack acknowledgment
             let ack_pack = Pack::new();
@@ -170,6 +177,16 @@ impl VpnClient {
 
         info!("Session established with key length: {} bytes", auth_result.session_key.len());
 
+        // Create ConnectionManager for multi-connection support
+        // Pass the actual server address (after redirect) for additional connections
+        let mut conn_mgr = ConnectionManager::new(
+            active_conn, 
+            &self.config, 
+            &auth_result,
+            &actual_server_addr,
+            actual_server_port,
+        );
+        
         // Start tunnel
         self.state = VpnState::EstablishingTunnel;
         info!("VPN tunnel established successfully");
@@ -203,10 +220,13 @@ impl VpnClient {
             running.store(false, Ordering::SeqCst);
         });
         
-        // Run the tunnel
-        match runner.run(&mut active_conn).await {
+        // Run the tunnel with multi-connection support
+        match runner.run_multi(&mut conn_mgr).await {
             Ok(()) => {
                 info!("Tunnel stopped cleanly");
+                let stats = conn_mgr.stats();
+                info!("Connection stats: {} connections, {} bytes sent, {} bytes received",
+                      stats.total_connections, stats.total_bytes_sent, stats.total_bytes_received);
             }
             Err(e) => {
                 error!("Tunnel error: {}", e);
@@ -241,9 +261,9 @@ impl VpnClient {
         debug!("Redirect server hello: {:?}", redirect_hello);
         
         // Build connection options from config
-        // NOTE: Force max_connections=1 because multi-connection data handling is not yet implemented.
+        // Multi-connection support: use actual max_connections value
         let options = ConnectionOptions {
-            max_connections: 1, // Force single connection until multi-conn is implemented
+            max_connections: self.config.max_connections,
             use_encrypt: self.config.use_encrypt,
             use_compress: self.config.use_compress,
             udp_accel: self.config.udp_accel,
@@ -381,11 +401,10 @@ impl VpnClient {
         info!("Using authentication type: {:?}", auth_type);
 
         // Build connection options from config
-        // NOTE: Force max_connections=1 because multi-connection data handling is not yet implemented.
-        // With max_connections > 1, the server uses half-connection mode and may distribute packets
-        // across connections, causing DHCP and other protocols to fail.
+        // Multi-connection support: use actual max_connections value
+        // With max_connections > 1, the server uses half-connection mode
         let options = ConnectionOptions {
-            max_connections: 1, // Force single connection until multi-conn is implemented
+            max_connections: self.config.max_connections,
             use_encrypt: self.config.use_encrypt,
             use_compress: self.config.use_compress,
             udp_accel: self.config.udp_accel,
@@ -465,8 +484,12 @@ impl VpnClient {
                     if pack.contains("session_key") {
                         debug!("session_key found!");
                     }
+                    if let Some(direction) = pack.get_int("direction") {
+                        debug!("Direction in pack: {}", direction);
+                    }
                     
                     let result = AuthResult::from_pack(&pack)?;
+                    debug!("Auth result direction: {}", result.direction);
 
                     // Check for errors
                     if result.error > 0 {
