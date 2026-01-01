@@ -40,6 +40,10 @@ pub enum Error {
     #[error("Authentication failed: {0}")]
     AuthenticationFailed(String),
 
+    /// User already logged in (error code 20)
+    #[error("User already logged in - session in use")]
+    UserAlreadyLoggedIn,
+
     /// Invalid response from server
     #[error("Invalid server response: {0}")]
     InvalidResponse(String),
@@ -129,6 +133,7 @@ impl Error {
                 | Self::Timeout
                 | Self::TimeoutMessage(_)
                 | Self::ChannelClosed
+                | Self::UserAlreadyLoggedIn
         )
     }
 }

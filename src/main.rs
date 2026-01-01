@@ -12,24 +12,24 @@ use softether::{crypto, VpnClient, VpnConfig};
 
 #[derive(Parser)]
 #[command(name = "softether-rust")]
-#[command(author = "SoftEther Rust Team")]
+#[command(author = "Devstroop Team (devstroop.com)")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "A high-performance SoftEther VPN client", long_about = None)]
 struct Cli {
     /// Configuration file path (default: config.json if exists)
-    #[arg(short, long, value_name = "FILE")]
+    #[arg(short, long, value_name = "FILE", global = true)]
     config: Option<PathBuf>,
 
     /// Enable verbose/trace output
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     verbose: bool,
 
     /// Enable debug output
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     debug: bool,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -122,7 +122,7 @@ fn load_config(path: Option<&PathBuf>) -> Result<Option<VpnConfig>, Box<dyn std:
     if let Some(path) = path {
         let content = std::fs::read_to_string(&path)?;
         let config: VpnConfig = serde_json::from_str(&content)?;
-        info!("Loaded config from {:?}", path);
+        info!("Loaded configuration from {:?}", path);
         Ok(Some(config))
     } else {
         Ok(None)
@@ -148,7 +148,18 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Load config file if provided
     let file_config = load_config(cli.config.as_ref())?;
 
-    match cli.command {
+    // Default to Connect if no command specified
+    let command = cli.command.unwrap_or(Commands::Connect {
+        server: None,
+        port: None,
+        hub: None,
+        username: None,
+        password_hash: None,
+        no_tls: false,
+        verify_tls: false,
+    });
+
+    match command {
         Commands::Hash { username, password } => {
             // Get password (prompt if not provided)
             let password = password.unwrap_or_else(prompt_password);

@@ -44,7 +44,7 @@ Binary location: `target/release/vpnclient`
 # 3. Edit config.json with your server details and password hash
 
 # 4. Connect
-sudo ./vpnclient connect -c config.json -v
+sudo ./vpnclient -c config.json
 ```
 
 ## Usage

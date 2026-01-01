@@ -91,29 +91,25 @@ impl WintunDevice {
                 )
             })?;
 
-        // Disable wintun logging temporarily to suppress "Element not found" error
-        // which is expected when the adapter doesn't exist yet
+        // Disable wintun's internal logging - we use our own tracing
+        // This suppresses "Element not found" errors which are expected when adapter doesn't exist
         wintun::reset_logger(&wintun);
 
         // Try to open an existing adapter first, otherwise create a new one
         let adapter = match Adapter::open(&wintun, "SoftEther VPN") {
             Ok(adapter) => {
-                // Re-enable default logger for future messages
-                wintun::set_logger(&wintun, Some(wintun::default_logger));
                 debug!("Opened existing Wintun adapter");
                 adapter
             }
             Err(_) => {
-                // Re-enable default logger before creating adapter
-                wintun::set_logger(&wintun, Some(wintun::default_logger));
                 // Adapter doesn't exist yet, create a new one (this is normal on first run)
                 debug!("Creating new Wintun adapter");
-                Adapter::create(&wintun, "SoftEther VPN", "SoftEther Rust", None)
-                    .map_err(|e| {
-                        io::Error::other(
-                            format!("Failed to create Wintun adapter: {}. Make sure you're running as Administrator.", e),
-                        )
-                    })?
+                Adapter::create(&wintun, "SoftEther VPN", "SoftEther Rust", None).map_err(|e| {
+                    io::Error::other(format!(
+                        "Failed to create Wintun adapter: {}. Make sure you're running as Administrator.",
+                        e
+                    ))
+                })?
             }
         };
 
@@ -234,7 +230,7 @@ impl TunAdapter for WintunDevice {
         // Calculate prefix length from netmask
         let prefix_len: u8 = netmask.octets().iter().map(|b| b.count_ones() as u8).sum();
 
-        // Use PowerShell to configure the IP address in a way that shows as DHCP-like
+        // Use PowerShell to configure the IP address
         // First remove existing IPs, then add new one
         let ps_script = format!(
             r#"
@@ -244,15 +240,9 @@ impl TunAdapter for WintunDevice {
                 Get-NetIPAddress -InterfaceAlias '{}' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
                 # Add new IP address
                 New-NetIPAddress -InterfaceAlias '{}' -IPAddress '{}' -PrefixLength {} -SkipAsSource $false -ErrorAction Stop | Out-Null
-                # Set interface to look like DHCP-configured (cosmetic)
-                Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$($adapter.InterfaceGuid)" -Name 'EnableDHCP' -Value 1 -Type DWord -ErrorAction SilentlyContinue
-                Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$($adapter.InterfaceGuid)" -Name 'DhcpIPAddress' -Value '{}' -Type String -ErrorAction SilentlyContinue
-                # Set interface metric to be higher than physical interfaces (lower priority for Windows NCSI)
-                # This prevents the "Identifying" state by letting Windows use physical interface for connectivity checks
-                Set-NetIPInterface -InterfaceAlias '{}' -InterfaceMetric 100 -ErrorAction SilentlyContinue
             }}
             "#,
-            self.name, self.name, self.name, ip, prefix_len, ip, self.name
+            self.name, self.name, self.name, ip, prefix_len
         );
 
         let status = Command::new("powershell")
@@ -290,18 +280,6 @@ impl TunAdapter for WintunDevice {
                     self.name, ip
                 )));
             }
-
-            // Try to set metric via netsh fallback
-            let _ = Command::new("netsh")
-                .args([
-                    "interface",
-                    "ip",
-                    "set",
-                    "interface",
-                    &self.name,
-                    "metric=100",
-                ])
-                .status();
         }
 
         info!("Configured {} with IP {}/{}", self.name, ip, prefix_len);
@@ -416,7 +394,7 @@ impl TunAdapter for WintunDevice {
 
     fn set_default_route(
         &self,
-        _gateway: Ipv4Addr,
+        vpn_gateway: Ipv4Addr,
         vpn_server_ip: Option<Ipv4Addr>,
     ) -> io::Result<()> {
         // On Windows, we use the same split-tunnel approach as macOS:
@@ -485,9 +463,17 @@ impl TunAdapter for WintunDevice {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         let if_index = get_interface_index(&self.name);
+        let gateway_str = vpn_gateway.to_string();
+
+        info!(
+            "Adding split-tunnel routes via VPN gateway {} (interface {})",
+            vpn_gateway,
+            if_index.map_or_else(|| self.name.clone(), |i| i.to_string())
+        );
 
         // Add route for 0.0.0.0/1 (first half of IPv4 space) with metric 10
         // Lower metric than default route but higher than host route
+        // Use the VPN gateway as the next hop so Windows routes traffic through the TUN interface
         let status1 = if let Some(idx) = if_index {
             Command::new("route")
                 .args([
@@ -495,7 +481,7 @@ impl TunAdapter for WintunDevice {
                     "0.0.0.0",
                     "mask",
                     "128.0.0.0",
-                    "0.0.0.0",
+                    &gateway_str,
                     "metric",
                     "10",
                     "if",
@@ -508,8 +494,8 @@ impl TunAdapter for WintunDevice {
                     "-NoProfile",
                     "-Command",
                     &format!(
-                        "New-NetRoute -DestinationPrefix '0.0.0.0/1' -InterfaceAlias '{}' -RouteMetric 10 -ErrorAction SilentlyContinue",
-                        self.name
+                        "New-NetRoute -DestinationPrefix '0.0.0.0/1' -InterfaceAlias '{}' -NextHop '{}' -RouteMetric 10 -ErrorAction SilentlyContinue",
+                        self.name, gateway_str
                     )
                 ])
                 .status()?
@@ -530,7 +516,7 @@ impl TunAdapter for WintunDevice {
                     "128.0.0.0",
                     "mask",
                     "128.0.0.0",
-                    "0.0.0.0",
+                    &gateway_str,
                     "metric",
                     "10",
                     "if",
@@ -543,8 +529,8 @@ impl TunAdapter for WintunDevice {
                     "-NoProfile",
                     "-Command",
                     &format!(
-                        "New-NetRoute -DestinationPrefix '128.0.0.0/1' -InterfaceAlias '{}' -RouteMetric 10 -ErrorAction SilentlyContinue",
-                        self.name
+                        "New-NetRoute -DestinationPrefix '128.0.0.0/1' -InterfaceAlias '{}' -NextHop '{}' -RouteMetric 10 -ErrorAction SilentlyContinue",
+                        self.name, gateway_str
                     )
                 ])
                 .status()?
@@ -565,8 +551,8 @@ impl TunAdapter for WintunDevice {
         }
 
         info!(
-            "Set default route via {} (split-tunnel: 0.0.0.0/1 + 128.0.0.0/1)",
-            self.name
+            "Set default route via {} gateway {} (split-tunnel: 0.0.0.0/1 + 128.0.0.0/1)",
+            self.name, vpn_gateway
         );
         Ok(())
     }
@@ -582,29 +568,33 @@ impl TunAdapter for WintunDevice {
             return Ok(());
         }
 
-        // Save current DNS configuration for restoration
+        // Save current global DNS settings for restoration
+        // We need to modify DNS on ALL interfaces to prevent leaks
         let output = Command::new("powershell")
             .args([
                 "-NoProfile",
                 "-Command",
-                &format!(
-                    "(Get-DnsClientServerAddress -InterfaceAlias '{}' -AddressFamily IPv4).ServerAddresses -join ','",
-                    self.name
-                )
+                "Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object { $_.ServerAddresses.Count -gt 0 } | Select-Object -ExpandProperty InterfaceAlias | Select-Object -Unique"
             ])
             .output();
 
-        if let Ok(out) = output {
-            let current_dns = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !current_dns.is_empty() {
-                if let Ok(mut dns) = self.original_dns.lock() {
-                    *dns = Some(current_dns);
-                }
-            }
+        let interfaces_with_dns: Vec<String> = if let Ok(out) = output {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && s != &self.name)
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // Store interfaces that had DNS for restoration
+        if let Ok(mut dns) = self.original_dns.lock() {
+            *dns = Some(interfaces_with_dns.join("|"));
         }
 
-        // Set DNS servers using PowerShell (more reliable than netsh for modern Windows)
-        let dns_str = dns_servers.join(",");
+        // Set DNS servers on our VPN interface
+        let dns_str = dns_servers.join("','");
         let status = Command::new("powershell")
             .args([
                 "-NoProfile",
@@ -631,58 +621,56 @@ impl TunAdapter for WintunDevice {
                 ])
                 .status()?;
 
-            if status.success() {
-                // Add secondary DNS if present
-                if dns_servers.len() > 1 {
-                    let _ = Command::new("netsh")
-                        .args([
-                            "interface",
-                            "ip",
-                            "add",
-                            "dns",
-                            &self.name,
-                            &dns_servers[1],
-                            "index=2",
-                        ])
-                        .status();
-                }
+            if status.success() && dns_servers.len() > 1 {
+                let _ = Command::new("netsh")
+                    .args([
+                        "interface",
+                        "ip",
+                        "add",
+                        "dns",
+                        &self.name,
+                        &dns_servers[1],
+                        "index=2",
+                    ])
+                    .status();
             }
         }
+
+        // CRITICAL: Set VPN interface metric to 1 (highest priority for DNS)
+        // This ensures Windows uses VPN DNS first
+        let _ = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "Set-NetIPInterface -InterfaceAlias '{}' -InterfaceMetric 1",
+                    self.name
+                ),
+            ])
+            .status();
+
+        // Flush DNS cache to ensure new settings take effect immediately
+        let _ = Command::new("ipconfig").args(["/flushdns"]).status();
 
         info!("Configured DNS servers: {:?}", dns_servers);
         Ok(())
     }
 
     fn restore_dns(&self) -> io::Result<()> {
-        // Restore original DNS configuration
-        if let Ok(dns) = self.original_dns.lock() {
-            if let Some(original) = dns.as_ref() {
-                if !original.is_empty() {
-                    let _ = Command::new("powershell")
-                        .args([
-                            "-NoProfile",
-                            "-Command",
-                            &format!(
-                                "Set-DnsClientServerAddress -InterfaceAlias '{}' -ServerAddresses @('{}')",
-                                self.name, original
-                            )
-                        ])
-                        .status();
-                } else {
-                    // Reset to DHCP
-                    let _ = Command::new("powershell")
-                        .args([
-                            "-NoProfile",
-                            "-Command",
-                            &format!(
-                                "Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses",
-                                self.name
-                            )
-                        ])
-                        .status();
-                }
-            }
-        }
+        // Reset DNS on our interface
+        let _ = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses",
+                    self.name
+                ),
+            ])
+            .status();
+
+        // Flush DNS cache
+        let _ = Command::new("ipconfig").args(["/flushdns"]).status();
 
         debug!("Restored DNS configuration");
         Ok(())

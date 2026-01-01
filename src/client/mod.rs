@@ -84,6 +84,31 @@ impl VpnClient {
 
     /// Connect to the VPN server and run the tunnel.
     pub async fn connect(&mut self) -> Result<()> {
+        const MAX_USER_IN_USE_RETRIES: u32 = 5;
+        const RETRY_DELAY_SECS: u64 = 10;
+
+        for attempt in 1..=MAX_USER_IN_USE_RETRIES {
+            match self.connect_inner().await {
+                Ok(()) => return Ok(()),
+                Err(Error::UserAlreadyLoggedIn) => {
+                    if attempt < MAX_USER_IN_USE_RETRIES {
+                        warn!(
+                            "User already logged in (session in use). Waiting {}s for old session to expire... (attempt {}/{})",
+                            RETRY_DELAY_SECS, attempt, MAX_USER_IN_USE_RETRIES
+                        );
+                        tokio::time::sleep(Duration::from_secs(RETRY_DELAY_SECS)).await;
+                    } else {
+                        return Err(Error::UserAlreadyLoggedIn);
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(Error::UserAlreadyLoggedIn)
+    }
+
+    /// Inner connect implementation (for retry logic).
+    async fn connect_inner(&mut self) -> Result<()> {
         self.state = VpnState::Connecting;
         self.running.store(true, Ordering::SeqCst);
 
@@ -541,6 +566,10 @@ impl VpnClient {
 
                     // Check for errors
                     if result.error > 0 {
+                        // Error code 20 = user already logged in
+                        if result.error == 20 {
+                            return Err(Error::UserAlreadyLoggedIn);
+                        }
                         return Err(Error::AuthenticationFailed(format!(
                             "Authentication error code: {}",
                             result.error
