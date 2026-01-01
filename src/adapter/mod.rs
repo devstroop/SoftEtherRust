@@ -41,6 +41,11 @@ pub trait TunAdapter: Send + Sync {
     /// Write a packet to the device.
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize>;
 
+    /// Get the raw file descriptor (Unix) or handle (Windows).
+    /// This is used for polling in the data loop.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn raw_fd(&self) -> std::os::fd::RawFd;
+
     /// Set the device MTU.
     fn set_mtu(&mut self, mtu: u16) -> std::io::Result<()>;
 

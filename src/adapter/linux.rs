@@ -177,6 +177,10 @@ impl TunAdapter for TunDevice {
         &self.name
     }
 
+    fn raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = unsafe {
             read(
