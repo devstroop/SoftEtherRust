@@ -1,52 +1,20 @@
-name: CI
+name: Release
 
 on:
   push:
-    branches: [master]
-  pull_request:
-    branches: [master]
-  workflow_dispatch:
+    tags:
+      - 'v*'
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
+
+permissions:
+  contents: write
 
 jobs:
-  # Check formatting and lints
-  check:
-    name: Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-check-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-check-
-      
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-  # Build and test on multiple platforms
-  build:
+  # Build desktop binaries
+  build-desktop:
     name: Build (${{ matrix.name }})
-    needs: [check]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -64,11 +32,9 @@ jobs:
           - name: windows-x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            can_test: true
           - name: windows-arm64
             os: windows-latest
             target: aarch64-pc-windows-msvc
-            can_test: false
 
     steps:
       - uses: actions/checkout@v4
@@ -87,9 +53,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ matrix.target }}-cargo-
+            ${{ runner.os }}-${{ matrix.target }}-cargo-release-
       
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -97,20 +63,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake
       
-      - name: Cache Windows dependencies
-        if: runner.os == 'Windows'
-        uses: actions/cache@v4
-        id: windows-deps-cache
-        with:
-          path: |
-            C:\ProgramData\chocolatey\lib\cmake*
-            C:\ProgramData\chocolatey\lib\nasm*
-            C:\Program Files\CMake
-            C:\Program Files\NASM
-          key: windows-deps-cmake-nasm-v1
-      
       - name: Install Windows dependencies
-        if: runner.os == 'Windows' && steps.windows-deps-cache.outputs.cache-hit != 'true'
+        if: runner.os == 'Windows'
         run: choco install cmake nasm -y
       
       - name: Add NASM to PATH
@@ -120,14 +74,35 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
       
-      - name: Run tests
-        if: matrix.can_test != false
-        run: cargo test --release --target ${{ matrix.target }}
+      - name: Package binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/vpnclient dist/
+          cp config.example.json dist/
+          cp README.md dist/
+          tar -czvf vpnclient-${{ matrix.name }}.tar.gz -C dist .
+      
+      - name: Package binary (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item target/${{ matrix.target }}/release/vpnclient.exe dist/
+          Copy-Item config.example.json dist/
+          Copy-Item README.md dist/
+          Compress-Archive -Path dist/* -DestinationPath vpnclient-${{ matrix.name }}.zip
+      
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            vpnclient-${{ matrix.name }}.tar.gz
+            vpnclient-${{ matrix.name }}.zip
+          draft: true
 
-  # Build iOS (verify it compiles)
+  # Build iOS library
   build-ios:
     name: Build (ios)
-    needs: [check]
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -146,17 +121,40 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: macos-ios-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: macos-ios-cargo-release-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            macos-ios-cargo-
+            macos-ios-cargo-release-
       
       - name: Build iOS
         run: cargo build --release --target aarch64-apple-ios --features ffi
+      
+      - name: Create XCFramework
+        run: |
+          mkdir -p target/ios
+          cp target/aarch64-apple-ios/release/libsoftether.a target/ios/
+          rm -rf target/ios/SoftEtherVPN.xcframework
+          xcodebuild -create-xcframework \
+            -library target/ios/libsoftether.a -headers include \
+            -output target/ios/SoftEtherVPN.xcframework
+      
+      - name: Package iOS framework
+        run: |
+          mkdir -p dist/libsoftether-ios
+          cp -r target/ios/SoftEtherVPN.xcframework dist/libsoftether-ios/
+          cp -r include dist/libsoftether-ios/
+          cp FFI_GUIDE.md dist/libsoftether-ios/
+          cp -r examples/ios dist/libsoftether-ios/examples
+          cd dist && zip -r ../libsoftether-ios.zip libsoftether-ios
+      
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: libsoftether-ios.zip
+          draft: true
 
-  # Build Android (verify it compiles)
+  # Build Android library
   build-android:
     name: Build (android)
-    needs: [check]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -175,9 +173,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: linux-android-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: linux-android-cargo-release-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            linux-android-cargo-
+            linux-android-cargo-release-
       
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
@@ -217,4 +215,38 @@ jobs:
           CC_i686_linux_android: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android21-clang
           AR_i686_linux_android: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
         run: cargo build --release --target i686-linux-android --features ffi,jni
+      
+      - name: Package Android libraries
+        run: |
+          mkdir -p dist/libsoftether-android/jniLibs/arm64-v8a
+          mkdir -p dist/libsoftether-android/jniLibs/armeabi-v7a
+          mkdir -p dist/libsoftether-android/jniLibs/x86_64
+          mkdir -p dist/libsoftether-android/jniLibs/x86
+          cp target/aarch64-linux-android/release/libsoftether.so dist/libsoftether-android/jniLibs/arm64-v8a/
+          cp target/armv7-linux-androideabi/release/libsoftether.so dist/libsoftether-android/jniLibs/armeabi-v7a/
+          cp target/x86_64-linux-android/release/libsoftether.so dist/libsoftether-android/jniLibs/x86_64/
+          cp target/i686-linux-android/release/libsoftether.so dist/libsoftether-android/jniLibs/x86/
+          cp -r include dist/libsoftether-android/
+          cp FFI_GUIDE.md dist/libsoftether-android/
+          cp -r examples/android dist/libsoftether-android/examples
+          cd dist && zip -r ../libsoftether-android.zip libsoftether-android
+      
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: libsoftether-android.zip
+          draft: true
 
+  # Finalize release after all builds complete
+  finalize:
+    name: Finalize Release
+    needs: [build-desktop, build-ios, build-android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Generate release notes
+        uses: softprops/action-gh-release@v1
+        with:
+          draft: true
+          generate_release_notes: true
