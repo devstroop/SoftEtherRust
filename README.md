@@ -355,5 +355,5 @@ Apache License 2.0
 ## Related Projects
 
 - [SoftEther VPN](https://www.softether.org/) — Official SoftEther VPN Project
-- [SoftEtherSwift](../SoftEtherSwift) — Swift implementation
-- [SoftEtherZig](../SoftEtherZig) — Zig implementation
+- [SoftEtherSwift](https://github.com/devstroop/SoftEtherSwift) — Swift implementation
+- [SoftEtherZig](https://github.com/devstroop/SoftEtherZig) — Zig implementation

@@ -52,20 +52,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: ubuntu
+          - name: linux-x64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - name: macos-intel
+          - name: macos-x64
             os: macos-15-intel
             target: x86_64-apple-darwin
-          - name: macos-arm
+          - name: macos-arm64
             os: macos-latest
             target: aarch64-apple-darwin
-          - name: windows
+          - name: windows-x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
             can_test: true
-          - name: windows-arm
+          - name: windows-arm64
             os: windows-latest
             target: aarch64-pc-windows-msvc
             can_test: false
@@ -126,13 +126,31 @@ jobs:
         if: matrix.can_test != false
         run: cargo test --release --target ${{ matrix.target }}
       
+      - name: Package binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/vpnclient dist/
+          cp config.example.json dist/
+          cp README.md dist/
+          tar -czvf vpnclient-${{ matrix.name }}.tar.gz -C dist .
+      
+      - name: Package binary (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item target/${{ matrix.target }}/release/vpnclient.exe dist/
+          Copy-Item config.example.json dist/
+          Copy-Item README.md dist/
+          Compress-Archive -Path dist/* -DestinationPath vpnclient-${{ matrix.name }}.zip
+      
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: vpnclient-${{ matrix.target }}
+          name: vpnclient-${{ matrix.name }}
           path: |
-            target/${{ matrix.target }}/release/vpnclient
-            target/${{ matrix.target }}/release/vpnclient.exe
+            vpnclient-${{ matrix.name }}.tar.gz
+            vpnclient-${{ matrix.name }}.zip
 
   # Build for iOS (macOS runner only)
   build-ios:
@@ -172,11 +190,20 @@ jobs:
             -library target/ios/libsoftether.a -headers include \
             -output target/ios/SoftEtherVPN.xcframework
       
+      - name: Package iOS framework
+        run: |
+          mkdir -p dist/libsoftether-ios
+          cp -r target/ios/SoftEtherVPN.xcframework dist/libsoftether-ios/
+          cp -r include dist/libsoftether-ios/
+          cp FFI_GUIDE.md dist/libsoftether-ios/
+          cp -r examples/ios dist/libsoftether-ios/examples
+          cd dist && zip -r ../libsoftether-ios.zip libsoftether-ios
+      
       - name: Upload iOS framework
         uses: actions/upload-artifact@v4
         with:
           name: libsoftether-ios
-          path: target/ios/SoftEtherVPN.xcframework
+          path: libsoftether-ios.zip
 
   # Build for Android
   build-android:
@@ -245,20 +272,24 @@ jobs:
       
       - name: Package Android libraries
         run: |
-          mkdir -p target/android/jniLibs/arm64-v8a
-          mkdir -p target/android/jniLibs/armeabi-v7a
-          mkdir -p target/android/jniLibs/x86_64
-          mkdir -p target/android/jniLibs/x86
-          cp target/aarch64-linux-android/release/libsoftether.so target/android/jniLibs/arm64-v8a/
-          cp target/armv7-linux-androideabi/release/libsoftether.so target/android/jniLibs/armeabi-v7a/
-          cp target/x86_64-linux-android/release/libsoftether.so target/android/jniLibs/x86_64/
-          cp target/i686-linux-android/release/libsoftether.so target/android/jniLibs/x86/
+          mkdir -p dist/libsoftether-android/jniLibs/arm64-v8a
+          mkdir -p dist/libsoftether-android/jniLibs/armeabi-v7a
+          mkdir -p dist/libsoftether-android/jniLibs/x86_64
+          mkdir -p dist/libsoftether-android/jniLibs/x86
+          cp target/aarch64-linux-android/release/libsoftether.so dist/libsoftether-android/jniLibs/arm64-v8a/
+          cp target/armv7-linux-androideabi/release/libsoftether.so dist/libsoftether-android/jniLibs/armeabi-v7a/
+          cp target/x86_64-linux-android/release/libsoftether.so dist/libsoftether-android/jniLibs/x86_64/
+          cp target/i686-linux-android/release/libsoftether.so dist/libsoftether-android/jniLibs/x86/
+          cp -r include dist/libsoftether-android/
+          cp FFI_GUIDE.md dist/libsoftether-android/
+          cp -r examples/android dist/libsoftether-android/examples
+          cd dist && zip -r ../libsoftether-android.zip libsoftether-android
       
       - name: Upload Android libraries
         uses: actions/upload-artifact@v4
         with:
           name: libsoftether-android
-          path: target/android/jniLibs
+          path: libsoftether-android.zip
 
   # Create release
   release:
@@ -276,22 +307,20 @@ jobs:
         with:
           path: artifacts
       
-      - name: Package releases
+      - name: List artifacts
+        run: find artifacts -type f
+      
+      - name: Prepare release assets
         run: |
-          cd artifacts
-          for dir in vpnclient-*; do
-            if [ -d "$dir" ]; then
-              tar -czvf "${dir}.tar.gz" "$dir"
-            fi
-          done
-          zip -r libsoftether-ios.zip libsoftether-ios
-          zip -r libsoftether-android.zip libsoftether-android
+          mkdir -p release
+          # Move all archives to release folder
+          find artifacts -name "*.tar.gz" -exec mv {} release/ \;
+          find artifacts -name "*.zip" -exec mv {} release/ \;
+          ls -la release/
       
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: |
-            artifacts/*.tar.gz
-            artifacts/*.zip
+          files: release/*
           draft: true
           generate_release_notes: true
