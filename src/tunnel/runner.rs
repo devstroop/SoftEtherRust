@@ -719,7 +719,7 @@ impl TunnelRunner {
     fn process_frame_zerocopy(
         &self,
         tun_fd: i32,
-        tun_buf: &mut [u8],
+        _tun_buf: &mut [u8],
         arp: &mut ArpHandler,
         frame: &[u8],
         our_ip: Ipv4Addr,

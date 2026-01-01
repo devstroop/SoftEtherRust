@@ -1,7 +1,7 @@
 //! Linux TUN device implementation.
 
 use std::ffi::CStr;
-use std::io::{self, Read, Write};
+use std::io;
 use std::net::Ipv4Addr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::process::Command;
@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use libc::{
     c_char, c_int, c_short, c_void, close, ioctl, open, read, write,
-    sockaddr, sockaddr_in, socket, AF_INET, IFF_NO_PI, IFF_TUN,
+    sockaddr_in, socket, AF_INET, IFF_NO_PI, IFF_TUN,
     O_RDWR, SOCK_DGRAM,
 };
 use tracing::{debug, info, warn};
@@ -317,7 +317,7 @@ impl TunAdapter for TunDevice {
         let status = Command::new("ip")
             .args([
                 "route",
-                "add",
+                "replace",
                 &format!("{}/{}", dest, prefix_len),
                 "via",
                 &gateway.to_string(),
@@ -327,7 +327,7 @@ impl TunAdapter for TunDevice {
             .status()?;
 
         if !status.success() {
-            warn!("Failed to add route to {}/{}", dest, prefix_len);
+            warn!("Failed to add/replace route to {}/{}", dest, prefix_len);
         } else {
             debug!("Added route: {}/{} via {}", dest, prefix_len, gateway);
         }
@@ -340,7 +340,7 @@ impl TunAdapter for TunDevice {
         let status = Command::new("ip")
             .args([
                 "route",
-                "add",
+                "replace",
                 &route_str,
                 "dev",
                 &self.name,
@@ -348,7 +348,7 @@ impl TunAdapter for TunDevice {
             .status()?;
 
         if !status.success() {
-            warn!("Failed to add route to {} via interface {}", route_str, self.name);
+            warn!("Failed to add/replace route to {} via interface {}", route_str, self.name);
         } else {
             info!("Added route: {} via interface {}", route_str, self.name);
             if let Ok(mut routes) = self.routes_added.lock() {
@@ -401,7 +401,7 @@ impl TunAdapter for TunDevice {
         let status1 = Command::new("ip")
             .args([
                 "route",
-                "add",
+                "replace",
                 "0.0.0.0/1",
                 "dev",
                 &self.name,
@@ -411,7 +411,7 @@ impl TunAdapter for TunDevice {
         if !status1.success() {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
-                "Failed to add route 0.0.0.0/1",
+                "Failed to add/replace route 0.0.0.0/1",
             ));
         }
         if let Ok(mut routes) = self.routes_added.lock() {
@@ -422,7 +422,7 @@ impl TunAdapter for TunDevice {
         let status2 = Command::new("ip")
             .args([
                 "route",
-                "add",
+                "replace",
                 "128.0.0.0/1",
                 "dev",
                 &self.name,
@@ -439,7 +439,7 @@ impl TunAdapter for TunDevice {
             }
             return Err(io::Error::new(
                 io::ErrorKind::Other,
-                "Failed to add route 128.0.0.0/1",
+                "Failed to add/replace route 128.0.0.0/1",
             ));
         }
         if let Ok(mut routes) = self.routes_added.lock() {
