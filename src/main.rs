@@ -6,13 +6,13 @@ use std::path::PathBuf;
 use std::process;
 
 use clap::{Parser, Subcommand};
-use tracing::{error, info, warn, Level};
+use tracing::{error, info, warn};
 
 use softether::{crypto, VpnClient, VpnConfig};
 
 #[derive(Parser)]
-#[command(name = "softether-rust")]
-#[command(author = "Devstroop Team (devstroop.com)")]
+#[command(name = "softether")]
+#[command(author = "Devstroop Technologies (devstroop.com)")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "A high-performance SoftEther VPN client", long_about = None)]
 struct Cli {
@@ -91,16 +91,23 @@ enum Commands {
 }
 
 fn init_logging(verbose: bool, debug: bool) {
+    use tracing_subscriber::filter::EnvFilter;
+
     let level = if debug {
-        Level::DEBUG
+        "debug"
     } else if verbose {
-        Level::TRACE
+        "trace"
     } else {
-        Level::INFO
+        "info"
     };
 
+    // Filter out wintun's "Element not found" errors which are expected
+    // when checking for existing adapters
+    let filter = EnvFilter::try_new(format!("{},wintun=off", level))
+        .unwrap_or_else(|_| EnvFilter::new(level));
+
     tracing_subscriber::fmt()
-        .with_max_level(level)
+        .with_env_filter(filter)
         .with_target(false)
         .init();
 }

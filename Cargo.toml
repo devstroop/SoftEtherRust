@@ -1,8 +1,8 @@
 [package]
-name = "softether-rust"
+name = "softether"
 version = "0.1.0"
 edition = "2021"
-authors = ["SoftEther Rust Contributors"]
+authors = ["Devstroop Technologies (devstroop.com)"]
 description = "A high-performance SoftEther VPN client written in Rust"
 license = "Apache-2.0"
 repository = "https://github.com/yourusername/SoftEtherRust"
@@ -24,8 +24,8 @@ jni = ["ffi"]
 tokio = { version = "1.44", features = ["full", "rt-multi-thread", "sync", "time", "io-util", "net", "macros"] }
 
 # TLS support
-tokio-rustls = "0.26"
-rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2.2"
 webpki-roots = "0.26"
 

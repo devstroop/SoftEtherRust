@@ -1,5 +1,5 @@
 # cbindgen configuration for generating C headers
-# Run: cbindgen --config cbindgen.toml --crate softether-rust --output include/SoftEtherVPN_generated.h
+# Run: cbindgen --config cbindgen.toml --crate softether --output include/SoftEtherVPN_generated.h
 
 [defines]
 "feature = ffi" = "SOFTETHER_FFI"
@@ -27,7 +27,7 @@ include = ["softether-vpn"]
 extra_bindings = []
 
 [parse.expand]
-crates = ["softether-rust"]
+crates = ["softether"]
 all_features = false
 default_features = false
 features = ["ffi"]

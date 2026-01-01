@@ -88,7 +88,7 @@ generate_headers() {
     fi
     
     # Generate header
-    cbindgen --config cbindgen.toml --crate softether-rust --output include/SoftEtherVPN_generated.h 2>/dev/null || true
+    cbindgen --config cbindgen.toml --crate softether --output include/SoftEtherVPN_generated.h 2>/dev/null || true
     
     log_info "Headers generated in include/"
 }
