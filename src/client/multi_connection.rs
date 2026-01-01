@@ -395,6 +395,7 @@ impl ConnectionManager {
     }
     
     /// Write data using an appropriate send connection.
+    /// Flushes immediately to minimize latency for VPN traffic.
     pub async fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
         // Select a send-capable connection
         let idx = {
@@ -417,6 +418,7 @@ impl ConnectionManager {
         
         let conn = &mut self.connections[idx];
         conn.conn.write_all(buf).await?;
+        conn.conn.flush().await?; // Flush immediately for low latency
         conn.bytes_sent += buf.len() as u64;
         conn.touch();
         Ok(())

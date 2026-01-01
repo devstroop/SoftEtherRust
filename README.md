@@ -1,4 +1,4 @@
-# SoftEther VPN Client for Rust
+# SoftEther VPN Client (Rust)
 
 A high-performance, fully async SoftEther VPN client implementation in Rust.
 
