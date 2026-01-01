@@ -21,7 +21,7 @@ use crate::adapter::TunAdapter;
 use crate::adapter::UtunDevice;
 #[cfg(target_os = "linux")]
 use crate::adapter::TunDevice;
-use crate::client::{VpnConnection, ConnectionManager};
+use crate::client::{VpnConnection, ConnectionManager, ConcurrentReader};
 use crate::error::{Error, Result};
 use crate::protocol::{TunnelCodec, is_compressed, decompress, decompress_into, compress};
 
@@ -1001,6 +1001,9 @@ impl TunnelRunner {
     }
 
     /// Run the main data forwarding loop with multi-connection support.
+    ///
+    /// Uses ConcurrentReader for receive-only connections (half-connection mode),
+    /// and also handles bidirectional connections directly in the main loop.
     async fn run_data_loop_multi(
         &self,
         conn_mgr: &mut ConnectionManager,
@@ -1011,22 +1014,27 @@ impl TunnelRunner {
         let gateway = dhcp_config.gateway.unwrap_or(dhcp_config.ip);
         state.configure(dhcp_config.ip, gateway);
 
-        // One codec per connection (for stateful frame parsing)
-        let num_conns = conn_mgr.connection_count();
-        let mut codecs: Vec<TunnelCodec> = (0..num_conns).map(|_| TunnelCodec::new()).collect();
+        // Get the total number of connections before extraction
+        let total_conns = conn_mgr.connection_count();
         
-        // Get receive connection indices
-        let recv_conn_indices: Vec<usize> = conn_mgr.all_connections().iter()
-            .enumerate()
-            .filter(|(_, c)| c.direction.can_recv())
-            .map(|(i, _)| i)
-            .collect();
+        // Extract receive-only connections for concurrent reading.
+        // Bidirectional connections stay in conn_mgr for both send AND receive.
+        let recv_conns = conn_mgr.take_recv_connections();
+        let num_recv = recv_conns.len();
+        let num_bidir = conn_mgr.connection_count(); // Bidirectional connections remaining
         
-        let num_recv = recv_conn_indices.len();
-        // One buffer per receive connection
-        let mut recv_bufs: Vec<Vec<u8>> = (0..num_recv).map(|_| vec![0u8; 65536]).collect();
-        // Track current polling index for round-robin
-        let mut poll_start_idx = 0;
+        // Create concurrent reader for receive-only connections (may be empty!)
+        let mut concurrent_reader = if !recv_conns.is_empty() {
+            Some(ConcurrentReader::new(recv_conns, 256))
+        } else {
+            None
+        };
+        
+        // One codec per original connection index for stateful frame parsing
+        let mut codecs: Vec<TunnelCodec> = (0..total_conns).map(|_| TunnelCodec::new()).collect();
+        
+        // Buffer for reading from bidirectional connections
+        let mut bidir_read_buf = vec![0u8; 8192];
         
         let mut send_buf = vec![0u8; 4096];
         let mut decomp_buf = vec![0u8; 4096];
@@ -1092,14 +1100,90 @@ impl TunnelRunner {
             }
         });
 
-        info!("Data loop started (multi-connection mode, {} connections, {} recv), press Ctrl+C to disconnect", 
-              conn_mgr.connection_count(), num_recv);
+        info!("Data loop started ({} total, {} recv-only concurrent, {} bidirectional), press Ctrl+C to disconnect", 
+              total_conns, num_recv, num_bidir);
 
         let our_ip = dhcp_config.ip;
         let use_compress = self.config.use_compress;
         let my_mac = self.mac;
 
         while self.running.load(Ordering::SeqCst) {
+            // Helper macro to process received VPN data
+            macro_rules! process_vpn_data {
+                ($conn_idx:expr, $data:expr) => {{
+                    match codecs.get_mut($conn_idx).map(|c| c.feed($data)) {
+                        Some(Ok(frames)) => {
+                            for frame in frames {
+                                if frame.is_keepalive() {
+                                    debug!("Received keepalive on conn {}", $conn_idx);
+                                    continue;
+                                }
+                                
+                                if let Some(packets) = frame.packets() {
+                                    for packet in packets {
+                                        let frame_data: &[u8] = if is_compressed(packet) {
+                                            match decompress_into(packet, &mut decomp_buf) {
+                                                Ok(len) => &decomp_buf[..len],
+                                                Err(_) => continue,
+                                            }
+                                        } else {
+                                            packet
+                                        };
+                                        
+                                        if let Err(e) = self.process_frame_zerocopy(
+                                            tun_fd,
+                                            &mut tun_write_buf,
+                                            &mut arp,
+                                            frame_data,
+                                            our_ip,
+                                        ) {
+                                            error!("Process error: {}", e);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Some(Err(e)) => {
+                            error!("Decode error on conn {}: {}", $conn_idx, e);
+                        }
+                        None => {}
+                    }
+                    
+                    // Send any pending ARP replies
+                    if let Some(reply) = arp.build_pending_reply() {
+                        if let Err(e) = self.send_frame_multi(conn_mgr, &reply, &mut send_buf).await {
+                            error!("Failed to send ARP reply: {}", e);
+                        } else {
+                            debug!("Sent ARP reply");
+                        }
+                        arp.take_pending_reply();
+                    }
+                    
+                    last_activity = Instant::now();
+                }};
+            }
+            
+            // Create futures for reading
+            // 1. Concurrent reader for receive-only connections (half-connection mode)
+            let concurrent_recv = async {
+                if let Some(ref mut reader) = concurrent_reader {
+                    reader.recv().await
+                } else {
+                    // No concurrent reader - pend forever
+                    std::future::pending().await
+                }
+            };
+            
+            // 2. Direct read from bidirectional connections in conn_mgr
+            let bidir_recv = async {
+                if num_bidir > 0 {
+                    conn_mgr.read_any(&mut bidir_read_buf).await
+                } else {
+                    // No bidirectional connections - pend forever
+                    std::future::pending::<std::io::Result<(usize, usize)>>().await
+                }
+            };
+            
             tokio::select! {
                 // Packet from TUN device (from local applications)
                 Some((len, tun_buf)) = tun_rx.recv() => {
@@ -1184,111 +1268,19 @@ impl TunnelRunner {
                     debug!("TUN -> VPN: {} bytes", ip_packet.len());
                 }
 
-                // Data from VPN connections - poll ALL receive connections with short global timeout
-                result = async {
-                    if recv_conn_indices.is_empty() {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                        return Ok::<Option<(usize, usize)>, std::io::Error>(None);
-                    }
-                    
-                    // Fast round-robin poll with minimal per-connection timeout
-                    // Total cycle time should be ~1-2ms regardless of connection count
-                    let timeout_per_conn = Duration::from_micros(
-                        std::cmp::max(50, 1000 / num_recv as u64)
-                    );
-                    
-                    // Check all connections, starting from last successful one
-                    for i in 0..num_recv {
-                        let buf_idx = (poll_start_idx + i) % num_recv;
-                        let conn_idx = recv_conn_indices[buf_idx];
-                        let buf = &mut recv_bufs[buf_idx];
-                        
-                        if let Some(conn) = conn_mgr.get_mut(conn_idx) {
-                            match tokio::time::timeout(timeout_per_conn, conn.conn.read(buf)).await {
-                                Ok(Ok(n)) if n > 0 => {
-                                    // Update start index - next time start from next connection
-                                    poll_start_idx = (buf_idx + 1) % num_recv;
-                                    return Ok(Some((conn_idx, n)));
-                                }
-                                Ok(Ok(_)) => continue,
-                                Ok(Err(e)) => return Err(e),
-                                Err(_) => continue, // Timeout, try next
-                            }
-                        }
-                    }
-                    
-                    // No data on any connection
-                    Ok(None)
-                } => {
-                    match result {
-                        Ok(Some((recv_idx, n))) => {
-                            // Find buffer index
-                            let buf_idx = recv_conn_indices.iter().position(|&i| i == recv_idx).unwrap_or(0);
-                            let data = &recv_bufs[buf_idx][..n];
-                            
-                            // Update stats
-                            if let Some(conn) = conn_mgr.get_mut(recv_idx) {
-                                conn.bytes_received += n as u64;
-                                conn.touch();
-                            }
-                            
-                            // Use codec for this connection
-                            match codecs.get_mut(recv_idx).map(|c| c.feed(data)) {
-                                Some(Ok(frames)) => {
-                                    for frame in frames {
-                                        if frame.is_keepalive() {
-                                            debug!("Received keepalive");
-                                            continue;
-                                        }
-                                        
-                                        if let Some(packets) = frame.packets() {
-                                            for packet in packets {
-                                                let frame_data: &[u8] = if is_compressed(packet) {
-                                                    match decompress_into(packet, &mut decomp_buf) {
-                                                        Ok(len) => &decomp_buf[..len],
-                                                        Err(_) => continue,
-                                                    }
-                                                } else {
-                                                    packet
-                                                };
-                                                
-                                                if let Err(e) = self.process_frame_zerocopy(
-                                                    tun_fd,
-                                                    &mut tun_write_buf,
-                                                    &mut arp,
-                                                    frame_data,
-                                                    our_ip,
-                                                ) {
-                                                    error!("Process error: {}", e);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                Some(Err(e)) => {
-                                    error!("Decode error: {}", e);
-                                }
-                                None => {}
-                            }
-                            
-                            // Send any pending ARP replies
-                            if let Some(reply) = arp.build_pending_reply() {
-                                if let Err(e) = self.send_frame_multi(conn_mgr, &reply, &mut send_buf).await {
-                                    error!("Failed to send ARP reply: {}", e);
-                                } else {
-                                    debug!("Sent ARP reply");
-                                }
-                                arp.take_pending_reply();
-                            }
-                            
-                            last_activity = Instant::now();
-                        }
-                        Ok(None) => {
-                            // No data, continue
-                        }
-                        Err(e) => {
-                            error!("Network read error: {}", e);
-                            break;
+                // Data from receive-only connections via ConcurrentReader
+                Some(packet) = concurrent_recv => {
+                    let conn_idx = packet.conn_index;
+                    let data = &packet.data[..];
+                    process_vpn_data!(conn_idx, data);
+                }
+                
+                // Data from bidirectional connections (direct read)
+                result = bidir_recv => {
+                    if let Ok((conn_idx, n)) = result {
+                        if n > 0 {
+                            let data = &bidir_read_buf[..n];
+                            process_vpn_data!(conn_idx, data);
                         }
                     }
                 }
@@ -1318,7 +1310,16 @@ impl TunnelRunner {
 
         info!("Data loop ended");
         
+        // Cleanup
+        if let Some(ref mut reader) = concurrent_reader {
+            reader.shutdown();
+            let recv_stats = reader.bytes_received();
+            let total_recv: u64 = recv_stats.iter().map(|(_, b)| b).sum();
+            info!("Concurrent reader stats: {} bytes received across {} connections", 
+                  total_recv, recv_stats.len());
+        }
         tun_reader.abort();
+        
         Ok(())
     }
 }

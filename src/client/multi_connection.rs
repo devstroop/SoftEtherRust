@@ -430,6 +430,44 @@ impl ConnectionManager {
         }
     }
     
+    /// Extract receive-ONLY connections for concurrent reading.
+    ///
+    /// This removes ONLY receive-only connections (ServerToClient direction) from
+    /// the manager and returns them as (index, connection, direction) tuples for
+    /// use with ConcurrentReader.
+    ///
+    /// IMPORTANT: Bidirectional connections (Both) are NOT extracted because they
+    /// are needed for sending. Only in half-connection mode with dedicated
+    /// receive connections do we extract them.
+    ///
+    /// After calling this, bidirectional and send-only connections remain.
+    pub fn take_recv_connections(&mut self) -> Vec<(usize, super::VpnConnection, TcpDirection)> {
+        let mut recv_conns = Vec::new();
+        let mut remaining = Vec::new();
+        
+        for (i, managed) in self.connections.drain(..).enumerate() {
+            // Only extract ServerToClient (receive-only) connections.
+            // Both (bidirectional) connections must stay for sending!
+            if managed.direction == TcpDirection::ServerToClient && managed.healthy {
+                recv_conns.push((i, managed.conn, managed.direction));
+            } else {
+                remaining.push(managed);
+            }
+        }
+        
+        self.connections = remaining;
+        
+        info!("Extracted {} receive-only connections, {} connections remain for sending",
+              recv_conns.len(), self.connections.len());
+        
+        recv_conns
+    }
+    
+    /// Check if the manager still has send-capable connections.
+    pub fn has_send_connections(&self) -> bool {
+        self.connections.iter().any(|c| c.healthy && c.direction.can_send())
+    }
+    
     /// Get statistics for all connections.
     pub fn stats(&self) -> ConnectionStats {
         let mut stats = ConnectionStats {
@@ -448,6 +486,16 @@ impl ConnectionManager {
         }
         
         stats
+    }
+    
+    /// Update received bytes stats from concurrent reader.
+    pub fn update_recv_stats(&mut self, recv_stats: &[(usize, u64)]) {
+        // These stats are for extracted connections, add to total
+        for (_, bytes) in recv_stats {
+            // We don't have the connection anymore, but we can track total
+            // This is a simplification - in practice we'd track separately
+            let _ = bytes; // Stats tracked in ConcurrentReader
+        }
     }
 }
 
