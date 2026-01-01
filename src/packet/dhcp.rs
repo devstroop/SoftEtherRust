@@ -291,12 +291,8 @@ impl DhcpClient {
                     message_type = DhcpMessageType::try_from(opt_data[0]).ok();
                 }
                 c if c == DhcpOption::SubnetMask as u8 && opt_len >= 4 => {
-                    config.netmask = Ipv4Addr::new(
-                        opt_data[0],
-                        opt_data[1],
-                        opt_data[2],
-                        opt_data[3],
-                    );
+                    config.netmask =
+                        Ipv4Addr::new(opt_data[0], opt_data[1], opt_data[2], opt_data[3]);
                 }
                 c if c == DhcpOption::Router as u8 && opt_len >= 4 => {
                     config.gateway = Some(Ipv4Addr::new(
@@ -331,12 +327,8 @@ impl DhcpClient {
                     ));
                 }
                 c if c == DhcpOption::LeaseTime as u8 && opt_len >= 4 => {
-                    config.lease_time = u32::from_be_bytes([
-                        opt_data[0],
-                        opt_data[1],
-                        opt_data[2],
-                        opt_data[3],
-                    ]);
+                    config.lease_time =
+                        u32::from_be_bytes([opt_data[0], opt_data[1], opt_data[2], opt_data[3]]);
                 }
                 c if c == DhcpOption::DomainName as u8 => {
                     config.domain_name = String::from_utf8_lossy(opt_data).into_owned();
@@ -566,32 +558,32 @@ impl DhcpHandler {
             server_id: None,
         }
     }
-    
+
     /// Get the current state.
     pub fn state(&self) -> DhcpState {
         self.state
     }
-    
+
     /// Get the transaction ID.
     pub fn xid(&self) -> u32 {
         self.xid
     }
-    
+
     /// Get the configuration if configured.
     pub fn config(&self) -> Option<&DhcpConfig> {
         self.config.as_ref()
     }
-    
+
     /// Check if DHCP is fully configured.
     pub fn is_configured(&self) -> bool {
         self.state == DhcpState::Bound
     }
-    
+
     /// Check if DHCP is in progress.
     pub fn is_in_progress(&self) -> bool {
         matches!(self.state, DhcpState::DiscoverSent | DhcpState::RequestSent)
     }
-    
+
     /// Check if we should send/retry DHCP discover.
     pub fn should_send_discover(&self) -> bool {
         if self.state == DhcpState::Idle {
@@ -606,7 +598,7 @@ impl DhcpHandler {
             false
         }
     }
-    
+
     /// Check if we should send/retry DHCP request.
     pub fn should_send_request(&self) -> bool {
         if self.state != DhcpState::RequestSent {
@@ -620,7 +612,7 @@ impl DhcpHandler {
             None => true,
         }
     }
-    
+
     /// Mark that DISCOVER was sent.
     pub fn mark_discover_sent(&mut self) {
         if self.state == DhcpState::DiscoverSent {
@@ -631,7 +623,7 @@ impl DhcpHandler {
         }
         self.last_send_time = Some(Instant::now());
     }
-    
+
     /// Mark that REQUEST was sent.
     pub fn mark_request_sent(&mut self) {
         if self.state == DhcpState::RequestSent {
@@ -642,13 +634,13 @@ impl DhcpHandler {
         }
         self.last_send_time = Some(Instant::now());
     }
-    
+
     /// Record an OFFER was received.
     pub fn record_offer(&mut self, offered_ip: Ipv4Addr, server_id: Ipv4Addr) {
         self.offered_ip = Some(offered_ip);
         self.server_id = Some(server_id);
     }
-    
+
     /// Get offered IP and server ID for REQUEST.
     pub fn get_offer(&self) -> Option<(Ipv4Addr, Ipv4Addr)> {
         match (self.offered_ip, self.server_id) {
@@ -656,18 +648,18 @@ impl DhcpHandler {
             _ => None,
         }
     }
-    
+
     /// Mark that configuration is complete.
     pub fn mark_configured(&mut self, config: DhcpConfig) {
         self.state = DhcpState::Bound;
         self.config = Some(config);
     }
-    
+
     /// Mark that DHCP failed.
     pub fn mark_failed(&mut self) {
         self.state = DhcpState::Failed;
     }
-    
+
     /// Reset to initial state for retry.
     pub fn reset(&mut self) {
         self.state = DhcpState::Idle;
@@ -717,11 +709,11 @@ mod tests {
         config.ip = Ipv4Addr::new(192, 168, 1, 100);
         assert!(config.is_valid());
     }
-    
+
     // =============================================================================
     // DhcpHandler tests
     // =============================================================================
-    
+
     #[test]
     fn test_dhcp_handler_new() {
         let handler = DhcpHandler::new();
@@ -730,35 +722,35 @@ mod tests {
         assert!(!handler.is_configured());
         assert!(!handler.is_in_progress());
     }
-    
+
     #[test]
     fn test_dhcp_handler_should_send_discover() {
         let handler = DhcpHandler::new();
-        
+
         // Initial state should send
         assert!(handler.should_send_discover());
     }
-    
+
     #[test]
     fn test_dhcp_handler_mark_discover_sent() {
         let mut handler = DhcpHandler::new();
-        
+
         handler.mark_discover_sent();
         assert_eq!(handler.state(), DhcpState::DiscoverSent);
         assert!(handler.is_in_progress());
-        
+
         // Shouldn't send immediately after
         assert!(!handler.should_send_discover());
     }
-    
+
     #[test]
     fn test_dhcp_handler_configuration_flow() {
         let mut handler = DhcpHandler::new();
-        
+
         // DISCOVER
         handler.mark_discover_sent();
         assert_eq!(handler.state(), DhcpState::DiscoverSent);
-        
+
         // Record OFFER
         handler.record_offer(
             Ipv4Addr::new(192, 168, 1, 100),
@@ -769,11 +761,11 @@ mod tests {
         let (ip, server) = offer.unwrap();
         assert_eq!(ip, Ipv4Addr::new(192, 168, 1, 100));
         assert_eq!(server, Ipv4Addr::new(192, 168, 1, 1));
-        
+
         // REQUEST
         handler.mark_request_sent();
         assert_eq!(handler.state(), DhcpState::RequestSent);
-        
+
         // ACK
         let config = DhcpConfig {
             ip: Ipv4Addr::new(192, 168, 1, 100),
@@ -781,22 +773,25 @@ mod tests {
             ..Default::default()
         };
         handler.mark_configured(config);
-        
+
         assert_eq!(handler.state(), DhcpState::Bound);
         assert!(handler.is_configured());
         assert!(!handler.is_in_progress());
         assert!(handler.config().is_some());
-        assert_eq!(handler.config().unwrap().ip, Ipv4Addr::new(192, 168, 1, 100));
+        assert_eq!(
+            handler.config().unwrap().ip,
+            Ipv4Addr::new(192, 168, 1, 100)
+        );
     }
-    
+
     #[test]
     fn test_dhcp_handler_reset() {
         let mut handler = DhcpHandler::new();
         let original_xid = handler.xid();
-        
+
         handler.mark_discover_sent();
         handler.reset();
-        
+
         assert_eq!(handler.state(), DhcpState::Idle);
         // XID should change after reset
         assert_ne!(handler.xid(), original_xid);

@@ -30,7 +30,10 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for NoVerifier {
         _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
         _now: tokio_rustls::rustls::pki_types::UnixTime,
-    ) -> std::result::Result<tokio_rustls::rustls::client::danger::ServerCertVerified, tokio_rustls::rustls::Error> {
+    ) -> std::result::Result<
+        tokio_rustls::rustls::client::danger::ServerCertVerified,
+        tokio_rustls::rustls::Error,
+    > {
         Ok(tokio_rustls::rustls::client::danger::ServerCertVerified::assertion())
     }
 
@@ -39,7 +42,10 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for NoVerifier {
         _message: &[u8],
         _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
         _dss: &tokio_rustls::rustls::DigitallySignedStruct,
-    ) -> std::result::Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+    ) -> std::result::Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
         Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
     }
 
@@ -48,7 +54,10 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for NoVerifier {
         _message: &[u8],
         _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
         _dss: &tokio_rustls::rustls::DigitallySignedStruct,
-    ) -> std::result::Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+    ) -> std::result::Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
         Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
     }
 
@@ -73,14 +82,14 @@ pub enum VpnConnection {
     /// Plain TCP connection.
     Plain(TcpStream),
     /// TLS-encrypted connection.
-    Tls(TlsStream<TcpStream>),
+    Tls(Box<TlsStream<TcpStream>>),
 }
 
 impl VpnConnection {
     /// Connect to the VPN server.
     pub async fn connect(config: &VpnConfig) -> Result<Self> {
         let addr = format!("{}:{}", config.server, config.port);
-        
+
         // Resolve address
         let socket_addr = addr
             .to_socket_addrs()
@@ -103,7 +112,7 @@ impl VpnConnection {
         // SoftEther always uses TLS/HTTPS
         // Get the ring crypto provider
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        
+
         // Build TLS config
         let tls_config = if config.skip_tls_verify {
             // Accept any certificate (needed for self-signed certs)
@@ -125,7 +134,7 @@ impl VpnConnection {
         };
 
         let connector = TlsConnector::from(Arc::new(tls_config));
-        
+
         // Handle both hostname and IP address for SNI
         let server_name = if config.server.parse::<std::net::IpAddr>().is_ok() {
             // For IP addresses, use a dummy hostname for SNI
@@ -138,14 +147,14 @@ impl VpnConnection {
         };
 
         debug!("TLS connecting with SNI: {:?}", server_name);
-        
+
         let tls_stream = connector
             .connect(server_name, stream)
             .await
             .map_err(|e| Error::Tls(format!("TLS handshake failed: {}", e)))?;
 
         info!("TLS connection established");
-        Ok(VpnConnection::Tls(tls_stream))
+        Ok(VpnConnection::Tls(Box::new(tls_stream)))
     }
 
     /// Read data from the connection.

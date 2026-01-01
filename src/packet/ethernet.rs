@@ -117,21 +117,21 @@ pub fn wrap_ip_in_ethernet<'a>(
     if ip_packet.is_empty() || ip_packet.len() > MAX_MTU {
         return None;
     }
-    
+
     let total_len = HEADER_SIZE + ip_packet.len();
     if buffer.len() < total_len {
         return None;
     }
-    
+
     // Determine IP version from first nibble
     let ip_version = (ip_packet[0] >> 4) & 0x0F;
-    
+
     // Write destination MAC (bytes 0-5)
     buffer[0..6].copy_from_slice(dst_mac);
-    
+
     // Write source MAC (bytes 6-11)
     buffer[6..12].copy_from_slice(src_mac);
-    
+
     // Write EtherType (bytes 12-13)
     match ip_version {
         4 => {
@@ -144,10 +144,10 @@ pub fn wrap_ip_in_ethernet<'a>(
         }
         _ => return None,
     }
-    
+
     // Copy IP packet (bytes 14+)
     buffer[14..total_len].copy_from_slice(ip_packet);
-    
+
     Some(&buffer[..total_len])
 }
 
@@ -167,10 +167,10 @@ pub fn unwrap_ethernet_to_ip(eth_frame: &[u8]) -> Option<&[u8]> {
     if eth_frame.len() <= HEADER_SIZE {
         return None;
     }
-    
+
     let ethertype_hi = eth_frame[12];
     let ethertype_lo = eth_frame[13];
-    
+
     // Check for IPv4 (0x0800) or IPv6 (0x86DD)
     if (ethertype_hi == 0x08 && ethertype_lo == 0x00)
         || (ethertype_hi == 0x86 && ethertype_lo == 0xDD)
@@ -184,25 +184,19 @@ pub fn unwrap_ethernet_to_ip(eth_frame: &[u8]) -> Option<&[u8]> {
 /// Check if an Ethernet frame is an ARP packet.
 #[inline]
 pub fn is_arp_packet(eth_frame: &[u8]) -> bool {
-    eth_frame.len() >= HEADER_SIZE
-        && eth_frame[12] == 0x08
-        && eth_frame[13] == 0x06
+    eth_frame.len() >= HEADER_SIZE && eth_frame[12] == 0x08 && eth_frame[13] == 0x06
 }
 
 /// Check if an Ethernet frame is an IPv4 packet.
 #[inline]
 pub fn is_ipv4_packet(eth_frame: &[u8]) -> bool {
-    eth_frame.len() >= HEADER_SIZE
-        && eth_frame[12] == 0x08
-        && eth_frame[13] == 0x00
+    eth_frame.len() >= HEADER_SIZE && eth_frame[12] == 0x08 && eth_frame[13] == 0x00
 }
 
 /// Check if an Ethernet frame is an IPv6 packet.
 #[inline]
 pub fn is_ipv6_packet(eth_frame: &[u8]) -> bool {
-    eth_frame.len() >= HEADER_SIZE
-        && eth_frame[12] == 0x86
-        && eth_frame[13] == 0xDD
+    eth_frame.len() >= HEADER_SIZE && eth_frame[12] == 0x86 && eth_frame[13] == 0xDD
 }
 
 /// Get ARP operation from frame (1=request, 2=reply).

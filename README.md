@@ -44,7 +44,7 @@ Binary location: `target/release/vpnclient`
 # 3. Edit config.json with your server details and password hash
 
 # 4. Connect
-sudo ./vpnclient connect -c config.json -v
+sudo ./vpnclient -c config.json
 ```
 
 ## Usage
@@ -65,15 +65,15 @@ sudo ./vpnclient connect -c config.json -v
 sudo ./vpnclient connect [OPTIONS]
 
 Options:
-  -c, --config <FILE>      Configuration file path
-  -s, --server <HOST>      Server hostname or IP
-  -p, --port <PORT>        Server port [default: 443]
-  -H, --hub <HUB>          Virtual Hub name
-  -u, --username <USER>    Username
+  -c, --config <FILE>         Configuration file path
+  -s, --server <HOST>         Server hostname or IP
+  -p, --port <PORT>           Server port (default: 443)
+  -H, --hub <HUB>             Virtual Hub name
+  -u, --username <USER>       Username
       --password-hash <HASH>  Pre-computed password hash (40 hex chars)
-      --verify-tls         Verify TLS certificate (default: skip)
-  -v, --verbose            Enable verbose output
-  -d, --debug              Enable debug output
+      --skip-tls-verify       Verify TLS certificate 
+  -v, --verbose               Enable verbose output
+  -d, --debug                 Enable debug output
 ```
 
 ### Generate Password Hash
@@ -238,8 +238,8 @@ async fn main() -> anyhow::Result<()> {
 |  |  +-----------+  |  |  +-------+  |  +------------------------+  |
 |  |  +-----------+  |  |  | DHCP  |  |  |   ConnectionManager    |  |
 |  |  |  Tunnel   |  |  |  |Client |  |  |  +------------------+  |  |
-|  |  |  Codec    |  |  |  +-------+  |  |  |  Multi-Connection |  |  |
-|  |  +-----------+  |  |  +-------+  |  |  |     Support       |  |  |
+|  |  |  Codec    |  |  |  +-------+  |  |  | Multi-Connection |  |  |
+|  |  +-----------+  |  |  +-------+  |  |  |     Support      |  |  |
 |  +-----------------+  |  |  ARP  |  |  |  +------------------+  |  |
 |                       |  +-------+  |  +------------------------+  |
 |                       +-------------+                              |
@@ -259,31 +259,31 @@ Client                                          Server
    |                                               |
    |---- POST /vpnsvc/connect.cgi ---------------->|
    |     (VPNCONNECT signature)                    |
-   |<--- 200 OK + Hello Pack ---------------------|
+   |<--- 200 OK + Hello Pack ----------------------|
    |     (server random)                           |
    |                                               |
    |---- POST /vpnsvc/vpn.cgi -------------------->|
    |     (Auth Pack: hub, user, hashed password)   |
-   |<--- 200 OK + Auth Result --------------------|
+   |<--- 200 OK + Auth Result ---------------------|
    |     (session_key, policy, redirect?)          |
    |                                               |
-   |  +--- If Cluster Redirect ---+               |
-   |  |  Connect to redirect IP   |               |
-   |  |  Authenticate with ticket |               |
-   |  +---------------------------+               |
+   |        +--- If Cluster Redirect ---+          |
+   |        |  Connect to redirect IP   |          |
+   |        |  Authenticate with ticket |          |
+   |        +---------------------------+          |
    |                                               |
-   |<--- Block-based Tunnel Protocol ------------>|
+   |<--- Block-based Tunnel Protocol ------------->|
    |     (Ethernet frames, compressed/encrypted)   |
    |                                               |
    |---- DHCP Discover --------------------------->|
-   |<--- DHCP Offer ------------------------------|
+   |<--- DHCP Offer -------------------------------|
    |---- DHCP Request ---------------------------->|
-   |<--- DHCP Ack (IP, Gateway, DNS) -------------|
+   |<--- DHCP Ack (IP, Gateway, DNS) --------------|
    |                                               |
    |---- ARP Request (Gateway MAC) --------------->|
-   |<--- ARP Reply -------------------------------|
+   |<--- ARP Reply --------------------------------|
    |                                               |
-   |<--- Tunnel Data (L2 Ethernet Frames) ------->|
+   |<--- Tunnel Data (L2 Ethernet Frames) -------->|
    |                                               |
 ```
 
@@ -355,5 +355,5 @@ Apache License 2.0
 ## Related Projects
 
 - [SoftEther VPN](https://www.softether.org/) — Official SoftEther VPN Project
-- [SoftEtherSwift](../SoftEtherSwift) — Swift implementation
-- [SoftEtherZig](../SoftEtherZig) — Zig implementation
+- [SoftEtherSwift](https://github.com/devstroop/SoftEtherSwift) — Swift implementation
+- [SoftEtherZig](https://github.com/devstroop/SoftEtherZig) — Zig implementation

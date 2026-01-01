@@ -109,6 +109,7 @@ pub struct SoftEtherPacketBuffer {
 
 /// Statistics about the VPN connection.
 #[repr(C)]
+#[derive(Default)]
 pub struct SoftEtherStats {
     /// Bytes sent.
     pub bytes_sent: u64,
@@ -158,20 +159,6 @@ impl Default for SoftEtherSession {
             connected_server_ip: [0; 64],
             server_version: 0,
             server_build: 0,
-        }
-    }
-}
-
-impl Default for SoftEtherStats {
-    fn default() -> Self {
-        Self {
-            bytes_sent: 0,
-            bytes_received: 0,
-            packets_sent: 0,
-            packets_received: 0,
-            uptime_secs: 0,
-            active_connections: 0,
-            reconnect_count: 0,
         }
     }
 }

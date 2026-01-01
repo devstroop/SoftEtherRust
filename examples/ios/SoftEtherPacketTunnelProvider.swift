@@ -6,9 +6,9 @@
 import NetworkExtension
 import os.log
 
-class RustPacketTunnelProvider: NEPacketTunnelProvider {
+class SoftEtherPacketTunnelProvider: NEPacketTunnelProvider {
     
-    private let logger = Logger(subsystem: "com.example.vpn", category: "RustTunnel")
+    private let logger = Logger(subsystem: "com.example.vpn", category: "SoftEtherTunnel")
     private var bridge: SoftEtherBridge?
     private var pendingCompletion: ((Error?) -> Void)?
     

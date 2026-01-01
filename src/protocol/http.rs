@@ -3,9 +3,9 @@
 //! SoftEther uses HTTP/1.1 for the initial handshake before switching
 //! to the tunnel protocol.
 
+use crate::error::Result;
 use bytes::{Bytes, BytesMut};
 use std::collections::HashMap;
-use crate::error::Result;
 
 /// HTTP response from server.
 #[derive(Debug, Clone)]
@@ -94,7 +94,11 @@ impl HttpRequest {
         }
 
         // Connection header
-        let connection = self.headers.get("Connection").map(|s| s.as_str()).unwrap_or("Keep-Alive");
+        let connection = self
+            .headers
+            .get("Connection")
+            .map(|s| s.as_str())
+            .unwrap_or("Keep-Alive");
         writeln!(request, "Connection: {}\r", connection).unwrap();
 
         // Other headers
@@ -133,7 +137,9 @@ enum CodecState {
     #[default]
     StatusLine,
     Headers,
-    Body { content_length: usize },
+    Body {
+        content_length: usize,
+    },
     Complete,
 }
 
@@ -216,9 +222,7 @@ impl HttpCodec {
 
     /// Find position of \r\n in buffer.
     fn find_crlf(&self) -> Option<usize> {
-        self.buffer
-            .windows(2)
-            .position(|w| w == b"\r\n")
+        self.buffer.windows(2).position(|w| w == b"\r\n")
     }
 
     /// Take a line from the buffer (excluding \r\n).

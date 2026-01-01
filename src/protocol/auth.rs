@@ -1,12 +1,15 @@
 //! Authentication protocol for SoftEther.
 
-use bytes::Bytes;
-use std::net::IpAddr;
+use super::constants::*;
+use super::pack::Pack;
 use crate::crypto::{self, SHA0_DIGEST_LEN};
 use crate::error::{Error, Result};
-use crate::net::{UdpAccelAuthParams, UdpAccelServerResponse, UDP_ACCELERATION_COMMON_KEY_SIZE_V1, UDP_ACCELERATION_COMMON_KEY_SIZE_V2};
-use super::pack::Pack;
-use super::constants::*;
+use crate::net::{
+    UdpAccelAuthParams, UdpAccelServerResponse, UDP_ACCELERATION_COMMON_KEY_SIZE_V1,
+    UDP_ACCELERATION_COMMON_KEY_SIZE_V2,
+};
+use bytes::Bytes;
+use std::net::IpAddr;
 
 /// Authentication types supported by SoftEther.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,9 +51,9 @@ impl HelloResponse {
         }
 
         // Get random challenge
-        let random_data = pack.get_data("random").ok_or_else(|| {
-            Error::invalid_response("Missing 'random' field in Hello response")
-        })?;
+        let random_data = pack
+            .get_data("random")
+            .ok_or_else(|| Error::invalid_response("Missing 'random' field in Hello response"))?;
 
         if random_data.len() != SHA0_DIGEST_LEN {
             return Err(Error::invalid_response(format!(
@@ -157,7 +160,7 @@ impl AuthResult {
             success: true,
             error: 0,
             error_message: None,
-            session_key: pack.get_data("session_key").cloned().unwrap_or_default().into(),
+            session_key: pack.get_data("session_key").cloned().unwrap_or_default(),
             redirect: None,
             direction,
         })
@@ -166,25 +169,30 @@ impl AuthResult {
     /// Parse UDP acceleration response from the server's auth result Pack.
     ///
     /// This should be called after successful authentication to extract UDP accel params.
-    pub fn parse_udp_accel_response(pack: &Pack, remote_ip: IpAddr) -> Option<UdpAccelServerResponse> {
+    pub fn parse_udp_accel_response(
+        pack: &Pack,
+        remote_ip: IpAddr,
+    ) -> Option<UdpAccelServerResponse> {
         // Check if server supports UDP acceleration
         if pack.get_int("use_udp_acceleration").unwrap_or(0) == 0 {
             return None;
         }
-        
+
         let version = pack.get_int("udp_acceleration_version").unwrap_or(1);
-        let fast_disconnect_detect = pack.get_int("udp_accel_fast_disconnect_detect").unwrap_or(0) != 0;
-        
+        let fast_disconnect_detect = pack
+            .get_int("udp_accel_fast_disconnect_detect")
+            .unwrap_or(0)
+            != 0;
+
         // Parse server IP
-        let server_ip = Self::parse_ip(pack, "udp_acceleration_server_ip")
-            .unwrap_or(remote_ip);  // Fall back to remote IP if not specified
-        
+        let server_ip = Self::parse_ip(pack, "udp_acceleration_server_ip").unwrap_or(remote_ip); // Fall back to remote IP if not specified
+
         let server_port = pack.get_int("udp_acceleration_server_port").unwrap_or(0) as u16;
-        
+
         if server_port == 0 {
             return None;
         }
-        
+
         // Parse server key based on version
         let server_key = if version >= 2 {
             pack.get_data("udp_acceleration_server_key_v2")
@@ -195,17 +203,17 @@ impl AuthResult {
                 .map(|d| d.to_vec())
                 .filter(|k| k.len() == UDP_ACCELERATION_COMMON_KEY_SIZE_V1)?
         };
-        
+
         let server_cookie = pack.get_int("udp_acceleration_server_cookie").unwrap_or(0);
         let client_cookie = pack.get_int("udp_acceleration_client_cookie").unwrap_or(0);
-        
+
         if server_cookie == 0 || client_cookie == 0 {
             return None;
         }
-        
+
         let use_encryption = pack.get_int("udp_acceleration_use_encryption").unwrap_or(1) != 0;
         let use_hmac = pack.get_int("use_hmac_on_udp_acceleration").unwrap_or(0) != 0;
-        
+
         Some(UdpAccelServerResponse {
             enabled: true,
             version,
@@ -223,9 +231,9 @@ impl AuthResult {
     /// Parse IP address from Pack (handles both IPv4 and IPv6).
     fn parse_ip(pack: &Pack, name: &str) -> Option<IpAddr> {
         use std::net::{Ipv4Addr, Ipv6Addr};
-        
+
         let is_ipv6 = pack.get_int(&format!("{}@ipv6_bool", name)).unwrap_or(0) != 0;
-        
+
         if is_ipv6 {
             let ipv6_data = pack.get_data(&format!("{}@ipv6_array", name))?;
             if ipv6_data.len() >= 16 {
@@ -246,7 +254,7 @@ impl AuthResult {
             }
             return Some(IpAddr::V4(ip));
         }
-        
+
         None
     }
 }
@@ -356,22 +364,28 @@ impl AuthPack {
         // Unique ID
         let unique_id: [u8; 20] = crypto::random_bytes();
         pack.add_data("unique_id", unique_id.to_vec());
-        pack.add_int("rudp_bulk_max_version", if options.udp_accel { 2 } else { 0 });
+        pack.add_int(
+            "rudp_bulk_max_version",
+            if options.udp_accel { 2 } else { 0 },
+        );
 
         // UDP acceleration using flag - send client UDP params if available
         // This follows the C code in Protocol.c ClientUploadAuth()
         if let Some(params) = udp_accel_params {
             pack.add_bool("use_udp_acceleration", true);
             pack.add_int("udp_acceleration_version", params.max_version);
-            
+
             // Add client IP (using PackAddIp format)
             Self::add_ip(&mut pack, "udp_acceleration_client_ip", params.client_ip);
             pack.add_int("udp_acceleration_client_port", params.client_port as u32);
-            
+
             // Add client keys
             pack.add_data("udp_acceleration_client_key", params.client_key.to_vec());
-            pack.add_data("udp_acceleration_client_key_v2", params.client_key_v2.to_vec());
-            
+            pack.add_data(
+                "udp_acceleration_client_key_v2",
+                params.client_key_v2.to_vec(),
+            );
+
             // HMAC and fast disconnect support
             pack.add_bool("support_hmac_on_udp_acceleration", true);
             pack.add_bool("support_udp_accel_fast_disconnect_detect", true);
@@ -379,7 +393,7 @@ impl AuthPack {
         }
 
         // Node info (OutRpcNodeInfo in C)
-        let cedar_unique_id: [u8; 16] = crypto::random_bytes();  // Cedar unique ID is 16 bytes
+        let cedar_unique_id: [u8; 16] = crypto::random_bytes(); // Cedar unique ID is 16 bytes
         let hostname = Self::get_hostname();
         pack.add_str("ClientProductName", CLIENT_STRING);
         pack.add_str("ServerProductName", "");
@@ -480,26 +494,32 @@ impl AuthPack {
 
         let unique_id: [u8; 20] = crypto::random_bytes();
         pack.add_data("unique_id", unique_id.to_vec());
-        pack.add_int("rudp_bulk_max_version", if options.udp_accel { 2 } else { 0 });
+        pack.add_int(
+            "rudp_bulk_max_version",
+            if options.udp_accel { 2 } else { 0 },
+        );
 
         // UDP acceleration using flag - send client UDP params if available
         if let Some(params) = udp_accel_params {
             pack.add_bool("use_udp_acceleration", true);
             pack.add_int("udp_acceleration_version", params.max_version);
-            
+
             Self::add_ip(&mut pack, "udp_acceleration_client_ip", params.client_ip);
             pack.add_int("udp_acceleration_client_port", params.client_port as u32);
-            
+
             pack.add_data("udp_acceleration_client_key", params.client_key.to_vec());
-            pack.add_data("udp_acceleration_client_key_v2", params.client_key_v2.to_vec());
-            
+            pack.add_data(
+                "udp_acceleration_client_key_v2",
+                params.client_key_v2.to_vec(),
+            );
+
             pack.add_bool("support_hmac_on_udp_acceleration", true);
             pack.add_bool("support_udp_accel_fast_disconnect_detect", true);
             pack.add_int("udp_acceleration_max_version", params.max_version);
         }
 
         // Node info (OutRpcNodeInfo in C)
-        let cedar_unique_id: [u8; 16] = crypto::random_bytes();  // Cedar unique ID is 16 bytes
+        let cedar_unique_id: [u8; 16] = crypto::random_bytes(); // Cedar unique ID is 16 bytes
         let hostname = Self::get_hostname();
         pack.add_str("ClientProductName", CLIENT_STRING);
         pack.add_str("ServerProductName", "");
@@ -575,12 +595,36 @@ impl AuthPack {
 
     /// Get the system hostname (like GetMachineName in C).
     fn get_hostname() -> String {
-        let mut buf = [0u8; 256];
-        let result = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
-        if result == 0 {
-            let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-            String::from_utf8_lossy(&buf[..len]).into_owned()
-        } else {
+        #[cfg(unix)]
+        {
+            let mut buf = [0u8; 256];
+            let result =
+                unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+            if result == 0 {
+                let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+                String::from_utf8_lossy(&buf[..len]).into_owned()
+            } else {
+                "unknown".to_string()
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::process::Command;
+            // Use hostname command on Windows
+            Command::new("hostname")
+                .output()
+                .ok()
+                .and_then(|output| {
+                    if output.status.success() {
+                        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| "unknown".to_string())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
             "unknown".to_string()
         }
     }
@@ -611,7 +655,15 @@ mod tests {
         let server_random = [0u8; 20];
         let options = ConnectionOptions::default();
 
-        let auth_pack = AuthPack::new("VPN", "user", &password_hash, AuthType::Password, &server_random, &options, None);
+        let auth_pack = AuthPack::new(
+            "VPN",
+            "user",
+            &password_hash,
+            AuthType::Password,
+            &server_random,
+            &options,
+            None,
+        );
         let bytes = auth_pack.to_bytes();
 
         // Should produce non-empty bytes
@@ -658,7 +710,10 @@ mod tests {
         let result = AuthResult::from_pack(&pack).unwrap();
         assert!(!result.success);
         assert_eq!(result.error, 7);
-        assert_eq!(result.error_message, Some("Authentication failed".to_string()));
+        assert_eq!(
+            result.error_message,
+            Some("Authentication failed".to_string())
+        );
     }
 
     #[test]
@@ -676,21 +731,24 @@ mod tests {
     #[test]
     fn test_udp_accel_response_parse() {
         use std::net::Ipv4Addr;
-        
+
         let mut pack = Pack::new();
         pack.add_int("error", 0);
         pack.add_data("session_key", vec![1, 2, 3, 4]);
-        
+
         // Add UDP acceleration fields
         pack.add_int("use_udp_acceleration", 1);
         pack.add_int("udp_acceleration_version", 2);
-        
+
         // Server IP: 10.0.0.1 as little-endian u32
-        pack.add_int("udp_acceleration_server_ip", u32::from_le_bytes([10, 0, 0, 1]));
+        pack.add_int(
+            "udp_acceleration_server_ip",
+            u32::from_le_bytes([10, 0, 0, 1]),
+        );
         pack.add_bool("udp_acceleration_server_ip@ipv6_bool", false);
         pack.add_data("udp_acceleration_server_ip@ipv6_array", vec![0u8; 16]);
         pack.add_int("udp_acceleration_server_ip@ipv6_scope_id", 0);
-        
+
         pack.add_int("udp_acceleration_server_port", 40000);
         pack.add_data("udp_acceleration_server_key_v2", vec![0u8; 128]);
         pack.add_int("udp_acceleration_server_cookie", 12345);
@@ -698,10 +756,10 @@ mod tests {
         pack.add_int("udp_acceleration_use_encryption", 1);
         pack.add_int("use_hmac_on_udp_acceleration", 1);
         pack.add_int("udp_accel_fast_disconnect_detect", 1);
-        
+
         let remote_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
         let response = AuthResult::parse_udp_accel_response(&pack, remote_ip);
-        
+
         assert!(response.is_some());
         let resp = response.unwrap();
         assert!(resp.enabled);
@@ -719,15 +777,15 @@ mod tests {
     #[test]
     fn test_udp_accel_not_enabled() {
         use std::net::Ipv4Addr;
-        
+
         let mut pack = Pack::new();
         pack.add_int("error", 0);
         pack.add_data("session_key", vec![1, 2, 3, 4]);
         // use_udp_acceleration not set or 0
-        
+
         let remote_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
         let response = AuthResult::parse_udp_accel_response(&pack, remote_ip);
-        
+
         assert!(response.is_none());
     }
 }

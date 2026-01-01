@@ -8,11 +8,11 @@
 use std::net::Ipv4Addr;
 use std::time::Instant;
 
-use super::arp::ArpHandler;
-use super::dhcp::{DhcpConfig, DhcpHandler};
-use super::ethernet::{
-    get_arp_operation, get_arp_sender_ip, get_arp_sender_mac, get_arp_target_ip,
-    is_arp_packet, BROADCAST_MAC,
+use crate::packet::arp::ArpHandler;
+use crate::packet::dhcp::{DhcpConfig, DhcpHandler};
+use crate::packet::ethernet::{
+    get_arp_operation, get_arp_sender_ip, get_arp_sender_mac, get_arp_target_ip, is_arp_packet,
+    BROADCAST_MAC,
 };
 
 /// Configuration for the data loop.
@@ -120,25 +120,25 @@ pub enum LoopResult {
 pub struct DataLoopState {
     /// DHCP handler.
     pub dhcp: DhcpHandler,
-    
+
     /// ARP handler.
     pub arp: ArpHandler,
-    
+
     /// Timing state.
     pub timing: TimingState,
-    
+
     /// Our MAC address.
     pub mac: [u8; 6],
-    
+
     /// Our IP address (set after DHCP).
     pub our_ip: Ipv4Addr,
-    
+
     /// Gateway IP address.
     pub gateway_ip: Ipv4Addr,
-    
+
     /// Gateway MAC address.
     pub gateway_mac: [u8; 6],
-    
+
     /// Whether we're fully configured.
     pub is_configured: bool,
 }
@@ -202,12 +202,16 @@ impl DataLoopState {
                 self.gateway_mac = sender_mac;
                 tracing::debug!(
                     "Learned gateway MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-                    sender_mac[0], sender_mac[1], sender_mac[2],
-                    sender_mac[3], sender_mac[4], sender_mac[5]
+                    sender_mac[0],
+                    sender_mac[1],
+                    sender_mac[2],
+                    sender_mac[3],
+                    sender_mac[4],
+                    sender_mac[5]
                 );
             }
         }
-        
+
         // Also update ARP handler
         self.arp.process_arp_reply(eth_frame);
     }
@@ -323,10 +327,7 @@ mod tests {
         let mac = [0x02, 0x00, 0x5E, 0x00, 0x00, 0x01];
         let mut state = DataLoopState::new(mac);
 
-        state.configure(
-            Ipv4Addr::new(10, 21, 0, 100),
-            Ipv4Addr::new(10, 21, 0, 1),
-        );
+        state.configure(Ipv4Addr::new(10, 21, 0, 100), Ipv4Addr::new(10, 21, 0, 1));
 
         assert!(state.is_configured);
         assert_eq!(state.our_ip, Ipv4Addr::new(10, 21, 0, 100));
@@ -351,9 +352,9 @@ mod tests {
         packet[0] = 0x45; // Version 4, IHL 5
         packet[2] = 0x00;
         packet[3] = 0x28; // Total length 40
-        packet[9] = 6;    // TCP
+        packet[9] = 6; // TCP
         packet[12..16].copy_from_slice(&[192, 168, 1, 100]); // src
-        packet[16..20].copy_from_slice(&[192, 168, 1, 1]);   // dst
+        packet[16..20].copy_from_slice(&[192, 168, 1, 1]); // dst
 
         let info = Ipv4Info::parse(&packet);
         assert!(info.is_some());
@@ -380,10 +381,7 @@ mod tests {
         let mac = [0x02, 0x00, 0x5E, 0x00, 0x00, 0x01];
         let mut state = DataLoopState::new(mac);
 
-        state.configure(
-            Ipv4Addr::new(10, 21, 0, 100),
-            Ipv4Addr::new(10, 21, 0, 1),
-        );
+        state.configure(Ipv4Addr::new(10, 21, 0, 100), Ipv4Addr::new(10, 21, 0, 1));
         assert!(state.is_configured);
 
         state.reset();
@@ -400,7 +398,7 @@ mod tests {
         assert_eq!(state.get_gateway_mac(), BROADCAST_MAC);
         assert!(!state.is_gateway_mac_known());
     }
-    
+
     #[test]
     fn test_data_loop_config_default() {
         let config = DataLoopConfig::default();

@@ -12,7 +12,6 @@ pub struct VpnConfig {
     // ─────────────────────────────────────────────────────────────────────────
     // Connection
     // ─────────────────────────────────────────────────────────────────────────
-
     /// VPN server hostname or IP address.
     pub server: String,
 
@@ -28,7 +27,6 @@ pub struct VpnConfig {
     // ─────────────────────────────────────────────────────────────────────────
     // Authentication
     // ─────────────────────────────────────────────────────────────────────────
-
     /// Username for authentication.
     pub username: String,
 
@@ -39,7 +37,6 @@ pub struct VpnConfig {
     // ─────────────────────────────────────────────────────────────────────────
     // TLS
     // ─────────────────────────────────────────────────────────────────────────
-
     /// Skip TLS certificate verification (default: true).
     /// Set to false to require valid server certificates.
     /// Most SoftEther servers use self-signed certificates.
@@ -48,7 +45,6 @@ pub struct VpnConfig {
     // ─────────────────────────────────────────────────────────────────────────
     // Tunnel Features
     // ─────────────────────────────────────────────────────────────────────────
-
     /// Enable tunnel data encryption (RC4, default: true).
     /// Encrypts VPN packets inside the TLS tunnel (defense in depth).
     pub use_encrypt: bool,
@@ -68,7 +64,6 @@ pub struct VpnConfig {
     // ─────────────────────────────────────────────────────────────────────────
     // Session Mode
     // ─────────────────────────────────────────────────────────────────────────
-
     /// Use NAT traversal mode (default: false = bridge/routing mode).
     /// - false: Bridge mode - request bridge/routing permissions (L2 setups)
     /// - true: NAT mode - no bridge routing requested
@@ -81,7 +76,6 @@ pub struct VpnConfig {
     // ─────────────────────────────────────────────────────────────────────────
     // Performance
     // ─────────────────────────────────────────────────────────────────────────
-
     /// Maximum number of TCP connections (1-32, default: 1).
     /// Higher values can improve throughput but use more resources.
     pub max_connections: u8,
@@ -93,7 +87,6 @@ pub struct VpnConfig {
     // ─────────────────────────────────────────────────────────────────────────
     // Routing
     // ─────────────────────────────────────────────────────────────────────────
-
     /// Routing configuration for VPN traffic.
     pub routing: RoutingConfig,
 }
@@ -357,9 +350,9 @@ mod tests {
     fn test_parse_ipv4_cidrs_invalid() {
         let cidrs = vec![
             "invalid".to_string(),
-            "10.0.0.0".to_string(),       // missing prefix
-            "10.0.0.0/33".to_string(),    // prefix too large
-            "10.0.0.0/8".to_string(),     // valid
+            "10.0.0.0".to_string(),    // missing prefix
+            "10.0.0.0/33".to_string(), // prefix too large
+            "10.0.0.0/8".to_string(),  // valid
         ];
         let parsed = RoutingConfig::parse_ipv4_cidrs(&cidrs);
         assert_eq!(parsed.len(), 1); // Only valid one

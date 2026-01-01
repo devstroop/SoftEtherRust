@@ -6,31 +6,30 @@ use std::path::PathBuf;
 use std::process;
 
 use clap::{Parser, Subcommand};
-use tracing::{error, info, warn, Level};
-use tracing_subscriber::fmt::format::FmtSpan;
+use tracing::{error, info, warn};
 
-use softethervpn::{crypto, VpnClient, VpnConfig};
+use softether::{crypto, VpnClient, VpnConfig};
 
 #[derive(Parser)]
-#[command(name = "softether-rust")]
-#[command(author = "SoftEther Rust Team")]
+#[command(name = "softether")]
+#[command(author = "Devstroop Technologies (devstroop.com)")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "A high-performance SoftEther VPN client", long_about = None)]
 struct Cli {
-    /// Configuration file path
-    #[arg(short, long, value_name = "FILE")]
+    /// Configuration file path (default: config.json if exists)
+    #[arg(short, long, value_name = "FILE", global = true)]
     config: Option<PathBuf>,
 
-    /// Enable verbose output
-    #[arg(short, long)]
+    /// Enable verbose/trace output
+    #[arg(short, long, global = true)]
     verbose: bool,
 
     /// Enable debug output
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     debug: bool,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -63,7 +62,7 @@ enum Commands {
 
         /// Verify TLS certificate (default: skip verification)
         #[arg(long)]
-        verify_tls: bool,
+        skip_tls_verify: bool,
     },
 
     /// Generate password hash for authentication
@@ -92,25 +91,45 @@ enum Commands {
 }
 
 fn init_logging(verbose: bool, debug: bool) {
+    use tracing_subscriber::filter::EnvFilter;
+
     let level = if debug {
-        Level::DEBUG
+        "debug"
     } else if verbose {
-        Level::INFO
+        "trace"
     } else {
-        Level::WARN
+        "info"
     };
 
+    // Filter out wintun's "Element not found" errors which are expected
+    // when checking for existing adapters
+    let filter = EnvFilter::try_new(format!("{},wintun=off", level))
+        .unwrap_or_else(|_| EnvFilter::new(level));
+
     tracing_subscriber::fmt()
-        .with_max_level(level)
-        .with_span_events(FmtSpan::CLOSE)
+        .with_env_filter(filter)
         .with_target(false)
         .init();
 }
 
 fn load_config(path: Option<&PathBuf>) -> Result<Option<VpnConfig>, Box<dyn std::error::Error>> {
+    // If path is provided, use it; otherwise try default config.json
+    let path = match path {
+        Some(p) => Some(p.clone()),
+        None => {
+            let default_path = PathBuf::from("config.json");
+            if default_path.exists() {
+                Some(default_path)
+            } else {
+                None
+            }
+        }
+    };
+
     if let Some(path) = path {
-        let content = std::fs::read_to_string(path)?;
+        let content = std::fs::read_to_string(&path)?;
         let config: VpnConfig = serde_json::from_str(&content)?;
+        info!("Loaded configuration from {:?}", path);
         Ok(Some(config))
     } else {
         Ok(None)
@@ -136,11 +155,22 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Load config file if provided
     let file_config = load_config(cli.config.as_ref())?;
 
-    match cli.command {
+    // Default to Connect if no command specified
+    let command = cli.command.unwrap_or(Commands::Connect {
+        server: None,
+        port: None,
+        hub: None,
+        username: None,
+        password_hash: None,
+        no_tls: false,
+        skip_tls_verify: false,
+    });
+
+    match command {
         Commands::Hash { username, password } => {
             // Get password (prompt if not provided)
             let password = password.unwrap_or_else(prompt_password);
-            
+
             if password.is_empty() {
                 return Err("Password cannot be empty".into());
             }
@@ -163,7 +193,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             username,
             password_hash,
             no_tls,
-            verify_tls,
+            skip_tls_verify,
         } => {
             // Build config from file and/or command line args
             let config = if let Some(mut config) = file_config {
@@ -182,14 +212,20 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 if let Some(h) = password_hash {
                     // Validate it's valid hex
-                    let bytes = hex::decode(&h).map_err(|e| format!("Invalid password hash (must be 40 hex chars): {}", e))?;
+                    let bytes = hex::decode(&h).map_err(|e| {
+                        format!("Invalid password hash (must be 40 hex chars): {}", e)
+                    })?;
                     if bytes.len() != 20 {
-                        return Err(format!("Password hash must be 20 bytes (40 hex chars), got {} bytes", bytes.len()).into());
+                        return Err(format!(
+                            "Password hash must be 20 bytes (40 hex chars), got {} bytes",
+                            bytes.len()
+                        )
+                        .into());
                     }
                     config.password_hash = h;
                 }
-                if verify_tls {
-                    config.skip_tls_verify = false;
+                if skip_tls_verify {
+                    config.skip_tls_verify = true;
                 }
                 config
             } else {
@@ -204,7 +240,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let password_hash_bytes = hex::decode(&password_hash_str)
                     .map_err(|e| format!("Invalid password hash (must be 40 hex chars): {}", e))?;
                 if password_hash_bytes.len() != 20 {
-                    return Err(format!("Password hash must be 20 bytes (40 hex chars), got {} bytes", password_hash_bytes.len()).into());
+                    return Err(format!(
+                        "Password hash must be 20 bytes (40 hex chars), got {} bytes",
+                        password_hash_bytes.len()
+                    )
+                    .into());
                 }
 
                 VpnConfig {
@@ -213,7 +253,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     hub,
                     username,
                     password_hash: password_hash_str,
-                    skip_tls_verify: !verify_tls,
+                    skip_tls_verify,
                     ..Default::default()
                 }
             };
@@ -230,7 +270,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             info!("Hub: {}, Username: {}", config.hub, config.username);
 
             let mut client = VpnClient::new(config);
-            
+
             match client.connect().await {
                 Ok(()) => {
                     info!("Disconnected");

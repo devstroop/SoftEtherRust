@@ -6,14 +6,16 @@
 //! - Auth: Authentication helpers
 //! - Tunnel: Data tunnel protocol
 
-mod pack;
-mod http;
 mod auth;
-mod tunnel;
 mod constants;
+mod http;
+mod pack;
+mod tunnel;
 
-pub use pack::{Pack, PackValue};
-pub use http::{HttpRequest, HttpResponse, HttpCodec};
-pub use auth::{AuthType, AuthPack, HelloResponse, AuthResult, RedirectInfo, ConnectionOptions};
-pub use tunnel::{TunnelFrame, TunnelCodec, TunnelConstants, is_compressed, decompress, decompress_into, compress};
+pub use auth::{AuthPack, AuthResult, AuthType, ConnectionOptions, HelloResponse, RedirectInfo};
 pub use constants::*;
+pub use http::{HttpCodec, HttpRequest, HttpResponse};
+pub use pack::{Pack, PackValue};
+pub use tunnel::{
+    compress, decompress, decompress_into, is_compressed, TunnelCodec, TunnelConstants, TunnelFrame,
+};

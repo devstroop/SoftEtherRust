@@ -2,63 +2,59 @@
 //!
 //! Mobile apps can register callbacks to receive events from the VPN client.
 
+use super::types::{SoftEtherResult, SoftEtherSession, SoftEtherState};
 use std::ffi::c_void;
-use super::types::{SoftEtherState, SoftEtherSession, SoftEtherResult};
 
 /// Callback for state changes.
-/// 
+///
 /// # Parameters
 /// - `context`: User-provided context pointer.
 /// - `state`: New connection state.
 pub type StateCallback = Option<extern "C" fn(context: *mut c_void, state: SoftEtherState)>;
 
 /// Callback for connection established.
-/// 
+///
 /// # Parameters
 /// - `context`: User-provided context pointer.
 /// - `session`: Session information (IP, gateway, DNS, etc.).
-pub type ConnectedCallback = Option<extern "C" fn(context: *mut c_void, session: *const SoftEtherSession)>;
+pub type ConnectedCallback =
+    Option<extern "C" fn(context: *mut c_void, session: *const SoftEtherSession)>;
 
 /// Callback for disconnection.
-/// 
+///
 /// # Parameters
 /// - `context`: User-provided context pointer.
 /// - `result`: Reason for disconnection (Ok = clean disconnect, error code otherwise).
-pub type DisconnectedCallback = Option<extern "C" fn(context: *mut c_void, result: SoftEtherResult)>;
+pub type DisconnectedCallback =
+    Option<extern "C" fn(context: *mut c_void, result: SoftEtherResult)>;
 
 /// Callback for received packets.
-/// 
+///
 /// This is called when packets are received from the VPN server.
 /// The callback should copy the packet data if needed, as the buffer
 /// may be reused after the callback returns.
-/// 
+///
 /// # Parameters
 /// - `context`: User-provided context pointer.
 /// - `packets`: Pointer to packet data (format: [len:u16][data]...).
 /// - `total_size`: Total size of packet data.
 /// - `packet_count`: Number of packets.
-/// 
+///
 /// # Note
 /// This callback is called from the I/O thread. Keep processing minimal
 /// and queue packets for processing on another thread if needed.
-pub type PacketsReceivedCallback = Option<extern "C" fn(
-    context: *mut c_void,
-    packets: *const u8,
-    total_size: usize,
-    packet_count: u32,
-)>;
+pub type PacketsReceivedCallback = Option<
+    extern "C" fn(context: *mut c_void, packets: *const u8, total_size: usize, packet_count: u32),
+>;
 
 /// Callback for log messages.
-/// 
+///
 /// # Parameters
 /// - `context`: User-provided context pointer.
 /// - `level`: Log level (0=debug, 1=info, 2=warn, 3=error).
 /// - `message`: Null-terminated UTF-8 log message.
-pub type LogCallback = Option<extern "C" fn(
-    context: *mut c_void,
-    level: i32,
-    message: *const std::ffi::c_char,
-)>;
+pub type LogCallback =
+    Option<extern "C" fn(context: *mut c_void, level: i32, message: *const std::ffi::c_char)>;
 
 /// Collection of all callbacks.
 #[repr(C)]
