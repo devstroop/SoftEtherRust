@@ -10,7 +10,8 @@ use super::callbacks::*;
 
 /// Internal client state.
 struct FfiClient {
-    // Configuration
+    // Configuration (will be used when connecting)
+    #[allow(dead_code)]
     config: crate::config::VpnConfig,
     // Callbacks
     callbacks: SoftEtherCallbacks,
@@ -44,6 +45,7 @@ impl FfiClient {
         }
     }
 
+    #[allow(dead_code)]
     fn notify_connected(&self, session: &SoftEtherSession) {
         if let Some(cb) = self.callbacks.on_connected {
             cb(self.callbacks.context, session);

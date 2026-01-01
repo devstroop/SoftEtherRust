@@ -26,7 +26,8 @@ use crate::protocol::{
     AuthPack, AuthResult, AuthType, ConnectionOptions, HelloResponse, HttpCodec, HttpRequest, Pack, RedirectInfo, TunnelCodec,
     VPN_TARGET, SIGNATURE_TARGET, CONTENT_TYPE_SIGNATURE, CONTENT_TYPE_PACK, VPN_SIGNATURE,
 };
-use crate::tunnel::{DhcpConfig, EtherType, TunnelRunner, TunnelConfig, RouteConfig};
+use crate::packet::{DhcpConfig, EtherType};
+use crate::tunnel::{TunnelRunner, TunnelConfig, RouteConfig};
 
 /// VPN client statistics.
 #[derive(Debug, Clone, Default)]

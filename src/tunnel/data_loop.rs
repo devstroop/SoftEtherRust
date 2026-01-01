@@ -8,9 +8,9 @@
 use std::net::Ipv4Addr;
 use std::time::Instant;
 
-use super::arp::ArpHandler;
-use super::dhcp::{DhcpConfig, DhcpHandler};
-use super::ethernet::{
+use crate::packet::arp::ArpHandler;
+use crate::packet::dhcp::{DhcpConfig, DhcpHandler};
+use crate::packet::ethernet::{
     get_arp_operation, get_arp_sender_ip, get_arp_sender_mac, get_arp_target_ip,
     is_arp_packet, BROADCAST_MAC,
 };

@@ -24,11 +24,9 @@ use crate::adapter::TunDevice;
 use crate::client::{VpnConnection, ConnectionManager, ConcurrentReader};
 use crate::error::{Error, Result};
 use crate::protocol::{TunnelCodec, is_compressed, decompress, decompress_into, compress};
+use crate::packet::{ArpHandler, DhcpClient, DhcpConfig, DhcpState, BROADCAST_MAC};
 
-use super::{
-    ArpHandler, DhcpClient, DhcpConfig, DhcpState, DataLoopState,
-    BROADCAST_MAC,
-};
+use super::DataLoopState;
 
 /// Configuration for the tunnel runner.
 #[derive(Debug, Clone)]

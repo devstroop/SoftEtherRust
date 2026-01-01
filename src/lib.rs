@@ -40,6 +40,7 @@
 
 pub mod crypto;
 pub mod protocol;
+pub mod packet;
 pub mod tunnel;
 pub mod adapter;
 pub mod client;

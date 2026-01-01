@@ -4,16 +4,16 @@
 //! for routing VPN traffic.
 
 #[cfg(target_os = "macos")]
-mod utun;
+mod macos;
 
 #[cfg(target_os = "linux")]
-mod tun_linux;
+mod linux;
 
 #[cfg(target_os = "macos")]
-pub use utun::UtunDevice;
+pub use macos::UtunDevice;
 
 #[cfg(target_os = "linux")]
-pub use tun_linux::TunDevice;
+pub use linux::TunDevice;
 
 use std::net::Ipv4Addr;
 use std::os::fd::RawFd;
@@ -65,11 +65,11 @@ pub trait TunAdapter: Send + Sync {
 pub fn get_default_gateway() -> Option<Ipv4Addr> {
     #[cfg(target_os = "macos")]
     {
-        utun::get_default_gateway()
+        macos::get_default_gateway()
     }
     #[cfg(target_os = "linux")]
     {
-        tun_linux::get_default_gateway()
+        linux::get_default_gateway()
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {

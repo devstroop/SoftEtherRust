@@ -124,6 +124,8 @@ pub struct ConnectionManager {
     config: VpnConfig,
     /// Index of next connection to use for sending (round-robin).
     send_index: usize,
+    /// Index of next connection to use for receiving (round-robin).
+    recv_index: usize,
 }
 
 impl ConnectionManager {
@@ -167,6 +169,7 @@ impl ConnectionManager {
             port: actual_port,
             config: actual_config,
             send_index: 0,
+            recv_index: 0,
         }
     }
     
@@ -380,18 +383,77 @@ impl ConnectionManager {
         &mut self.connections
     }
     
-    /// Read data from any receive-capable connection.
+    /// Read data from a single receive-capable connection (round-robin).
     /// Returns (connection_index, data_length) on success.
+    /// 
+    /// Note: For truly concurrent multi-connection reading, use `take_recv_connections()`
+    /// with `ConcurrentReader`. This method is for simple cases or bidirectional 
+    /// connections that also need to send.
     pub async fn read_any(&mut self, buf: &mut [u8]) -> io::Result<(usize, usize)> {
-        // For now, just read from primary connection
-        // TODO: Use tokio::select! to read from all connections simultaneously
-        let conn = &mut self.connections[0];
+        // Get indices of receive-capable connections
+        let recv_indices: Vec<usize> = self.connections.iter()
+            .enumerate()
+            .filter(|(_, c)| c.healthy && c.direction.can_recv())
+            .map(|(i, _)| i)
+            .collect();
+        
+        if recv_indices.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "No receive-capable connections available"
+            ));
+        }
+        
+        // Round-robin selection for fairness
+        self.recv_index = (self.recv_index + 1) % recv_indices.len();
+        let idx = recv_indices[self.recv_index];
+        
+        let conn = &mut self.connections[idx];
         let n = conn.conn.read(buf).await?;
         if n > 0 {
             conn.bytes_received += n as u64;
             conn.touch();
         }
-        Ok((0, n))
+        Ok((idx, n))
+    }
+    
+    /// Read with short timeout from each receive-capable connection.
+    /// Returns immediately when any connection has data available.
+    /// This provides better latency than sequential polling.
+    pub async fn read_any_with_timeout(&mut self, buf: &mut [u8], timeout_ms: u64) -> io::Result<Option<(usize, usize)>> {
+        use tokio::time::timeout;
+        
+        let recv_indices: Vec<usize> = self.connections.iter()
+            .enumerate()
+            .filter(|(_, c)| c.healthy && c.direction.can_recv())
+            .map(|(i, _)| i)
+            .collect();
+        
+        if recv_indices.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "No receive-capable connections available"
+            ));
+        }
+        
+        // Try each connection with a very short timeout
+        let per_conn_timeout = Duration::from_millis(timeout_ms / recv_indices.len() as u64).max(Duration::from_millis(1));
+        
+        for &idx in &recv_indices {
+            let conn = &mut self.connections[idx];
+            match timeout(per_conn_timeout, conn.conn.read(buf)).await {
+                Ok(Ok(n)) if n > 0 => {
+                    conn.bytes_received += n as u64;
+                    conn.touch();
+                    return Ok(Some((idx, n)));
+                }
+                Ok(Ok(_)) => {} // Zero bytes, continue
+                Ok(Err(e)) => return Err(e),
+                Err(_) => {} // Timeout, try next
+            }
+        }
+        
+        Ok(None) // No data available within timeout
     }
     
     /// Write data using an appropriate send connection.
