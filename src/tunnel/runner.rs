@@ -26,6 +26,7 @@ use crate::error::{Error, Result};
 use crate::protocol::{TunnelCodec, is_compressed, decompress, decompress_into, compress};
 use crate::packet::{ArpHandler, DhcpClient, DhcpConfig, DhcpState, BROADCAST_MAC};
 
+use super::adaptive::AdaptiveTuning;
 use super::DataLoopState;
 
 /// Configuration for the tunnel runner.
@@ -466,6 +467,10 @@ impl TunnelRunner {
         let mut keepalive_interval = interval(Duration::from_secs(self.config.keepalive_interval));
         let mut last_activity = Instant::now();
 
+        // Adaptive tuning for poll timeout based on traffic
+        let adaptive = Arc::new(AdaptiveTuning::new());
+        let adaptive_reader = adaptive.clone();
+
         // Zero-copy TUN reader using fixed buffer
         // macOS utun: [4-byte protocol header][IP packet]
         // Linux tun:  [IP packet] (no header with IFF_NO_PI)
@@ -479,7 +484,9 @@ impl TunnelRunner {
             let mut read_buf = [0u8; 2048];
             
             while running.load(Ordering::SeqCst) {
-                // Poll with 1ms timeout for minimal latency
+                // Adaptive poll timeout: 1ms under load, up to 10ms when idle
+                let poll_timeout = adaptive_reader.poll_timeout_ms();
+                
                 let mut poll_fds = [libc::pollfd {
                     fd: tun_fd,
                     events: libc::POLLIN,
@@ -487,7 +494,7 @@ impl TunnelRunner {
                 }];
                 
                 let poll_result = unsafe {
-                    libc::poll(poll_fds.as_mut_ptr(), 1, 1) // 1ms timeout for low latency
+                    libc::poll(poll_fds.as_mut_ptr(), 1, poll_timeout)
                 };
                 
                 if poll_result > 0 && (poll_fds[0].revents & libc::POLLIN) != 0 {
@@ -506,6 +513,9 @@ impl TunnelRunner {
                     let min_len = 1;
 
                     if n > min_len as isize {
+                        // Track packet for adaptive tuning
+                        adaptive_reader.record_packet();
+                        
                         // Send the buffer with length - receiver will extract IP packet
                         // Channel copies the fixed buffer (unavoidable for cross-thread)
                         if tun_tx.blocking_send((n as usize, read_buf)).is_err() {
@@ -521,6 +531,7 @@ impl TunnelRunner {
         let our_ip = dhcp_config.ip;
         let use_compress = self.config.use_compress;
         let my_mac = self.mac;
+        let mut tuning_counter = 0u32;
 
         while self.running.load(Ordering::SeqCst) {
             tokio::select! {
@@ -691,6 +702,15 @@ impl TunnelRunner {
 
                 // Keepalive timer
                 _ = keepalive_interval.tick() => {
+                    // Update adaptive tuning every ~10 ticks (50 seconds at 5s interval)
+                    tuning_counter += 1;
+                    if tuning_counter % 10 == 0 {
+                        let pps = adaptive.update();
+                        if pps > 0 {
+                            debug!(pps, timeout_ms = adaptive.poll_timeout_ms(), "Adaptive tuning");
+                        }
+                    }
+                    
                     // Send keepalive if no recent activity
                     if last_activity.elapsed() > Duration::from_secs(3) {
                         let keepalive = TunnelCodec::encode_keepalive_direct(
@@ -1061,16 +1081,23 @@ impl TunnelRunner {
         let mut keepalive_interval = interval(Duration::from_secs(self.config.keepalive_interval));
         let mut last_activity = Instant::now();
 
+        // Adaptive tuning for poll timeout based on traffic
+        let adaptive = Arc::new(AdaptiveTuning::new());
+        let adaptive_reader = adaptive.clone();
+
         // Zero-copy TUN reader using fixed buffer
         let (tun_tx, mut tun_rx) = mpsc::channel::<(usize, [u8; 2048])>(256);
         let tun_fd = tun.raw_fd();
         let running = self.running.clone();
 
-        // Spawn blocking TUN reader task
+        // Spawn blocking TUN reader task with adaptive timeout
         let tun_reader = tokio::task::spawn_blocking(move || {
             let mut read_buf = [0u8; 2048];
             
             while running.load(Ordering::SeqCst) {
+                // Adaptive poll timeout: 1ms under load, up to 10ms when idle
+                let poll_timeout = adaptive_reader.poll_timeout_ms();
+                
                 let mut poll_fds = [libc::pollfd {
                     fd: tun_fd,
                     events: libc::POLLIN,
@@ -1078,7 +1105,7 @@ impl TunnelRunner {
                 }];
                 
                 let poll_result = unsafe {
-                    libc::poll(poll_fds.as_mut_ptr(), 1, 1) // 1ms timeout for low latency
+                    libc::poll(poll_fds.as_mut_ptr(), 1, poll_timeout)
                 };
                 
                 if poll_result > 0 && (poll_fds[0].revents & libc::POLLIN) != 0 {
@@ -1096,6 +1123,9 @@ impl TunnelRunner {
                     let min_len = 1;
 
                     if n > min_len as isize {
+                        // Track packet for adaptive tuning
+                        adaptive_reader.record_packet();
+                        
                         if tun_tx.blocking_send((n as usize, read_buf)).is_err() {
                             break;
                         }
@@ -1110,6 +1140,7 @@ impl TunnelRunner {
         let our_ip = dhcp_config.ip;
         let use_compress = self.config.use_compress;
         let my_mac = self.mac;
+        let mut tuning_counter = 0u32;
 
         while self.running.load(Ordering::SeqCst) {
             // Helper macro to process received VPN data
@@ -1293,6 +1324,15 @@ impl TunnelRunner {
 
                 // Keepalive timer
                 _ = keepalive_interval.tick() => {
+                    // Update adaptive tuning every ~10 ticks
+                    tuning_counter += 1;
+                    if tuning_counter % 10 == 0 {
+                        let pps = adaptive.update();
+                        if pps > 0 {
+                            debug!(pps, timeout_ms = adaptive.poll_timeout_ms(), "Adaptive tuning");
+                        }
+                    }
+                    
                     if last_activity.elapsed() > Duration::from_secs(3) {
                         let keepalive = TunnelCodec::encode_keepalive_direct(
                             32,
