@@ -469,7 +469,7 @@ impl TunnelRunner {
         // Zero-copy TUN reader using fixed buffer
         // macOS utun: [4-byte protocol header][IP packet]
         // Linux tun:  [IP packet] (no header with IFF_NO_PI)
-        let (tun_tx, mut tun_rx) = mpsc::channel::<(usize, [u8; 2048])>(64);
+        let (tun_tx, mut tun_rx) = mpsc::channel::<(usize, [u8; 2048])>(256);
         let tun_fd = tun.raw_fd();
         let running = self.running.clone();
 
@@ -479,7 +479,7 @@ impl TunnelRunner {
             let mut read_buf = [0u8; 2048];
             
             while running.load(Ordering::SeqCst) {
-                // Poll with short timeout for low latency
+                // Poll with 1ms timeout for minimal latency
                 let mut poll_fds = [libc::pollfd {
                     fd: tun_fd,
                     events: libc::POLLIN,
@@ -487,7 +487,7 @@ impl TunnelRunner {
                 }];
                 
                 let poll_result = unsafe {
-                    libc::poll(poll_fds.as_mut_ptr(), 1, 5) // 5ms timeout
+                    libc::poll(poll_fds.as_mut_ptr(), 1, 1) // 1ms timeout for low latency
                 };
                 
                 if poll_result > 0 && (poll_fds[0].revents & libc::POLLIN) != 0 {
@@ -524,6 +524,9 @@ impl TunnelRunner {
 
         while self.running.load(Ordering::SeqCst) {
             tokio::select! {
+                // Biased: prioritize data paths over timers to minimize latency
+                biased;
+
                 // Packet from TUN device (from local applications)
                 Some((len, tun_buf)) = tun_rx.recv() => {
                     // macOS utun: [4-byte header][IP packet] - IP starts at offset 4
@@ -1059,7 +1062,7 @@ impl TunnelRunner {
         let mut last_activity = Instant::now();
 
         // Zero-copy TUN reader using fixed buffer
-        let (tun_tx, mut tun_rx) = mpsc::channel::<(usize, [u8; 2048])>(64);
+        let (tun_tx, mut tun_rx) = mpsc::channel::<(usize, [u8; 2048])>(256);
         let tun_fd = tun.raw_fd();
         let running = self.running.clone();
 
@@ -1075,7 +1078,7 @@ impl TunnelRunner {
                 }];
                 
                 let poll_result = unsafe {
-                    libc::poll(poll_fds.as_mut_ptr(), 1, 5)
+                    libc::poll(poll_fds.as_mut_ptr(), 1, 1) // 1ms timeout for low latency
                 };
                 
                 if poll_result > 0 && (poll_fds[0].revents & libc::POLLIN) != 0 {
@@ -1186,6 +1189,9 @@ impl TunnelRunner {
             };
             
             tokio::select! {
+                // Biased: prioritize data paths over timers to minimize latency
+                biased;
+
                 // Packet from TUN device (from local applications)
                 Some((len, tun_buf)) = tun_rx.recv() => {
                     #[cfg(target_os = "macos")]
