@@ -96,12 +96,27 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake
       
-      # Windows dependencies
-      - name: Install Windows dependencies
+      # Windows dependencies - cache chocolatey packages
+      - name: Cache Windows dependencies
         if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        id: windows-deps-cache
+        with:
+          path: |
+            C:\ProgramData\chocolatey\lib\cmake*
+            C:\ProgramData\chocolatey\lib\nasm*
+            C:\Program Files\CMake
+            C:\Program Files\NASM
+          key: windows-deps-cmake-nasm-v1
+      
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows' && steps.windows-deps-cache.outputs.cache-hit != 'true'
         run: |
           choco install cmake nasm -y
-          echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
+      
+      - name: Add NASM to PATH
+        if: runner.os == 'Windows'
+        run: echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
       
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
