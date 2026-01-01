@@ -111,7 +111,7 @@ impl TunDevice {
             Ok(Self {
                 fd: OwnedFd::from_raw_fd(fd),
                 name,
-                mtu: 1500,
+                mtu: 1400,
             })
         }
     }

@@ -378,7 +378,7 @@ impl TunnelRunner {
         // Pre-allocated buffers - sized for maximum packets
         // Network receive buffer
         let mut net_buf = vec![0u8; 65536];
-        // Send buffer: 4 (utun header) + 14 (eth) + 1500 (MTU) + 8 (tunnel header) + compression overhead
+        // Send buffer: 4 (utun header) + 14 (eth) + 1400 (MTU) + 8 (tunnel header) + compression overhead
         let mut send_buf = vec![0u8; 4096];
         // Decompression buffer (reused to avoid allocation per packet)
         let mut decomp_buf = vec![0u8; 4096];
@@ -715,6 +715,7 @@ impl TunnelRunner {
             }
             0x0806 => {
                 // ARP - process to learn gateway MAC and respond to requests
+                debug!("Received ARP packet ({} bytes)", frame.len());
                 if let Some(_reply) = arp.process_arp(frame) {
                     // Reply is built but we don't send it from here
                     // The main loop will check for pending replies
