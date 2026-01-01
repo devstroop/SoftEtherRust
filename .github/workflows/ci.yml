@@ -46,6 +46,7 @@ jobs:
   # Build and test on multiple platforms
   build:
     name: Build (${{ matrix.name }})
+    needs: [check]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -136,6 +137,7 @@ jobs:
   # Build for iOS (macOS runner only)
   build-ios:
     name: Build (ios)
+    needs: [check]
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -179,6 +181,7 @@ jobs:
   # Build for Android
   build-android:
     name: Build (android)
+    needs: [check]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -260,7 +263,7 @@ jobs:
   # Create release
   release:
     name: Release
-    needs: [check, build, build-ios, build-android]
+    needs: [build, build-ios, build-android]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
