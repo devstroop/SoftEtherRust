@@ -78,12 +78,14 @@ impl FfiClient {
         }
     }
 
+    #[allow(dead_code)]
     fn notify_state(&self, state: SoftEtherState) {
         if let Some(cb) = self.callbacks.on_state_changed {
             cb(self.callbacks.context, state);
         }
     }
 
+    #[allow(dead_code)]
     fn notify_connected(&self, session: &SoftEtherSession) {
         if let Some(cb) = self.callbacks.on_connected {
             cb(self.callbacks.context, session);
@@ -136,6 +138,11 @@ unsafe fn cstr_to_string(ptr: *const c_char) -> Option<String> {
 // =============================================================================
 
 /// Create a new SoftEther VPN client.
+///
+/// # Safety
+/// - `config` must be a valid pointer to a `SoftEtherConfig` struct.
+/// - `callbacks` must be a valid pointer to a `SoftEtherCallbacks` struct or null.
+/// - String pointers in config must be valid null-terminated C strings.
 #[no_mangle]
 pub unsafe extern "C" fn softether_create(
     config: *const SoftEtherConfig,
@@ -179,7 +186,7 @@ pub unsafe extern "C" fn softether_create(
         username,
         password_hash,
         skip_tls_verify: true, // Always skip for now - SoftEther uses self-signed certs
-        max_connections: config.max_connections.max(1).min(32) as u8,
+        max_connections: config.max_connections.clamp(1, 32) as u8,
         use_compress: config.use_compress != 0,
         timeout_seconds: config.connect_timeout_secs.max(5) as u64,
         mtu: 1400,
@@ -202,6 +209,10 @@ pub unsafe extern "C" fn softether_create(
 }
 
 /// Destroy a SoftEther VPN client.
+///
+/// # Safety
+/// - `handle` must be a valid handle returned by `softether_create` or null.
+/// - The handle must not be used after this call.
 #[no_mangle]
 pub unsafe extern "C" fn softether_destroy(handle: SoftEtherHandle) {
     if handle.is_null() {
@@ -224,6 +235,9 @@ pub unsafe extern "C" fn softether_destroy(handle: SoftEtherHandle) {
 }
 
 /// Connect to the VPN server.
+///
+/// # Safety
+/// - `handle` must be a valid handle returned by `softether_create`.
 #[no_mangle]
 pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEtherResult {
     if handle.is_null() {
@@ -347,7 +361,7 @@ async fn connect_and_run(
         }
     }
 
-    log_message(&callbacks, 1, &format!("[RUST] connect_and_run started"));
+    log_message(&callbacks, 1, "[RUST] connect_and_run started");
     log_message(
         &callbacks,
         1,
@@ -430,6 +444,7 @@ async fn connect_and_run(
     }
 
     // Authenticate
+    log_message(&callbacks, 1, "[RUST] >>> About to call authenticate() <<<");
     let auth_result = match authenticate(&mut conn, &config, &hello, &callbacks).await {
         Ok(r) => {
             log_message(&callbacks, 1, "[RUST] Authentication successful");
@@ -689,6 +704,21 @@ async fn authenticate(
         }
     }
 
+    // IMMEDIATE log at function entry
+    log_msg(
+        callbacks,
+        1,
+        "[RUST] >>> ENTERED authenticate() function <<<",
+    );
+    log_msg(
+        callbacks,
+        1,
+        &format!(
+            "[RUST] hello.use_secure_password = {}",
+            hello.use_secure_password
+        ),
+    );
+
     let auth_type = if hello.use_secure_password {
         log_msg(callbacks, 1, "[RUST] Using SecurePassword auth type");
         AuthType::SecurePassword
@@ -707,7 +737,14 @@ async fn authenticate(
         qos: true,
     };
 
-    log_msg(callbacks, 1, &format!("[RUST] Password hash length: {}", config.password_hash.len()));
+    log_msg(
+        callbacks,
+        1,
+        &format!(
+            "[RUST] Password hash length: {}",
+            config.password_hash.len()
+        ),
+    );
 
     // Decode password hash - it might be base64 or hex
     let password_hash_bytes: [u8; 20] =
@@ -723,7 +760,11 @@ async fn authenticate(
                 })?;
 
             if decoded.len() != 20 {
-                log_msg(callbacks, 3, &format!("[RUST] Hash length wrong: {} bytes", decoded.len()));
+                log_msg(
+                    callbacks,
+                    3,
+                    &format!("[RUST] Hash length wrong: {} bytes", decoded.len()),
+                );
                 return Err(crate::error::Error::Config(format!(
                     "Password hash must be 20 bytes, got {}",
                     decoded.len()
@@ -741,7 +782,14 @@ async fn authenticate(
             log_msg(callbacks, 1, "[RUST] Hex hash decoded successfully");
             decoded.try_into().unwrap()
         } else {
-            log_msg(callbacks, 3, &format!("[RUST] Invalid hash format: len={}", config.password_hash.len()));
+            log_msg(
+                callbacks,
+                3,
+                &format!(
+                    "[RUST] Invalid hash format: len={}",
+                    config.password_hash.len()
+                ),
+            );
             return Err(crate::error::Error::Config(
                 "Password hash must be 20 bytes as base64 (28 chars) or hex (40 chars)".into(),
             ));
@@ -766,7 +814,14 @@ async fn authenticate(
     let host = format!("{}:{}", config.server, config.port);
     let request_bytes = request.build(&host);
 
-    log_msg(callbacks, 1, &format!("[RUST] Sending auth request ({} bytes)...", request_bytes.len()));
+    log_msg(
+        callbacks,
+        1,
+        &format!(
+            "[RUST] Sending auth request ({} bytes)...",
+            request_bytes.len()
+        ),
+    );
     conn.write_all(&request_bytes).await?;
 
     let mut codec = HttpCodec::new();
@@ -784,9 +839,17 @@ async fn authenticate(
         }
 
         if let Some(response) = codec.feed(&buf[..n])? {
-            log_msg(callbacks, 1, &format!("[RUST] HTTP response status: {}", response.status_code));
+            log_msg(
+                callbacks,
+                1,
+                &format!("[RUST] HTTP response status: {}", response.status_code),
+            );
             if response.status_code != 200 {
-                log_msg(callbacks, 3, &format!("[RUST] Auth failed: HTTP {}", response.status_code));
+                log_msg(
+                    callbacks,
+                    3,
+                    &format!("[RUST] Auth failed: HTTP {}", response.status_code),
+                );
                 return Err(crate::error::Error::AuthenticationFailed(format!(
                     "Server returned status {}",
                     response.status_code
@@ -794,12 +857,20 @@ async fn authenticate(
             }
 
             if !response.body.is_empty() {
-                log_msg(callbacks, 1, &format!("[RUST] Response body: {} bytes", response.body.len()));
+                log_msg(
+                    callbacks,
+                    1,
+                    &format!("[RUST] Response body: {} bytes", response.body.len()),
+                );
                 let pack = crate::protocol::Pack::deserialize(&response.body)?;
                 let result = AuthResult::from_pack(&pack)?;
 
                 if result.error > 0 {
-                    log_msg(callbacks, 3, &format!("[RUST] Auth error code: {}", result.error));
+                    log_msg(
+                        callbacks,
+                        3,
+                        &format!("[RUST] Auth error code: {}", result.error),
+                    );
                     if result.error == 20 {
                         return Err(crate::error::Error::UserAlreadyLoggedIn);
                     }
@@ -809,7 +880,14 @@ async fn authenticate(
                     )));
                 }
 
-                log_msg(callbacks, 1, &format!("[RUST] Auth success! Session key: {} bytes", result.session_key.len()));
+                log_msg(
+                    callbacks,
+                    1,
+                    &format!(
+                        "[RUST] Auth success! Session key: {} bytes",
+                        result.session_key.len()
+                    ),
+                );
                 return Ok(result);
             } else {
                 log_msg(callbacks, 3, "[RUST] Empty auth response body");
@@ -849,6 +927,9 @@ fn resolve_server_ip(server: &str) -> crate::error::Result<Ipv4Addr> {
 }
 
 /// Disconnect from the VPN server.
+///
+/// # Safety
+/// - `handle` must be a valid handle returned by `softether_create`.
 #[no_mangle]
 pub unsafe extern "C" fn softether_disconnect(handle: SoftEtherHandle) -> SoftEtherResult {
     if handle.is_null() {
@@ -880,6 +961,9 @@ pub unsafe extern "C" fn softether_disconnect(handle: SoftEtherHandle) -> SoftEt
 }
 
 /// Get current connection state.
+///
+/// # Safety
+/// - `handle` must be a valid handle returned by `softether_create` or null.
 #[no_mangle]
 pub unsafe extern "C" fn softether_get_state(handle: SoftEtherHandle) -> SoftEtherState {
     if handle.is_null() {
@@ -894,6 +978,10 @@ pub unsafe extern "C" fn softether_get_state(handle: SoftEtherHandle) -> SoftEth
 }
 
 /// Get session information.
+///
+/// # Safety
+/// - `handle` must be a valid handle returned by `softether_create`.
+/// - `session` must be a valid pointer to a `SoftEtherSession` struct.
 #[no_mangle]
 pub unsafe extern "C" fn softether_get_session(
     handle: SoftEtherHandle,
@@ -919,6 +1007,10 @@ pub unsafe extern "C" fn softether_get_session(
 }
 
 /// Get connection statistics.
+///
+/// # Safety
+/// - `handle` must be a valid handle returned by `softether_create`.
+/// - `stats` must be a valid pointer to a `SoftEtherStats` struct.
 #[no_mangle]
 pub unsafe extern "C" fn softether_get_stats(
     handle: SoftEtherHandle,
@@ -939,6 +1031,11 @@ pub unsafe extern "C" fn softether_get_stats(
 }
 
 /// Send packets to the VPN server.
+///
+/// # Safety
+/// - `handle` must be a valid handle returned by `softether_create`.
+/// - `packets` must be a valid pointer to a buffer of `total_size` bytes.
+/// - The buffer contains length-prefixed packets.
 #[no_mangle]
 pub unsafe extern "C" fn softether_send_packets(
     handle: SoftEtherHandle,
@@ -978,6 +1075,10 @@ pub unsafe extern "C" fn softether_send_packets(
 }
 
 /// Receive packets from the VPN server (polling mode).
+///
+/// # Safety
+/// - `handle` must be a valid handle returned by `softether_create`.
+/// - `count` must be a valid pointer to a c_int.
 #[no_mangle]
 pub unsafe extern "C" fn softether_receive_packets(
     handle: SoftEtherHandle,
@@ -1002,6 +1103,10 @@ pub extern "C" fn softether_version() -> *const c_char {
 }
 
 /// Hash a password for SoftEther authentication.
+///
+/// # Safety
+/// - `password` and `username` must be valid null-terminated C strings.
+/// - `output` must be a valid pointer to a buffer of at least 20 bytes.
 #[no_mangle]
 pub unsafe extern "C" fn softether_hash_password(
     password: *const c_char,
@@ -1029,6 +1134,10 @@ pub unsafe extern "C" fn softether_hash_password(
 }
 
 /// Encode binary data as Base64.
+///
+/// # Safety
+/// - `input` must be a valid pointer to a buffer of `input_len` bytes.
+/// - `output` must be a valid pointer to a buffer of `output_len` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn softether_base64_encode(
     input: *const u8,
