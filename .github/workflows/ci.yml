@@ -1,0 +1,261 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Check formatting and lints
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          components: rustfmt, clippy
+      
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-
+      
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # Build and test on multiple platforms
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: ${{ matrix.target }}
+      
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
+      
+      # Linux dependencies
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake
+      
+      # Windows dependencies
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        run: |
+          choco install cmake nasm -y
+          echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
+      
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+      
+      - name: Run tests
+        run: cargo test --release --target ${{ matrix.target }}
+      
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: vpnclient-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/vpnclient
+            target/${{ matrix.target }}/release/vpnclient.exe
+
+  # Build for iOS (macOS runner only)
+  build-ios:
+    name: Build iOS
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: aarch64-apple-ios
+      
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: macos-ios-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            macos-ios-cargo-
+      
+      - name: Build iOS
+        run: cargo build --release --target aarch64-apple-ios --features ffi
+      
+      - name: Create XCFramework
+        run: |
+          mkdir -p target/ios
+          cp target/aarch64-apple-ios/release/libsoftether.a target/ios/
+          xcodebuild -create-xcframework \
+            -library target/ios/libsoftether.a -headers include \
+            -output target/ios/SoftEtherVPN.xcframework
+      
+      - name: Upload iOS framework
+        uses: actions/upload-artifact@v4
+        with:
+          name: SoftEtherVPN-iOS
+          path: target/ios/SoftEtherVPN.xcframework
+
+  # Build for Android
+  build-android:
+    name: Build Android
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+      
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: linux-android-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            linux-android-cargo-
+      
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r25c
+          add-to-path: true
+      
+      - name: Build Android (arm64-v8a)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
+        run: cargo build --release --target aarch64-linux-android --features ffi,jni
+      
+      - name: Build Android (armeabi-v7a)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang
+        run: cargo build --release --target armv7-linux-androideabi --features ffi,jni
+      
+      - name: Build Android (x86_64)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang
+        run: cargo build --release --target x86_64-linux-android --features ffi,jni
+      
+      - name: Build Android (x86)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          CARGO_TARGET_I686_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android21-clang
+        run: cargo build --release --target i686-linux-android --features ffi,jni
+      
+      - name: Package Android libraries
+        run: |
+          mkdir -p target/android/jniLibs/arm64-v8a
+          mkdir -p target/android/jniLibs/armeabi-v7a
+          mkdir -p target/android/jniLibs/x86_64
+          mkdir -p target/android/jniLibs/x86
+          cp target/aarch64-linux-android/release/libsoftether.so target/android/jniLibs/arm64-v8a/
+          cp target/armv7-linux-androideabi/release/libsoftether.so target/android/jniLibs/armeabi-v7a/
+          cp target/x86_64-linux-android/release/libsoftether.so target/android/jniLibs/x86_64/
+          cp target/i686-linux-android/release/libsoftether.so target/android/jniLibs/x86/
+      
+      - name: Upload Android libraries
+        uses: actions/upload-artifact@v4
+        with:
+          name: SoftEtherVPN-Android
+          path: target/android/jniLibs
+
+  # Create release
+  release:
+    name: Release
+    needs: [check, build, build-ios, build-android]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Package releases
+        run: |
+          cd artifacts
+          for dir in vpnclient-*; do
+            if [ -d "$dir" ]; then
+              tar -czvf "${dir}.tar.gz" "$dir"
+            fi
+          done
+          zip -r SoftEtherVPN-iOS.zip SoftEtherVPN-iOS
+          zip -r SoftEtherVPN-Android.zip SoftEtherVPN-Android
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.zip
+          draft: true
+          generate_release_notes: true
