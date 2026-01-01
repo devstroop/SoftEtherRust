@@ -87,20 +87,18 @@ impl VpnClient {
 
         // Log multi-connection configuration
         if self.config.max_connections > 1 {
-            info!("Multi-connection mode enabled: max_connections={}", self.config.max_connections);
+            debug!(max_connections = self.config.max_connections, "Multi-connection mode enabled");
         }
 
-        info!(
-            "Connecting to {}:{} (hub: {})",
-            self.config.server, self.config.port, self.config.hub
-        );
+        info!(server = %self.config.server, port = self.config.port, hub = %self.config.hub,
+            "Connecting to VPN server");
 
         // Resolve initial server IP for routing
         let initial_server_ip = self.resolve_server_ip(&self.config.server)?;
 
         // Establish connection
         let mut conn = VpnConnection::connect(&self.config).await?;
-        info!("TCP connection established");
+        debug!("TCP connection established");
 
         // Initialize UDP acceleration if enabled
         if self.config.udp_accel {
@@ -108,7 +106,7 @@ impl VpnClient {
             let no_nat_t = false;
             match UdpAccel::new(None, true, no_nat_t) {
                 Ok(accel) => {
-                    info!("UDP acceleration initialized on port {}", accel.my_port);
+                    debug!(port = accel.my_port, "UDP acceleration initialized");
                     self.udp_accel = Some(accel);
                 }
                 Err(e) => {
@@ -121,12 +119,13 @@ impl VpnClient {
         // Perform HTTP handshake
         self.state = VpnState::Handshaking;
         let hello = self.perform_handshake(&mut conn).await?;
-        info!("Received server hello: {:?}", hello);
+        debug!(version = hello.server_version, build = hello.server_build, 
+            server = %hello.server_string, "Server hello received");
 
         // Authenticate (with UDP accel params if available)
         self.state = VpnState::Authenticating;
         let mut auth_result = self.authenticate(&mut conn, &hello).await?;
-        info!("Authentication successful");
+        info!("Authenticated successfully");
 
         // Track the actual connection to use and server IP
         let mut active_conn = conn;
@@ -139,7 +138,7 @@ impl VpnClient {
         if let Some(redirect) = auth_result.redirect.take() {
             let redirect_server = redirect.ip_string();
             let redirect_port = redirect.port;
-            info!("Cluster redirect to {}:{}", redirect_server, redirect_port);
+            debug!(server = %redirect_server, port = redirect_port, "Cluster redirect");
             
             // Update actual server IP to redirect server
             if let Ok(ip) = redirect_server.parse::<Ipv4Addr>() {
@@ -177,7 +176,7 @@ impl VpnClient {
             return Err(Error::AuthenticationFailed("No session key received".into()));
         }
 
-        info!("Session established with key length: {} bytes", auth_result.session_key.len());
+        debug!(key_len = auth_result.session_key.len(), "Session key received");
 
         // Create ConnectionManager for multi-connection support
         // Pass the actual server address (after redirect) for additional connections
@@ -191,7 +190,7 @@ impl VpnClient {
         
         // Start tunnel
         self.state = VpnState::EstablishingTunnel;
-        info!("VPN tunnel established successfully");
+        info!("VPN session established");
 
         // Run the tunnel data loop
         self.state = VpnState::Connected;
@@ -218,14 +217,14 @@ impl VpnClient {
         let running = runner.running();
         tokio::spawn(async move {
             tokio::signal::ctrl_c().await.ok();
-            info!("Ctrl+C received, stopping tunnel...");
+            debug!("Shutdown signal received");
             running.store(false, Ordering::SeqCst);
         });
         
         // Run the tunnel with multi-connection support
         match runner.run_multi(&mut conn_mgr).await {
             Ok(()) => {
-                info!("Tunnel stopped cleanly");
+                debug!("Tunnel stopped cleanly");
                 let stats = conn_mgr.stats();
                 info!("Connection stats: {} connections, {} bytes sent, {} bytes received",
                       stats.total_connections, stats.total_bytes_sent, stats.total_bytes_received);
@@ -249,7 +248,7 @@ impl VpnClient {
         let redirect_server = redirect.ip_string();
         let redirect_port = redirect.port as u16;
         
-        info!("Connecting to cluster server {}:{}", redirect_server, redirect_port);
+        debug!(server = %redirect_server, port = redirect_port, "Connecting to cluster server");
         
         let mut redirect_config = self.config.clone();
         redirect_config.server = redirect_server.clone();

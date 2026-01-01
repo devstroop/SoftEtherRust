@@ -112,13 +112,15 @@ impl TunnelRunner {
     /// 2. Create and configure a TUN device
     /// 3. Run the packet forwarding loop
     pub async fn run(&mut self, conn: &mut VpnConnection) -> Result<()> {
-        info!("Starting tunnel runner with MAC {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-            self.mac[0], self.mac[1], self.mac[2], self.mac[3], self.mac[4], self.mac[5]);
+        debug!(mac = %format!("{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}", 
+            self.mac[0], self.mac[1], self.mac[2], self.mac[3], self.mac[4], self.mac[5]),
+            "Tunnel runner initialized");
+        info!("Starting VPN tunnel");
 
         // Step 1: Perform DHCP to get IP configuration
         let dhcp_config = self.perform_dhcp(conn).await?;
-        info!("DHCP complete: IP={}, Gateway={:?}, DNS={:?}",
-            dhcp_config.ip, dhcp_config.gateway, dhcp_config.dns1);
+        info!(ip = %dhcp_config.ip, gateway = ?dhcp_config.gateway, dns = ?dhcp_config.dns1,
+            "DHCP configuration received");
 
         // Step 2: Create TUN device
         #[cfg(target_os = "macos")]
@@ -127,7 +129,7 @@ impl TunnelRunner {
         #[cfg(target_os = "linux")]
         let mut tun = TunDevice::new(None)
             .map_err(|e| Error::TunDevice(format!("Failed to create TUN: {}", e)))?;
-        info!("Created TUN device: {}", tun.name());
+        debug!(device = %tun.name(), "TUN device created");
 
         // Step 3: Configure TUN device
         tun.configure(dhcp_config.ip, dhcp_config.netmask)
@@ -140,7 +142,8 @@ impl TunnelRunner {
         // Step 4: Set up routes
         self.configure_routes(&tun, &dhcp_config)?;
 
-        info!("TUN device {} configured with IP {}", tun.name(), dhcp_config.ip);
+        info!(device = %tun.name(), ip = %dhcp_config.ip, mtu = self.config.mtu,
+            "TUN interface configured");
 
         // Step 5: Run the data loop
         self.run_data_loop(conn, &mut tun, &dhcp_config).await
@@ -151,8 +154,10 @@ impl TunnelRunner {
     /// This is similar to `run()` but uses a ConnectionManager that can handle
     /// multiple TCP connections in half-connection mode.
     pub async fn run_multi(&mut self, conn_mgr: &mut ConnectionManager) -> Result<()> {
-        info!("Starting tunnel runner (multi-connection) with MAC {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-            self.mac[0], self.mac[1], self.mac[2], self.mac[3], self.mac[4], self.mac[5]);
+        debug!(mac = %format!("{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}", 
+            self.mac[0], self.mac[1], self.mac[2], self.mac[3], self.mac[4], self.mac[5]),
+            "Tunnel runner initialized (multi-connection)");
+        info!("Starting VPN tunnel with multiple connections");
 
         // Step 1: Establish additional connections BEFORE DHCP
         // In half-connection mode, the server won't respond until all connections are established
@@ -162,8 +167,8 @@ impl TunnelRunner {
 
         // Step 2: Perform DHCP to get IP configuration
         let dhcp_config = self.perform_dhcp_multi(conn_mgr).await?;
-        info!("DHCP complete: IP={}, Gateway={:?}, DNS={:?}",
-            dhcp_config.ip, dhcp_config.gateway, dhcp_config.dns1);
+        info!(ip = %dhcp_config.ip, gateway = ?dhcp_config.gateway, dns = ?dhcp_config.dns1,
+            "DHCP configuration received");
 
         // Additional connections already established above
         if conn_mgr.needs_more_connections() {
@@ -177,7 +182,7 @@ impl TunnelRunner {
         #[cfg(target_os = "linux")]
         let mut tun = TunDevice::new(None)
             .map_err(|e| Error::TunDevice(format!("Failed to create TUN: {}", e)))?;
-        info!("Created TUN device: {}", tun.name());
+        debug!(device = %tun.name(), "TUN device created");
 
         // Step 4: Configure TUN device
         tun.configure(dhcp_config.ip, dhcp_config.netmask)
@@ -190,7 +195,8 @@ impl TunnelRunner {
         // Step 5: Set up routes
         self.configure_routes(&tun, &dhcp_config)?;
 
-        info!("TUN device {} configured with IP {}", tun.name(), dhcp_config.ip);
+        info!(device = %tun.name(), ip = %dhcp_config.ip, mtu = self.config.mtu,
+            "TUN interface configured");
 
         // Step 6: Run the data loop with multi-connection support
         self.run_data_loop_multi(conn_mgr, &mut tun, &dhcp_config).await
@@ -248,7 +254,7 @@ impl TunnelRunner {
             (network, prefix_len)
         };
 
-        info!("Adding route for VPN subnet: {}/{}", route_network, route_prefix);
+        debug!(network = %route_network, prefix = route_prefix, "Adding VPN subnet route");
         tun.add_route_via_interface(route_network, route_prefix)
             .map_err(|e| Error::TunDevice(format!("Failed to add VPN subnet route: {}", e)))?;
 
@@ -278,8 +284,7 @@ impl TunnelRunner {
 
         // Send DHCP DISCOVER
         let discover = dhcp.build_discover();
-        info!("Sending DHCP DISCOVER ({} bytes)", discover.len());
-        debug!("DHCP DISCOVER: {:02X?}", &discover[..std::cmp::min(64, discover.len())]);
+        debug!(bytes = discover.len(), "Sending DHCP DISCOVER");
         self.send_frame(conn, &discover, &mut send_buf).await?;
 
         // Wait for OFFER
@@ -324,14 +329,14 @@ impl TunnelRunner {
                                 
                                 // Check if this is a DHCP response (UDP port 68)
                                 if self.is_dhcp_response(&packet_data) {
-                                    info!("DHCP response packet detected!");
+                                    debug!("DHCP response received");
                                     if dhcp.process_response(&packet_data) {
                                         // Got ACK
                                         return Ok(dhcp.config().clone());
                                     } else if dhcp.state() == DhcpState::DiscoverSent {
                                         // Got OFFER, send REQUEST
                                         if let Some(request) = dhcp.build_request() {
-                                            info!("Sending DHCP REQUEST");
+                                            debug!("Sending DHCP REQUEST");
                                             self.send_frame(conn, &request, &mut send_buf).await?;
                                         }
                                     }
@@ -513,7 +518,7 @@ impl TunnelRunner {
             }
         });
 
-        info!("Data loop started, press Ctrl+C to disconnect");
+        info!("VPN tunnel active");
 
         let our_ip = dhcp_config.ip;
         let use_compress = self.config.use_compress;
@@ -613,7 +618,6 @@ impl TunnelRunner {
                     }
                     
                     last_activity = Instant::now();
-                    debug!("TUN -> VPN: {} bytes", ip_packet.len());
                 }
 
                 // Data from VPN connection
@@ -674,11 +678,11 @@ impl TunnelRunner {
                             last_activity = Instant::now();
                         }
                         Ok(_) => {
-                            info!("Connection closed by server");
+                            warn!("Server closed connection");
                             break;
                         }
                         Err(e) => {
-                            error!("Network read error: {}", e);
+                            error!(error = %e, "Network read failed");
                             break;
                         }
                     }
@@ -709,7 +713,7 @@ impl TunnelRunner {
             }
         }
 
-        info!("Data loop ended");
+        info!("VPN tunnel stopped");
         tun_reader.abort();
         Ok(())
     }
@@ -719,7 +723,7 @@ impl TunnelRunner {
     fn process_frame_zerocopy(
         &self,
         tun_fd: i32,
-        _tun_buf: &mut [u8],
+        tun_buf: &mut [u8],
         arp: &mut ArpHandler,
         frame: &[u8],
         our_ip: Ipv4Addr,
@@ -848,12 +852,11 @@ impl TunnelRunner {
             .map(|(i, _)| i)
             .collect();
         
-        info!("DHCP: using {} receive connections: {:?}", recv_conn_indices.len(), recv_conn_indices);
+        debug!(connections = recv_conn_indices.len(), "DHCP using receive connections");
 
         // Send DHCP DISCOVER
         let discover = dhcp.build_discover();
-        info!("Sending DHCP DISCOVER ({} bytes)", discover.len());
-        debug!("DHCP DISCOVER: {:02X?}", &discover[..std::cmp::min(64, discover.len())]);
+        debug!(bytes = discover.len(), "Sending DHCP DISCOVER");
         self.send_frame_multi(conn_mgr, &discover, &mut send_buf).await?;
 
         let mut last_send = Instant::now();
@@ -941,14 +944,14 @@ impl TunnelRunner {
                                     
                                     // Check if this is a DHCP response (UDP port 68)
                                     if self.is_dhcp_response(&packet_data) {
-                                        info!("DHCP response packet detected on connection {}!", conn_idx);
+                                        debug!(conn = conn_idx, "DHCP response received");
                                         if dhcp.process_response(&packet_data) {
                                             // Got ACK
                                             return Ok(dhcp.config().clone());
                                         } else if dhcp.state() == DhcpState::DiscoverSent {
                                             // Got OFFER, send REQUEST
                                             if let Some(request) = dhcp.build_request() {
-                                                info!("Sending DHCP REQUEST");
+                                                debug!("Sending DHCP REQUEST");
                                                 self.send_frame_multi(conn_mgr, &request, &mut send_buf).await?;
                                                 last_send = Instant::now();
                                             }
@@ -1100,8 +1103,8 @@ impl TunnelRunner {
             }
         });
 
-        info!("Data loop started ({} total, {} recv-only concurrent, {} bidirectional), press Ctrl+C to disconnect", 
-              total_conns, num_recv, num_bidir);
+        info!(connections = total_conns, recv_only = num_recv, bidirectional = num_bidir,
+            "VPN tunnel active");
 
         let our_ip = dhcp_config.ip;
         let use_compress = self.config.use_compress;
@@ -1265,7 +1268,6 @@ impl TunnelRunner {
                     }
                     
                     last_activity = Instant::now();
-                    debug!("TUN -> VPN: {} bytes", ip_packet.len());
                 }
 
                 // Data from receive-only connections via ConcurrentReader
@@ -1308,15 +1310,15 @@ impl TunnelRunner {
             }
         }
 
-        info!("Data loop ended");
+        info!("VPN tunnel stopped");
         
         // Cleanup
         if let Some(ref mut reader) = concurrent_reader {
             reader.shutdown();
             let recv_stats = reader.bytes_received();
             let total_recv: u64 = recv_stats.iter().map(|(_, b)| b).sum();
-            info!("Concurrent reader stats: {} bytes received across {} connections", 
-                  total_recv, recv_stats.len());
+            debug!(bytes = total_recv, connections = recv_stats.len(),
+                "Concurrent reader shutdown");
         }
         tun_reader.abort();
         
