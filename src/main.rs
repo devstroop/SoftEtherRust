@@ -253,7 +253,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     hub,
                     username,
                     password_hash: password_hash_str,
-                    skip_tls_verify: skip_tls_verify,
+                    skip_tls_verify,
                     ..Default::default()
                 }
             };
