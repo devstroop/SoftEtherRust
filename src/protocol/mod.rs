@@ -15,5 +15,5 @@ mod constants;
 pub use pack::{Pack, PackValue};
 pub use http::{HttpRequest, HttpResponse, HttpCodec};
 pub use auth::{AuthType, AuthPack, HelloResponse, AuthResult, RedirectInfo, ConnectionOptions};
-pub use tunnel::{TunnelFrame, TunnelCodec, TunnelConstants, is_compressed, decompress, compress};
+pub use tunnel::{TunnelFrame, TunnelCodec, TunnelConstants, is_compressed, decompress, decompress_into, compress};
 pub use constants::*;

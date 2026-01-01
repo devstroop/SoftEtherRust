@@ -77,6 +77,18 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
     Ok(decompressed)
 }
 
+/// Decompress zlib-compressed data into a pre-allocated buffer (zero-copy).
+/// Returns the number of bytes written to the buffer.
+#[inline]
+pub fn decompress_into(data: &[u8], buffer: &mut [u8]) -> Result<usize> {
+    use std::io::Cursor;
+    let mut decoder = ZlibDecoder::new(data);
+    let mut cursor = Cursor::new(buffer);
+    std::io::copy(&mut decoder, &mut cursor)
+        .map_err(|e| Error::Protocol(format!("Decompression failed: {}", e)))?;
+    Ok(cursor.position() as usize)
+}
+
 /// Compress data with zlib.
 pub fn compress(data: &[u8]) -> Result<Vec<u8>> {
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());

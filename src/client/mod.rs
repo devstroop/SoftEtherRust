@@ -475,6 +475,7 @@ impl VpnClient {
     }
 
     /// Establish additional data connection.
+    #[allow(dead_code)]
     async fn establish_data_connection(&self, auth: &AuthResult, server: &str, port: u16) -> Result<VpnConnection> {
         // Create config for the target server
         let mut conn_config = self.config.clone();

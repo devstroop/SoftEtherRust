@@ -433,10 +433,93 @@ impl TunAdapter for UtunDevice {
         info!("Set default route via {} (split-tunnel: 0.0.0.0/1 + 128.0.0.0/1)", self.name);
         Ok(())
     }
+
+    fn configure_dns(&self, dns1: Option<Ipv4Addr>, dns2: Option<Ipv4Addr>) -> io::Result<()> {
+        // On macOS, we create a custom resolver configuration using scutil
+        // This creates a "resolver" entry that takes precedence for DNS resolution
+        
+        let dns_servers: Vec<String> = [dns1, dns2]
+            .iter()
+            .filter_map(|&d| d.map(|ip| ip.to_string()))
+            .collect();
+        
+        if dns_servers.is_empty() {
+            debug!("No DNS servers to configure");
+            return Ok(());
+        }
+
+        let servers_str = dns_servers.join("\n");
+        
+        // Create the resolver configuration
+        let scutil_commands = format!(
+            "d.init\n\
+             d.add ServerAddresses * {}\n\
+             d.add SupplementalMatchDomains * \"\"\n\
+             set State:/Network/Service/{}/DNS\n\
+             quit",
+            servers_str, self.name
+        );
+
+        let output = Command::new("scutil")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                if let Some(stdin) = child.stdin.as_mut() {
+                    stdin.write_all(scutil_commands.as_bytes())?;
+                }
+                child.wait_with_output()
+            });
+
+        match output {
+            Ok(out) if out.status.success() => {
+                info!("Configured DNS servers: {:?}", dns_servers);
+                Ok(())
+            }
+            Ok(out) => {
+                warn!("scutil DNS configuration may have failed: {}", 
+                      String::from_utf8_lossy(&out.stderr));
+                // Don't fail - DNS might still work
+                Ok(())
+            }
+            Err(e) => {
+                warn!("Failed to run scutil for DNS: {}", e);
+                Ok(()) // Don't fail connection over DNS config
+            }
+        }
+    }
+
+    fn restore_dns(&self) -> io::Result<()> {
+        // Remove our DNS configuration
+        let scutil_commands = format!(
+            "remove State:/Network/Service/{}/DNS\n\
+             quit",
+            self.name
+        );
+
+        let _ = Command::new("scutil")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                if let Some(stdin) = child.stdin.as_mut() {
+                    stdin.write_all(scutil_commands.as_bytes())?;
+                }
+                child.wait()
+            });
+
+        debug!("Restored DNS configuration");
+        Ok(())
+    }
 }
 
 impl Drop for UtunDevice {
     fn drop(&mut self) {
+        // Restore DNS first
+        let _ = self.restore_dns();
+        
         // Clean up routes we added
         if let Ok(routes) = self.routes_added.lock() {
             for route in routes.iter() {

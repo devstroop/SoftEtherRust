@@ -47,6 +47,13 @@ pub trait TunAdapter: Send + Sync {
     /// `vpn_server_ip` is used to add a host route for the VPN server through the original gateway
     /// to prevent routing loops.
     fn set_default_route(&self, gateway: Ipv4Addr, vpn_server_ip: Option<Ipv4Addr>) -> std::io::Result<()>;
+
+    /// Configure DNS servers.
+    /// This sets the system to use the specified DNS servers.
+    fn configure_dns(&self, dns1: Option<Ipv4Addr>, dns2: Option<Ipv4Addr>) -> std::io::Result<()>;
+
+    /// Restore original DNS configuration.
+    fn restore_dns(&self) -> std::io::Result<()>;
 }
 
 /// Get the current default gateway.

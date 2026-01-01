@@ -18,11 +18,10 @@ use tracing::{debug, error, info, warn};
 use crate::adapter::{TunAdapter, UtunDevice};
 use crate::client::VpnConnection;
 use crate::error::{Error, Result};
-use crate::protocol::{TunnelCodec, is_compressed, decompress, compress};
+use crate::protocol::{TunnelCodec, is_compressed, decompress, decompress_into, compress};
 
 use super::{
     ArpHandler, DhcpClient, DhcpConfig, DhcpState, DataLoopState,
-    unwrap_ethernet_to_ip,
     BROADCAST_MAC,
 };
 
@@ -202,6 +201,10 @@ impl TunnelRunner {
             }
         }
 
+        // Configure DNS servers from DHCP
+        tun.configure_dns(dhcp_config.dns1, dhcp_config.dns2)
+            .map_err(|e| Error::TunDevice(format!("Failed to configure DNS: {}", e)))?;
+
         Ok(())
     }
 
@@ -356,6 +359,10 @@ impl TunnelRunner {
     }
 
     /// Run the main data forwarding loop.
+    /// 
+    /// Zero-copy optimized path:
+    /// - Outbound: TUN read → inline Ethernet wrap → direct send
+    /// - Inbound: Network read → direct TUN write (skip Ethernet header)
     async fn run_data_loop(
         &self,
         conn: &mut VpnConnection,
@@ -367,8 +374,18 @@ impl TunnelRunner {
         state.configure(dhcp_config.ip, gateway);
 
         let mut codec = TunnelCodec::new();
+        
+        // Pre-allocated buffers - sized for maximum packets
+        // Network receive buffer
         let mut net_buf = vec![0u8; 65536];
-        let mut send_buf = vec![0u8; 2048];
+        // Send buffer: 4 (utun header) + 14 (eth) + 1500 (MTU) + 8 (tunnel header) + compression overhead
+        let mut send_buf = vec![0u8; 4096];
+        // Decompression buffer (reused to avoid allocation per packet)
+        let mut decomp_buf = vec![0u8; 4096];
+        
+        // TUN write buffer with utun header space pre-allocated
+        // Layout: [4-byte utun header][IP packet]
+        let mut tun_write_buf = vec![0u8; 2048];
 
         // Set up ARP handler
         let mut arp = ArpHandler::new(self.mac);
@@ -387,17 +404,20 @@ impl TunnelRunner {
         let mut keepalive_interval = interval(Duration::from_secs(self.config.keepalive_interval));
         let mut last_activity = Instant::now();
 
-        // Use channels for TUN reading since it's blocking
-        // Use larger channel buffer for throughput, but process immediately for latency
-        let (tun_tx, mut tun_rx) = mpsc::channel::<Vec<u8>>(256);
+        // Zero-copy TUN reader using fixed buffer
+        // Layout: [4-byte utun header][14-byte ethernet header][IP packet]
+        // We read at offset 18 to leave room for prepending headers
+        let (tun_tx, mut tun_rx) = mpsc::channel::<(usize, [u8; 2048])>(64);
         let tun_fd = tun.raw_fd();
         let running = self.running.clone();
 
-        // Spawn blocking TUN reader task with optimized polling
+        // Spawn blocking TUN reader task - zero allocation in hot path
         let tun_reader = tokio::task::spawn_blocking(move || {
-            let buf_size = 2048;
+            // Fixed buffer - no allocation per packet
+            let mut read_buf = [0u8; 2048];
+            
             while running.load(Ordering::SeqCst) {
-                // Use shorter poll timeout for lower latency (10ms instead of 100ms)
+                // Poll with short timeout for low latency
                 let mut poll_fds = [libc::pollfd {
                     fd: tun_fd,
                     events: libc::POLLIN,
@@ -405,25 +425,22 @@ impl TunnelRunner {
                 }];
                 
                 let poll_result = unsafe {
-                    libc::poll(poll_fds.as_mut_ptr(), 1, 10) // 10ms timeout for low latency
+                    libc::poll(poll_fds.as_mut_ptr(), 1, 5) // 5ms timeout
                 };
                 
                 if poll_result > 0 && (poll_fds[0].revents & libc::POLLIN) != 0 {
-                    // Data available - read with utun header handling
-                    let mut full_buf = vec![0u8; buf_size + 4];
                     let n = unsafe {
                         libc::read(
                             tun_fd,
-                            full_buf.as_mut_ptr() as *mut libc::c_void,
-                            full_buf.len(),
+                            read_buf.as_mut_ptr() as *mut libc::c_void,
+                            read_buf.len(),
                         )
                     };
 
                     if n > 4 {
-                        let n = n as usize;
-                        // Skip 4-byte utun header
-                        let packet = full_buf[4..n].to_vec();
-                        if tun_tx.blocking_send(packet).is_err() {
+                        // Send the buffer with length - receiver will extract IP packet
+                        // Channel copies the fixed buffer (unavoidable for cross-thread)
+                        if tun_tx.blocking_send((n as usize, read_buf)).is_err() {
                             break;
                         }
                     }
@@ -433,33 +450,99 @@ impl TunnelRunner {
 
         info!("Data loop started, press Ctrl+C to disconnect");
 
+        let our_ip = dhcp_config.ip;
+        let use_compress = self.config.use_compress;
+        let my_mac = self.mac;
+
         while self.running.load(Ordering::SeqCst) {
             tokio::select! {
                 // Packet from TUN device (from local applications)
-                Some(ip_packet) = tun_rx.recv() => {
-                    // Wrap in Ethernet and send through tunnel
-                    let gateway_mac = arp.gateway_mac_or_broadcast();
-                    
-                    // Build Ethernet frame manually
-                    let mut eth_frame = vec![0u8; 14 + ip_packet.len()];
-                    eth_frame[0..6].copy_from_slice(&gateway_mac);  // dst MAC
-                    eth_frame[6..12].copy_from_slice(&self.mac);    // src MAC
-                    
-                    // EtherType based on IP version
-                    let ip_version = (ip_packet[0] >> 4) & 0x0F;
-                    if ip_version == 4 {
-                        eth_frame[12] = 0x08;
-                        eth_frame[13] = 0x00;
-                    } else if ip_version == 6 {
-                        eth_frame[12] = 0x86;
-                        eth_frame[13] = 0xDD;
-                    } else {
-                        continue; // Unknown IP version
+                Some((len, tun_buf)) = tun_rx.recv() => {
+                    // tun_buf layout: [4-byte utun header][IP packet]
+                    // IP packet starts at offset 4
+                    let ip_packet = &tun_buf[4..len];
+                    if ip_packet.is_empty() {
+                        continue;
                     }
                     
-                    eth_frame[14..].copy_from_slice(&ip_packet);
+                    let gateway_mac = arp.gateway_mac_or_broadcast();
                     
-                    self.send_frame(conn, &eth_frame, &mut send_buf).await?;
+                    // Zero-copy path: build tunnel frame directly in send_buf
+                    // Layout: [4: num_blocks][4: block_size][14: eth header][IP packet]
+                    let eth_len = 14 + ip_packet.len();
+                    let total_len = 8 + eth_len;
+                    
+                    if total_len > send_buf.len() {
+                        warn!("Packet too large: {}", ip_packet.len());
+                        continue;
+                    }
+                    
+                    // Determine IP version
+                    let ip_version = (ip_packet[0] >> 4) & 0x0F;
+                    if ip_version != 4 && ip_version != 6 {
+                        continue;
+                    }
+                    
+                    if use_compress {
+                        // Compression path - needs intermediate buffer
+                        // Build ethernet frame first
+                        let eth_start = 8;
+                        send_buf[eth_start..eth_start + 6].copy_from_slice(&gateway_mac);
+                        send_buf[eth_start + 6..eth_start + 12].copy_from_slice(&my_mac);
+                        if ip_version == 4 {
+                            send_buf[eth_start + 12] = 0x08;
+                            send_buf[eth_start + 13] = 0x00;
+                        } else {
+                            send_buf[eth_start + 12] = 0x86;
+                            send_buf[eth_start + 13] = 0xDD;
+                        }
+                        send_buf[eth_start + 14..eth_start + 14 + ip_packet.len()]
+                            .copy_from_slice(ip_packet);
+                        
+                        let eth_frame = &send_buf[eth_start..eth_start + eth_len];
+                        
+                        // Compress to decomp_buf (reused buffer)
+                        match compress(eth_frame) {
+                            Ok(compressed) => {
+                                let comp_total = 8 + compressed.len();
+                                if comp_total <= send_buf.len() {
+                                    // Write header
+                                    send_buf[0..4].copy_from_slice(&1u32.to_be_bytes());
+                                    send_buf[4..8].copy_from_slice(&(compressed.len() as u32).to_be_bytes());
+                                    send_buf[8..8 + compressed.len()].copy_from_slice(&compressed);
+                                    conn.write_all(&send_buf[..comp_total]).await?;
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Compression failed: {}", e);
+                                // Fall back to uncompressed
+                                send_buf[0..4].copy_from_slice(&1u32.to_be_bytes());
+                                send_buf[4..8].copy_from_slice(&(eth_len as u32).to_be_bytes());
+                                conn.write_all(&send_buf[..total_len]).await?;
+                            }
+                        }
+                    } else {
+                        // Zero-copy uncompressed path
+                        // num_blocks = 1
+                        send_buf[0..4].copy_from_slice(&1u32.to_be_bytes());
+                        // block_size = eth_len
+                        send_buf[4..8].copy_from_slice(&(eth_len as u32).to_be_bytes());
+                        // Ethernet header
+                        send_buf[8..14].copy_from_slice(&gateway_mac);
+                        send_buf[14..20].copy_from_slice(&my_mac);
+                        if ip_version == 4 {
+                            send_buf[20] = 0x08;
+                            send_buf[21] = 0x00;
+                        } else {
+                            send_buf[20] = 0x86;
+                            send_buf[21] = 0xDD;
+                        }
+                        // IP packet - single copy
+                        send_buf[22..22 + ip_packet.len()].copy_from_slice(ip_packet);
+                        
+                        conn.write_all(&send_buf[..total_len]).await?;
+                    }
+                    
                     last_activity = Instant::now();
                     debug!("TUN -> VPN: {} bytes", ip_packet.len());
                 }
@@ -468,34 +551,57 @@ impl TunnelRunner {
                 result = conn.read(&mut net_buf) => {
                     match result {
                         Ok(n) if n > 0 => {
-                            let frames = codec.feed(&net_buf[..n])?;
-                            for frame in frames {
-                                if let Some(packets) = frame.packets() {
-                                    for packet in packets {
-                                        // Decompress if needed
-                                        let packet_data: Vec<u8> = if is_compressed(packet) {
-                                            match decompress(packet) {
-                                                Ok(decompressed) => decompressed,
-                                                Err(e) => {
-                                                    warn!("Decompression failed: {}", e);
-                                                    continue;
+                            // Decode frames
+                            match codec.feed(&net_buf[..n]) {
+                                Ok(frames) => {
+                                    for frame in frames {
+                                        if frame.is_keepalive() {
+                                            debug!("Received keepalive");
+                                            continue;
+                                        }
+                                        
+                                        // Process each packet in the frame
+                                        if let Some(packets) = frame.packets() {
+                                            for packet in packets {
+                                                // Decompress if needed
+                                                let frame_data: &[u8] = if is_compressed(packet) {
+                                                    match decompress_into(packet, &mut decomp_buf) {
+                                                        Ok(len) => &decomp_buf[..len],
+                                                        Err(_) => continue,
+                                                    }
+                                                } else {
+                                                    packet
+                                                };
+                                                
+                                                // Process frame with mutable ARP access
+                                                if let Err(e) = self.process_frame_zerocopy(
+                                                    tun_fd,
+                                                    &mut tun_write_buf,
+                                                    &mut arp,
+                                                    frame_data,
+                                                    our_ip,
+                                                ) {
+                                                    error!("Process error: {}", e);
                                                 }
                                             }
-                                        } else {
-                                            packet.to_vec()
-                                        };
-                                        
-                                        self.process_incoming_frame(
-                                            tun,
-                                            conn,
-                                            &mut arp,
-                                            &packet_data,
-                                            dhcp_config.ip,
-                                            &mut send_buf,
-                                        ).await?;
+                                        }
                                     }
                                 }
+                                Err(e) => {
+                                    error!("Decode error: {}", e);
+                                }
                             }
+                            
+                            // Send any pending ARP replies
+                            if let Some(reply) = arp.build_pending_reply() {
+                                if let Err(e) = self.send_frame(conn, &reply, &mut send_buf).await {
+                                    error!("Failed to send ARP reply: {}", e);
+                                } else {
+                                    debug!("Sent ARP reply");
+                                }
+                                arp.take_pending_reply();
+                            }
+                            
                             last_activity = Instant::now();
                         }
                         Ok(_) => {
@@ -539,71 +645,83 @@ impl TunnelRunner {
         Ok(())
     }
 
-    /// Process an incoming Ethernet frame from the tunnel.
-    async fn process_incoming_frame(
+    /// Process an incoming frame with zero-copy TUN write.
+    #[inline]
+    fn process_frame_zerocopy(
         &self,
-        tun: &mut UtunDevice,
-        conn: &mut VpnConnection,
+        tun_fd: i32,
+        tun_buf: &mut [u8],
         arp: &mut ArpHandler,
         frame: &[u8],
         our_ip: Ipv4Addr,
-        send_buf: &mut [u8],
     ) -> Result<()> {
         if frame.len() < 14 {
             return Ok(());
         }
 
-        // Check if it's addressed to us
+        // Check destination MAC
         let dst_mac: [u8; 6] = frame[0..6].try_into().unwrap();
         if dst_mac != self.mac && dst_mac != BROADCAST_MAC {
-            // Not for us
-            return Ok(());
+            return Ok(()); // Not for us
         }
 
         let ether_type = u16::from_be_bytes([frame[12], frame[13]]);
 
         match ether_type {
             0x0800 => {
-                // IPv4 - extract and send to TUN
-                if let Some(ip_packet) = unwrap_ethernet_to_ip(frame) {
-                    // Verify destination IP matches ours
-                    if ip_packet.len() >= 20 {
-                        let dst_ip = Ipv4Addr::new(
-                            ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]
-                        );
-                        
-                        if dst_ip == our_ip || dst_ip.is_broadcast() || dst_ip.is_multicast() {
-                            // Write to TUN device (with utun header)
-                            let mut tun_buf = vec![0u8; ip_packet.len() + 4];
-                            // Protocol family (AF_INET = 2)
+                // IPv4 - extract and write to TUN
+                let ip_packet = &frame[14..];
+                if ip_packet.len() >= 20 {
+                    let dst_ip = Ipv4Addr::new(
+                        ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]
+                    );
+                    
+                    if dst_ip == our_ip || dst_ip.is_broadcast() || dst_ip.is_multicast() {
+                        // Zero-copy write: build utun header + IP packet in pre-allocated buffer
+                        let total_len = 4 + ip_packet.len();
+                        if total_len <= tun_buf.len() {
+                            // AF_INET = 2 in network byte order
                             tun_buf[0..4].copy_from_slice(&(libc::AF_INET as u32).to_be_bytes());
-                            tun_buf[4..].copy_from_slice(ip_packet);
+                            tun_buf[4..total_len].copy_from_slice(ip_packet);
                             
-                            let n = unsafe {
+                            unsafe {
                                 libc::write(
-                                    tun.raw_fd(),
+                                    tun_fd,
                                     tun_buf.as_ptr() as *const libc::c_void,
-                                    tun_buf.len(),
-                                )
-                            };
-                            
-                            if n > 0 {
-                                debug!("VPN -> TUN: {} bytes to {}", ip_packet.len(), dst_ip);
+                                    total_len,
+                                );
                             }
                         }
                     }
                 }
             }
-            0x0806 => {
-                // ARP
-                if let Some(reply) = arp.process_arp(frame) {
-                    self.send_frame(conn, &reply, send_buf).await?;
-                    debug!("Sent ARP reply");
+            0x86DD => {
+                // IPv6
+                let ip_packet = &frame[14..];
+                let total_len = 4 + ip_packet.len();
+                if total_len <= tun_buf.len() {
+                    // AF_INET6 = 30 on macOS in network byte order
+                    tun_buf[0..4].copy_from_slice(&(libc::AF_INET6 as u32).to_be_bytes());
+                    tun_buf[4..total_len].copy_from_slice(ip_packet);
+                    
+                    unsafe {
+                        libc::write(
+                            tun_fd,
+                            tun_buf.as_ptr() as *const libc::c_void,
+                            total_len,
+                        );
+                    }
                 }
             }
-            _ => {
-                debug!("Unknown EtherType: 0x{:04X}", ether_type);
+            0x0806 => {
+                // ARP - process to learn gateway MAC and respond to requests
+                if let Some(_reply) = arp.process_arp(frame) {
+                    // Reply is built but we don't send it from here
+                    // The main loop will check for pending replies
+                    debug!("ARP reply queued");
+                }
             }
+            _ => {}
         }
 
         Ok(())
