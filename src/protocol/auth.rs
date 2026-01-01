@@ -575,12 +575,35 @@ impl AuthPack {
 
     /// Get the system hostname (like GetMachineName in C).
     fn get_hostname() -> String {
-        let mut buf = [0u8; 256];
-        let result = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
-        if result == 0 {
-            let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-            String::from_utf8_lossy(&buf[..len]).into_owned()
-        } else {
+        #[cfg(unix)]
+        {
+            let mut buf = [0u8; 256];
+            let result = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+            if result == 0 {
+                let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+                String::from_utf8_lossy(&buf[..len]).into_owned()
+            } else {
+                "unknown".to_string()
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::process::Command;
+            // Use hostname command on Windows
+            Command::new("hostname")
+                .output()
+                .ok()
+                .and_then(|output| {
+                    if output.status.success() {
+                        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| "unknown".to_string())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
             "unknown".to_string()
         }
     }

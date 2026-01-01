@@ -169,10 +169,6 @@ impl TunAdapter for UtunDevice {
         &self.name
     }
 
-    fn raw_fd(&self) -> RawFd {
-        self.fd.as_raw_fd()
-    }
-
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // utun on macOS prepends a 4-byte header (protocol family)
         let mut full_buf = vec![0u8; buf.len() + 4];

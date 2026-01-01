@@ -9,22 +9,31 @@ mod macos;
 #[cfg(target_os = "linux")]
 mod linux;
 
+#[cfg(target_os = "windows")]
+mod windows;
+
 #[cfg(target_os = "macos")]
 pub use macos::UtunDevice;
 
 #[cfg(target_os = "linux")]
 pub use linux::TunDevice;
 
+#[cfg(target_os = "windows")]
+pub use windows::WintunDevice;
+
 use std::net::Ipv4Addr;
-use std::os::fd::RawFd;
+
+/// Platform-specific raw handle type for TUN devices.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub type TunHandle = std::os::fd::RawFd;
+
+#[cfg(target_os = "windows")]
+pub type TunHandle = std::sync::Arc<wintun::Session>;
 
 /// Generic TUN device trait.
 pub trait TunAdapter: Send + Sync {
     /// Get the device name.
     fn name(&self) -> &str;
-
-    /// Get the raw file descriptor.
-    fn raw_fd(&self) -> RawFd;
 
     /// Read a packet from the device.
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
@@ -71,7 +80,11 @@ pub fn get_default_gateway() -> Option<Ipv4Addr> {
     {
         linux::get_default_gateway()
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::get_default_gateway()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         None
     }
