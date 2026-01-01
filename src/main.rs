@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::fmt::format::FmtSpan;
 
-use softether_rust::{crypto, VpnClient, VpnConfig};
+use softethervpn::{crypto, VpnClient, VpnConfig};
 
 #[derive(Parser)]
 #[command(name = "softether-rust")]

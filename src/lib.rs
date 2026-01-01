@@ -47,6 +47,10 @@ pub mod net;
 pub mod error;
 pub mod config;
 
+// FFI module for C/iOS/Android interop
+#[cfg(feature = "ffi")]
+pub mod ffi;
+
 // Re-exports for convenience
 pub use client::VpnClient;
 pub use config::VpnConfig;

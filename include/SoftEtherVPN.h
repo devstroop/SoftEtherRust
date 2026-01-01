@@ -1,0 +1,252 @@
+// SoftEtherVPN.h - C header for iOS/macOS integration
+//
+// Include this header in your Swift bridging header or use directly from Objective-C.
+//
+// Example bridging header:
+//   #import "SoftEtherVPN.h"
+
+#ifndef SOFTETHER_VPN_H
+#define SOFTETHER_VPN_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// =============================================================================
+// Result Codes
+// =============================================================================
+
+typedef enum {
+    SOFTETHER_OK = 0,
+    SOFTETHER_INVALID_PARAM = -1,
+    SOFTETHER_NOT_CONNECTED = -2,
+    SOFTETHER_CONNECTION_FAILED = -3,
+    SOFTETHER_AUTH_FAILED = -4,
+    SOFTETHER_DHCP_FAILED = -5,
+    SOFTETHER_TIMEOUT = -6,
+    SOFTETHER_IO_ERROR = -7,
+    SOFTETHER_ALREADY_CONNECTED = -8,
+    SOFTETHER_INTERNAL_ERROR = -99,
+} SoftEtherResult;
+
+// =============================================================================
+// Connection State
+// =============================================================================
+
+typedef enum {
+    SOFTETHER_STATE_DISCONNECTED = 0,
+    SOFTETHER_STATE_CONNECTING = 1,
+    SOFTETHER_STATE_HANDSHAKING = 2,
+    SOFTETHER_STATE_AUTHENTICATING = 3,
+    SOFTETHER_STATE_CONNECTED = 4,
+    SOFTETHER_STATE_DISCONNECTING = 5,
+    SOFTETHER_STATE_ERROR = 6,
+} SoftEtherState;
+
+// =============================================================================
+// Configuration
+// =============================================================================
+
+typedef struct {
+    const char* server;           // Server hostname or IP (null-terminated UTF-8)
+    unsigned int port;            // Server port (default 443)
+    const char* hub;              // Virtual hub name
+    const char* username;         // Username
+    const char* password_hash;    // Base64-encoded SHA0 password hash
+    int use_tls;                  // Use TLS (1 = yes, 0 = no)
+    unsigned int max_connections; // Max connections (1-32)
+    int use_compress;             // Use compression (1 = yes, 0 = no)
+    unsigned int connect_timeout_secs;    // Connection timeout
+    unsigned int keepalive_interval_secs; // Keepalive interval (0 = adaptive)
+} SoftEtherConfig;
+
+// =============================================================================
+// Session Information
+// =============================================================================
+
+typedef struct {
+    uint32_t ip_address;          // Assigned IP (network byte order)
+    uint32_t subnet_mask;         // Subnet mask (network byte order)
+    uint32_t gateway;             // Gateway IP (network byte order)
+    uint32_t dns1;                // Primary DNS (network byte order)
+    uint32_t dns2;                // Secondary DNS (network byte order)
+    char connected_server_ip[64]; // Actual server IP (for route exclusion)
+    uint32_t server_version;      // Server version
+    uint32_t server_build;        // Server build number
+} SoftEtherSession;
+
+// =============================================================================
+// Statistics
+// =============================================================================
+
+typedef struct {
+    uint64_t bytes_sent;
+    uint64_t bytes_received;
+    uint64_t packets_sent;
+    uint64_t packets_received;
+    uint64_t uptime_secs;
+    unsigned int active_connections;
+    unsigned int reconnect_count;
+} SoftEtherStats;
+
+// =============================================================================
+// Callbacks
+// =============================================================================
+
+typedef void (*SoftEtherStateCallback)(void* context, SoftEtherState state);
+typedef void (*SoftEtherConnectedCallback)(void* context, const SoftEtherSession* session);
+typedef void (*SoftEtherDisconnectedCallback)(void* context, SoftEtherResult result);
+typedef void (*SoftEtherPacketsCallback)(void* context, const uint8_t* packets, size_t total_size, uint32_t count);
+typedef void (*SoftEtherLogCallback)(void* context, int level, const char* message);
+
+typedef struct {
+    void* context;                              // User context passed to callbacks
+    SoftEtherStateCallback on_state_changed;    // State change callback
+    SoftEtherConnectedCallback on_connected;    // Connection established callback
+    SoftEtherDisconnectedCallback on_disconnected; // Disconnection callback
+    SoftEtherPacketsCallback on_packets_received;  // Packets received callback
+    SoftEtherLogCallback on_log;                // Log message callback
+} SoftEtherCallbacks;
+
+// =============================================================================
+// Handle Type
+// =============================================================================
+
+typedef void* SoftEtherHandle;
+#define SOFTETHER_HANDLE_NULL ((SoftEtherHandle)0)
+
+// =============================================================================
+// API Functions
+// =============================================================================
+
+/**
+ * Create a new SoftEther VPN client.
+ *
+ * @param config VPN configuration (must not be NULL)
+ * @param callbacks Optional callbacks for events (can be NULL)
+ * @return Handle to the client, or SOFTETHER_HANDLE_NULL on error
+ */
+SoftEtherHandle softether_create(const SoftEtherConfig* config, const SoftEtherCallbacks* callbacks);
+
+/**
+ * Destroy a SoftEther VPN client.
+ *
+ * Disconnects if connected and releases all resources.
+ * The handle must not be used after this call.
+ *
+ * @param handle Client handle
+ */
+void softether_destroy(SoftEtherHandle handle);
+
+/**
+ * Connect to the VPN server.
+ *
+ * This is an asynchronous operation. Connection status is reported
+ * via the on_state_changed and on_connected callbacks.
+ *
+ * @param handle Client handle
+ * @return SOFTETHER_OK if connection started, error code otherwise
+ */
+SoftEtherResult softether_connect(SoftEtherHandle handle);
+
+/**
+ * Disconnect from the VPN server.
+ *
+ * @param handle Client handle
+ * @return SOFTETHER_OK on success
+ */
+SoftEtherResult softether_disconnect(SoftEtherHandle handle);
+
+/**
+ * Get current connection state.
+ *
+ * @param handle Client handle
+ * @return Current state
+ */
+SoftEtherState softether_get_state(SoftEtherHandle handle);
+
+/**
+ * Get session information.
+ *
+ * @param handle Client handle
+ * @param session Output pointer for session info
+ * @return SOFTETHER_OK if connected, SOFTETHER_NOT_CONNECTED otherwise
+ */
+SoftEtherResult softether_get_session(SoftEtherHandle handle, SoftEtherSession* session);
+
+/**
+ * Get connection statistics.
+ *
+ * @param handle Client handle
+ * @param stats Output pointer for statistics
+ * @return SOFTETHER_OK on success
+ */
+SoftEtherResult softether_get_stats(SoftEtherHandle handle, SoftEtherStats* stats);
+
+/**
+ * Send packets to the VPN server.
+ *
+ * Packet format: [len:u16][data][len:u16][data]...
+ * Each packet is prefixed with its 16-bit length in network byte order.
+ *
+ * @param handle Client handle
+ * @param packets Packet data
+ * @param total_size Total size of packet data
+ * @param count Number of packets
+ * @return Number of packets sent, or negative error code
+ */
+int softether_send_packets(SoftEtherHandle handle, const uint8_t* packets, size_t total_size, int count);
+
+/**
+ * Receive packets from the VPN server.
+ *
+ * Non-blocking. For best performance, use the on_packets_received callback.
+ *
+ * @param handle Client handle
+ * @param buffer Output buffer for packets
+ * @param buffer_size Size of output buffer
+ * @param count Output pointer for number of packets received
+ * @return Number of bytes written, or negative error code
+ */
+int softether_receive_packets(SoftEtherHandle handle, uint8_t* buffer, size_t buffer_size, int* count);
+
+/**
+ * Get library version.
+ *
+ * @return Version string (null-terminated)
+ */
+const char* softether_version(void);
+
+// =============================================================================
+// Helper Functions
+// =============================================================================
+
+/**
+ * Hash a password for SoftEther authentication.
+ *
+ * @param password User password (null-terminated UTF-8)
+ * @param username Username (null-terminated UTF-8)
+ * @param output Output buffer (must be at least 20 bytes)
+ * @return SOFTETHER_OK on success
+ */
+SoftEtherResult softether_hash_password(const char* password, const char* username, uint8_t* output);
+
+/**
+ * Encode binary data as Base64.
+ *
+ * @param input Input data
+ * @param input_len Input length
+ * @param output Output buffer (must be at least (input_len * 4 / 3) + 4 bytes)
+ * @param output_len Size of output buffer
+ * @return Length of encoded string, or negative error code
+ */
+int softether_base64_encode(const uint8_t* input, size_t input_len, char* output, size_t output_len);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // SOFTETHER_VPN_H
