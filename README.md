@@ -259,31 +259,31 @@ Client                                          Server
    |                                               |
    |---- POST /vpnsvc/connect.cgi ---------------->|
    |     (VPNCONNECT signature)                    |
-   |<--- 200 OK + Hello Pack ---------------------|
+   |<--- 200 OK + Hello Pack ----------------------|
    |     (server random)                           |
    |                                               |
    |---- POST /vpnsvc/vpn.cgi -------------------->|
    |     (Auth Pack: hub, user, hashed password)   |
-   |<--- 200 OK + Auth Result --------------------|
+   |<--- 200 OK + Auth Result ---------------------|
    |     (session_key, policy, redirect?)          |
    |                                               |
-   |  +--- If Cluster Redirect ---+               |
-   |  |  Connect to redirect IP   |               |
-   |  |  Authenticate with ticket |               |
-   |  +---------------------------+               |
+   |        +--- If Cluster Redirect ---+          |
+   |        |  Connect to redirect IP   |          |
+   |        |  Authenticate with ticket |          |
+   |        +---------------------------+          |
    |                                               |
-   |<--- Block-based Tunnel Protocol ------------>|
+   |<--- Block-based Tunnel Protocol ------------->|
    |     (Ethernet frames, compressed/encrypted)   |
    |                                               |
    |---- DHCP Discover --------------------------->|
-   |<--- DHCP Offer ------------------------------|
+   |<--- DHCP Offer -------------------------------|
    |---- DHCP Request ---------------------------->|
-   |<--- DHCP Ack (IP, Gateway, DNS) -------------|
+   |<--- DHCP Ack (IP, Gateway, DNS) --------------|
    |                                               |
    |---- ARP Request (Gateway MAC) --------------->|
-   |<--- ARP Reply -------------------------------|
+   |<--- ARP Reply --------------------------------|
    |                                               |
-   |<--- Tunnel Data (L2 Ethernet Frames) ------->|
+   |<--- Tunnel Data (L2 Ethernet Frames) -------->|
    |                                               |
 ```
 
