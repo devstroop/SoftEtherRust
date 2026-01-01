@@ -63,6 +63,9 @@ jobs:
           - name: windows
             os: windows-latest
             target: x86_64-pc-windows-msvc
+          - name: windows-arm
+            os: windows-latest
+            target: aarch64-pc-windows-msvc
 
     steps:
       - uses: actions/checkout@v4
