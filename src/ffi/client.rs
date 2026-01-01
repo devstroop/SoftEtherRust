@@ -175,22 +175,45 @@ pub unsafe extern "C" fn softether_create(
         None => return SOFTETHER_HANDLE_NULL,
     };
 
-    // Create VPN config
-    // Note: skip_tls_verify should be TRUE for self-signed certs (common in SoftEther)
-    // The Swift side sends use_tls=1 for secure connection, but we need to skip verification
-    // for self-signed certificates which SoftEther commonly uses
+    // Parse optional routing strings
+    let ipv4_include_str = cstr_to_string(config.ipv4_include).unwrap_or_default();
+    let ipv4_exclude_str = cstr_to_string(config.ipv4_exclude).unwrap_or_default();
+
+    // Parse CIDR lists (comma-separated)
+    let ipv4_include: Vec<String> = if ipv4_include_str.is_empty() {
+        vec![]
+    } else {
+        ipv4_include_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    };
+    let ipv4_exclude: Vec<String> = if ipv4_exclude_str.is_empty() {
+        vec![]
+    } else {
+        ipv4_exclude_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    };
+
+    // Create VPN config with all options
     let vpn_config = crate::config::VpnConfig {
         server,
         port: config.port as u16,
         hub,
         username,
         password_hash,
-        skip_tls_verify: true, // Always skip for now - SoftEther uses self-signed certs
+        skip_tls_verify: config.skip_tls_verify != 0,
         max_connections: config.max_connections.clamp(1, 32) as u8,
+        timeout_seconds: config.timeout_seconds.max(5) as u64,
+        mtu: config.mtu.clamp(576, 1500) as u16,
+        use_encrypt: config.use_encrypt != 0,
         use_compress: config.use_compress != 0,
-        timeout_seconds: config.connect_timeout_secs.max(5) as u64,
-        mtu: 1400,
-        ..Default::default()
+        udp_accel: config.udp_accel != 0,
+        qos: config.qos != 0,
+        nat_traversal: config.nat_traversal != 0,
+        monitor_mode: config.monitor_mode != 0,
+        routing: crate::config::RoutingConfig {
+            default_route: config.default_route != 0,
+            accept_pushed_routes: config.accept_pushed_routes != 0,
+            ipv4_include,
+            ipv4_exclude,
+        },
     };
 
     // Parse callbacks
