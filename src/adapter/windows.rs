@@ -247,9 +247,12 @@ impl TunAdapter for WintunDevice {
                 # Set interface to look like DHCP-configured (cosmetic)
                 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$($adapter.InterfaceGuid)" -Name 'EnableDHCP' -Value 1 -Type DWord -ErrorAction SilentlyContinue
                 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$($adapter.InterfaceGuid)" -Name 'DhcpIPAddress' -Value '{}' -Type String -ErrorAction SilentlyContinue
+                # Set interface metric to be higher than physical interfaces (lower priority for Windows NCSI)
+                # This prevents the "Identifying" state by letting Windows use physical interface for connectivity checks
+                Set-NetIPInterface -InterfaceAlias '{}' -InterfaceMetric 100 -ErrorAction SilentlyContinue
             }}
             "#,
-            self.name, self.name, self.name, ip, prefix_len, ip
+            self.name, self.name, self.name, ip, prefix_len, ip, self.name
         );
 
         let status = Command::new("powershell")
@@ -287,6 +290,18 @@ impl TunAdapter for WintunDevice {
                     self.name, ip
                 )));
             }
+
+            // Try to set metric via netsh fallback
+            let _ = Command::new("netsh")
+                .args([
+                    "interface",
+                    "ip",
+                    "set",
+                    "interface",
+                    &self.name,
+                    "metric=100",
+                ])
+                .status();
         }
 
         info!("Configured {} with IP {}/{}", self.name, ip, prefix_len);
@@ -407,7 +422,8 @@ impl TunAdapter for WintunDevice {
         // On Windows, we use the same split-tunnel approach as macOS:
         // Add 0.0.0.0/1 and 128.0.0.0/1 routes through the VPN interface
 
-        // First, add a host route for the VPN server through the original gateway
+        // CRITICAL: Add host route for VPN server FIRST with lower metric
+        // This ensures VPN traffic always goes through the physical interface
         if let Some(server_ip) = vpn_server_ip {
             if let Some(orig_gateway) = get_default_gateway() {
                 info!(
@@ -415,6 +431,7 @@ impl TunAdapter for WintunDevice {
                     server_ip, orig_gateway
                 );
 
+                // Use metric 1 to ensure this route has highest priority
                 let status = Command::new("route")
                     .args([
                         "add",
@@ -422,6 +439,8 @@ impl TunAdapter for WintunDevice {
                         "mask",
                         "255.255.255.255",
                         &orig_gateway.to_string(),
+                        "metric",
+                        "1",
                     ])
                     .status()?;
 
@@ -434,16 +453,41 @@ impl TunAdapter for WintunDevice {
                     }
                     info!("Added host route: {} via {}", server_ip, orig_gateway);
                 } else {
-                    warn!("Failed to add host route for VPN server (may already exist)");
+                    // Try without metric (older Windows)
+                    let status = Command::new("route")
+                        .args([
+                            "add",
+                            &server_ip.to_string(),
+                            "mask",
+                            "255.255.255.255",
+                            &orig_gateway.to_string(),
+                        ])
+                        .status()?;
+
+                    if status.success() {
+                        if let Ok(mut gw) = self.original_gateway.lock() {
+                            *gw = Some(orig_gateway);
+                        }
+                        if let Ok(mut routes) = self.routes_added.lock() {
+                            routes.push(format!("-host {}", server_ip));
+                        }
+                        info!("Added host route: {} via {}", server_ip, orig_gateway);
+                    } else {
+                        warn!("Failed to add host route for VPN server (may already exist)");
+                    }
                 }
             } else {
                 warn!("Could not determine original default gateway - VPN traffic may not route correctly");
             }
         }
 
+        // Small delay to let the host route take effect before adding split-tunnel routes
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
         let if_index = get_interface_index(&self.name);
 
-        // Add route for 0.0.0.0/1 (first half of IPv4 space)
+        // Add route for 0.0.0.0/1 (first half of IPv4 space) with metric 10
+        // Lower metric than default route but higher than host route
         let status1 = if let Some(idx) = if_index {
             Command::new("route")
                 .args([
@@ -452,6 +496,8 @@ impl TunAdapter for WintunDevice {
                     "mask",
                     "128.0.0.0",
                     "0.0.0.0",
+                    "metric",
+                    "10",
                     "if",
                     &idx.to_string(),
                 ])
@@ -462,7 +508,7 @@ impl TunAdapter for WintunDevice {
                     "-NoProfile",
                     "-Command",
                     &format!(
-                        "New-NetRoute -DestinationPrefix '0.0.0.0/1' -InterfaceAlias '{}' -ErrorAction SilentlyContinue",
+                        "New-NetRoute -DestinationPrefix '0.0.0.0/1' -InterfaceAlias '{}' -RouteMetric 10 -ErrorAction SilentlyContinue",
                         self.name
                     )
                 ])
@@ -476,7 +522,7 @@ impl TunAdapter for WintunDevice {
             routes.push("0.0.0.0/1".to_string());
         }
 
-        // Add route for 128.0.0.0/1 (second half of IPv4 space)
+        // Add route for 128.0.0.0/1 (second half of IPv4 space) with metric 10
         let status2 = if let Some(idx) = if_index {
             Command::new("route")
                 .args([
@@ -485,6 +531,8 @@ impl TunAdapter for WintunDevice {
                     "mask",
                     "128.0.0.0",
                     "0.0.0.0",
+                    "metric",
+                    "10",
                     "if",
                     &idx.to_string(),
                 ])
@@ -495,7 +543,7 @@ impl TunAdapter for WintunDevice {
                     "-NoProfile",
                     "-Command",
                     &format!(
-                        "New-NetRoute -DestinationPrefix '128.0.0.0/1' -InterfaceAlias '{}' -ErrorAction SilentlyContinue",
+                        "New-NetRoute -DestinationPrefix '128.0.0.0/1' -InterfaceAlias '{}' -RouteMetric 10 -ErrorAction SilentlyContinue",
                         self.name
                     )
                 ])

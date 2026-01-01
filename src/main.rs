@@ -7,7 +7,6 @@ use std::process;
 
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn, Level};
-use tracing_subscriber::fmt::format::FmtSpan;
 
 use softether::{crypto, VpnClient, VpnConfig};
 
@@ -17,11 +16,11 @@ use softether::{crypto, VpnClient, VpnConfig};
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "A high-performance SoftEther VPN client", long_about = None)]
 struct Cli {
-    /// Configuration file path
+    /// Configuration file path (default: config.json if exists)
     #[arg(short, long, value_name = "FILE")]
     config: Option<PathBuf>,
 
-    /// Enable verbose output
+    /// Enable verbose/trace output
     #[arg(short, long)]
     verbose: bool,
 
@@ -95,22 +94,35 @@ fn init_logging(verbose: bool, debug: bool) {
     let level = if debug {
         Level::DEBUG
     } else if verbose {
-        Level::INFO
+        Level::TRACE
     } else {
-        Level::WARN
+        Level::INFO
     };
 
     tracing_subscriber::fmt()
         .with_max_level(level)
-        .with_span_events(FmtSpan::CLOSE)
         .with_target(false)
         .init();
 }
 
 fn load_config(path: Option<&PathBuf>) -> Result<Option<VpnConfig>, Box<dyn std::error::Error>> {
+    // If path is provided, use it; otherwise try default config.json
+    let path = match path {
+        Some(p) => Some(p.clone()),
+        None => {
+            let default_path = PathBuf::from("config.json");
+            if default_path.exists() {
+                Some(default_path)
+            } else {
+                None
+            }
+        }
+    };
+
     if let Some(path) = path {
-        let content = std::fs::read_to_string(path)?;
+        let content = std::fs::read_to_string(&path)?;
         let config: VpnConfig = serde_json::from_str(&content)?;
+        info!("Loaded config from {:?}", path);
         Ok(Some(config))
     } else {
         Ok(None)

@@ -246,63 +246,69 @@ impl TunnelRunner {
     /// This sets up routing so traffic to the VPN subnet goes through the TUN device.
     #[allow(dead_code)]
     fn configure_routes(&self, tun: &impl TunAdapter, dhcp_config: &DhcpConfig) -> Result<()> {
+        // CRITICAL: If default route is requested, add the VPN server host route FIRST
+        // This ensures the VPN connection itself doesn't get routed through the VPN
+        if self.config.default_route {
+            if let Some(gateway) = dhcp_config.gateway {
+                // set_default_route adds the host route first internally, then the split-tunnel routes
+                tun.set_default_route(gateway, self.config.vpn_server_ip)
+                    .map_err(|e| Error::TunDevice(format!("Failed to set default route: {}", e)))?;
+            }
+        }
+
         // If explicit routes are configured, use those
         if !self.config.routes.is_empty() {
             for route in &self.config.routes {
                 tun.add_route_via_interface(route.dest, route.prefix_len)
                     .map_err(|e| Error::TunDevice(format!("Failed to add route: {}", e)))?;
             }
-            return Ok(());
-        }
-
-        // Auto-detect VPN subnet from DHCP config
-        // Calculate network address from IP and netmask
-        let ip_octets = dhcp_config.ip.octets();
-        let mask_octets = dhcp_config.netmask.octets();
-
-        // Calculate prefix length from netmask
-        let prefix_len: u8 = mask_octets.iter().map(|b| b.count_ones() as u8).sum();
-
-        // Calculate network address
-        let network = Ipv4Addr::new(
-            ip_octets[0] & mask_octets[0],
-            ip_octets[1] & mask_octets[1],
-            ip_octets[2] & mask_octets[2],
-            ip_octets[3] & mask_octets[3],
-        );
-
-        // For typical VPN setups, we often want a broader route
-        // If the netmask is /24 or smaller but IP looks like 10.x.x.x, use /16
-        // This is a common pattern for SoftEther VPN
-        let (route_network, route_prefix) = if ip_octets[0] == 10 && prefix_len >= 16 {
-            // Use /16 for 10.x.x.x networks
-            let net = Ipv4Addr::new(ip_octets[0], ip_octets[1], 0, 0);
-            (net, 16u8)
-        } else if ip_octets[0] == 172
-            && (ip_octets[1] >= 16 && ip_octets[1] <= 31)
-            && prefix_len >= 12
-        {
-            // Use /12 for 172.16-31.x.x networks
-            let net = Ipv4Addr::new(172, 16, 0, 0);
-            (net, 12u8)
-        } else if ip_octets[0] == 192 && ip_octets[1] == 168 && prefix_len >= 16 {
-            // Use /16 for 192.168.x.x networks
-            let net = Ipv4Addr::new(192, 168, 0, 0);
-            (net, 16u8)
         } else {
-            // Use the exact network from DHCP
-            (network, prefix_len)
-        };
+            // Auto-detect VPN subnet from DHCP config (only if default_route is false)
+            // When default_route is true, all traffic goes through VPN anyway
+            if !self.config.default_route {
+                // Calculate network address from IP and netmask
+                let ip_octets = dhcp_config.ip.octets();
+                let mask_octets = dhcp_config.netmask.octets();
 
-        debug!(network = %route_network, prefix = route_prefix, "Adding VPN subnet route");
-        tun.add_route_via_interface(route_network, route_prefix)
-            .map_err(|e| Error::TunDevice(format!("Failed to add VPN subnet route: {}", e)))?;
+                // Calculate prefix length from netmask
+                let prefix_len: u8 = mask_octets.iter().map(|b| b.count_ones() as u8).sum();
 
-        // If default route is requested, also set that
-        if self.config.default_route {
-            if let Some(gateway) = dhcp_config.gateway {
-                tun.set_default_route(gateway, self.config.vpn_server_ip)
-                    .map_err(|e| Error::TunDevice(format!("Failed to set default route: {}", e)))?;
+                // Calculate network address
+                let network = Ipv4Addr::new(
+                    ip_octets[0] & mask_octets[0],
+                    ip_octets[1] & mask_octets[1],
+                    ip_octets[2] & mask_octets[2],
+                    ip_octets[3] & mask_octets[3],
+                );
+
+                // For typical VPN setups, we often want a broader route
+                // If the netmask is /24 or smaller but IP looks like 10.x.x.x, use /16
+                // This is a common pattern for SoftEther VPN
+                let (route_network, route_prefix) = if ip_octets[0] == 10 && prefix_len >= 16 {
+                    // Use /16 for 10.x.x.x networks
+                    let net = Ipv4Addr::new(ip_octets[0], ip_octets[1], 0, 0);
+                    (net, 16u8)
+                } else if ip_octets[0] == 172
+                    && (ip_octets[1] >= 16 && ip_octets[1] <= 31)
+                    && prefix_len >= 12
+                {
+                    // Use /12 for 172.16-31.x.x networks
+                    let net = Ipv4Addr::new(172, 16, 0, 0);
+                    (net, 12u8)
+                } else if ip_octets[0] == 192 && ip_octets[1] == 168 && prefix_len >= 16 {
+                    // Use /16 for 192.168.x.x networks
+                    let net = Ipv4Addr::new(192, 168, 0, 0);
+                    (net, 16u8)
+                } else {
+                    // Use the exact network from DHCP
+                    (network, prefix_len)
+                };
+
+                debug!(network = %route_network, prefix = route_prefix, "Adding VPN subnet route");
+                tun.add_route_via_interface(route_network, route_prefix)
+                    .map_err(|e| {
+                        Error::TunDevice(format!("Failed to add VPN subnet route: {}", e))
+                    })?;
             }
         }
 
