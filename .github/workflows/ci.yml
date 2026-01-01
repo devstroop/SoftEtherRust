@@ -45,19 +45,23 @@ jobs:
 
   # Build and test on multiple platforms
   build:
-    name: Build (${{ matrix.os }})
+    name: Build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - name: ubuntu
+            os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: macos-15-intel
+          - name: macos-intel
+            os: macos-15-intel
             target: x86_64-apple-darwin
-          - os: macos-latest
+          - name: macos-arm
+            os: macos-latest
             target: aarch64-apple-darwin
-          - os: windows-latest
+          - name: windows
+            os: windows-latest
             target: x86_64-pc-windows-msvc
 
     steps:
