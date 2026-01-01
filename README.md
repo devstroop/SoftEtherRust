@@ -65,15 +65,15 @@ sudo ./vpnclient -c config.json
 sudo ./vpnclient connect [OPTIONS]
 
 Options:
-  -c, --config <FILE>      Configuration file path
-  -s, --server <HOST>      Server hostname or IP
-  -p, --port <PORT>        Server port [default: 443]
-  -H, --hub <HUB>          Virtual Hub name
-  -u, --username <USER>    Username
+  -c, --config <FILE>         Configuration file path
+  -s, --server <HOST>         Server hostname or IP
+  -p, --port <PORT>           Server port (default: 443)
+  -H, --hub <HUB>             Virtual Hub name
+  -u, --username <USER>       Username
       --password-hash <HASH>  Pre-computed password hash (40 hex chars)
-      --verify-tls         Verify TLS certificate (default: skip)
-  -v, --verbose            Enable verbose output
-  -d, --debug              Enable debug output
+      --skip-tls-verify       Verify TLS certificate 
+  -v, --verbose               Enable verbose output
+  -d, --debug                 Enable debug output
 ```
 
 ### Generate Password Hash
@@ -238,8 +238,8 @@ async fn main() -> anyhow::Result<()> {
 |  |  +-----------+  |  |  +-------+  |  +------------------------+  |
 |  |  +-----------+  |  |  | DHCP  |  |  |   ConnectionManager    |  |
 |  |  |  Tunnel   |  |  |  |Client |  |  |  +------------------+  |  |
-|  |  |  Codec    |  |  |  +-------+  |  |  |  Multi-Connection |  |  |
-|  |  +-----------+  |  |  +-------+  |  |  |     Support       |  |  |
+|  |  |  Codec    |  |  |  +-------+  |  |  | Multi-Connection |  |  |
+|  |  +-----------+  |  |  +-------+  |  |  |     Support      |  |  |
 |  +-----------------+  |  |  ARP  |  |  |  +------------------+  |  |
 |                       |  +-------+  |  +------------------------+  |
 |                       +-------------+                              |

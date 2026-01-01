@@ -62,7 +62,7 @@ enum Commands {
 
         /// Verify TLS certificate (default: skip verification)
         #[arg(long)]
-        verify_tls: bool,
+        skip_tls_verify: bool,
     },
 
     /// Generate password hash for authentication
@@ -163,7 +163,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         username: None,
         password_hash: None,
         no_tls: false,
-        verify_tls: false,
+        skip_tls_verify: false,
     });
 
     match command {
@@ -193,7 +193,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             username,
             password_hash,
             no_tls,
-            verify_tls,
+            skip_tls_verify,
         } => {
             // Build config from file and/or command line args
             let config = if let Some(mut config) = file_config {
@@ -224,8 +224,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     config.password_hash = h;
                 }
-                if verify_tls {
-                    config.skip_tls_verify = false;
+                if skip_tls_verify {
+                    config.skip_tls_verify = true;
                 }
                 config
             } else {
@@ -253,7 +253,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     hub,
                     username,
                     password_hash: password_hash_str,
-                    skip_tls_verify: !verify_tls,
+                    skip_tls_verify: skip_tls_verify,
                     ..Default::default()
                 }
             };
