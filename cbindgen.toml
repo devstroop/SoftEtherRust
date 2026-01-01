@@ -1,0 +1,42 @@
+# cbindgen configuration for generating C headers
+# Run: cbindgen --config cbindgen.toml --crate softether-rust --output include/SoftEtherVPN_generated.h
+
+[defines]
+"feature = ffi" = "SOFTETHER_FFI"
+
+[export]
+include = ["SoftEtherResult", "SoftEtherState", "SoftEtherConfig", "SoftEtherSession", "SoftEtherStats", "SoftEtherCallbacks"]
+exclude = ["FfiClient"]
+
+[export.rename]
+"SoftEtherHandle" = "SoftEtherHandle"
+
+[fn]
+rename_args = "None"
+
+[struct]
+rename_fields = "None"
+
+[enum]
+rename_variants = "None"
+prefix_with_name = false
+
+[parse]
+parse_deps = false
+include = ["softether-vpn"]
+extra_bindings = []
+
+[parse.expand]
+crates = ["softether-rust"]
+all_features = false
+default_features = false
+features = ["ffi"]
+
+[output]
+style = "Both"
+
+[language]
+cpp = false
+
+[header]
+# Using the handwritten header instead

@@ -10,6 +10,15 @@ keywords = ["vpn", "softether", "networking", "tunnel"]
 categories = ["network-programming"]
 rust-version = "1.75"
 
+[lib]
+name = "softethervpn"
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[features]
+default = []
+ffi = []
+jni = ["ffi"]
+
 [dependencies]
 # Async runtime
 tokio = { version = "1.44", features = ["full", "rt-multi-thread", "sync", "time", "io-util", "net", "macros"] }
