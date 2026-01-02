@@ -1635,6 +1635,8 @@ impl Clone for SoftEtherSession {
             connected_server_ip: self.connected_server_ip,
             server_version: self.server_version,
             server_build: self.server_build,
+            mac_address: self.mac_address,
+            gateway_mac: self.gateway_mac,
         }
     }
 }
