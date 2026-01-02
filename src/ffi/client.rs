@@ -471,11 +471,28 @@ async fn connect_and_run(
         }
     };
 
-    // Connect TCP
+    // Connect TCP with socket protection
     log_message(&callbacks, 1, "[RUST] Establishing TCP/TLS connection...");
-    let mut conn = match VpnConnection::connect(&config).await {
+
+    // Create socket protection closure
+    // Note: We wrap the raw pointer to make it Send-safe for the closure
+    let protect_cb = callbacks.protect_socket;
+    let protect_ctx = callbacks.context as usize; // Convert to usize (Send-safe)
+    let protect_fn = move |fd: i32| -> bool {
+        if let Some(cb) = protect_cb {
+            let result = cb(protect_ctx as *mut std::ffi::c_void, fd);
+            return result;
+        }
+        true // No protection needed if callback not set
+    };
+
+    let mut conn = match VpnConnection::connect_with_protect(&config, protect_fn).await {
         Ok(c) => {
-            log_message(&callbacks, 1, "[RUST] TCP/TLS connection established");
+            log_message(
+                &callbacks,
+                1,
+                "[RUST] TCP/TLS connection established (protected)",
+            );
             c
         }
         Err(e) => {
@@ -781,8 +798,17 @@ async fn connect_redirect(
     redirect_config.server = redirect_server.clone();
     redirect_config.port = redirect_port;
 
-    // Connect to redirect server
-    let mut conn = VpnConnection::connect(&redirect_config).await?;
+    // Connect to redirect server with socket protection
+    let protect_cb = callbacks.protect_socket;
+    let protect_ctx = callbacks.context as usize; // Convert to usize (Send-safe)
+    let protect_fn = move |fd: i32| -> bool {
+        if let Some(cb) = protect_cb {
+            return cb(protect_ctx as *mut std::ffi::c_void, fd);
+        }
+        true
+    };
+
+    let mut conn = VpnConnection::connect_with_protect(&redirect_config, protect_fn).await?;
 
     // Perform handshake
     let hello = perform_handshake(&mut conn, &redirect_config).await?;
@@ -1060,6 +1086,7 @@ async fn run_packet_loop(
     let mut keepalive_interval = tokio::time::interval(Duration::from_secs(3));
     let mut tx_packet_count: u64 = 0;
     let mut rx_packet_count: u64 = 0;
+    let mut keepalive_count: u64 = 0;
 
     log_msg(
         &callbacks,
@@ -1067,8 +1094,44 @@ async fn run_packet_loop(
         "[RUST] Packet loop started, waiting for traffic...",
     );
 
+    // Send first keepalive immediately
+    {
+        keepalive_count += 1;
+        let keepalive = tunnel_codec.encode_keepalive();
+        conn_mgr
+            .write_all(&keepalive)
+            .await
+            .map_err(crate::error::Error::Io)?;
+        log_msg(
+            &callbacks,
+            0,
+            &format!(
+                "[RUST] Keepalive #{} sent ({} bytes)",
+                keepalive_count,
+                keepalive.len()
+            ),
+        );
+    }
+
     while running.load(Ordering::SeqCst) {
         tokio::select! {
+            biased;  // Ensures branches are checked in order - keepalive gets priority
+
+            // Keepalive - check first to ensure it fires
+            _ = keepalive_interval.tick() => {
+                keepalive_count += 1;
+                let keepalive = tunnel_codec.encode_keepalive();
+                match conn_mgr.write_all(&keepalive).await {
+                    Ok(()) => {
+                        log_msg(&callbacks, 0, &format!("[RUST] Keepalive #{} sent ({} bytes)", keepalive_count, keepalive.len()));
+                    }
+                    Err(e) => {
+                        log_msg(&callbacks, 3, &format!("[RUST] Keepalive send failed: {}", e));
+                        return Err(crate::error::Error::Io(e));
+                    }
+                }
+            }
+
             // Packets from Android to send to VPN
             Some(frame_data) = tx_recv.recv() => {
                 // frame_data is already Ethernet frames, concatenated with length prefixes
@@ -1084,12 +1147,10 @@ async fn run_packet_loop(
                 }
             }
 
-            // Data from VPN to send to Android (using read_any for connection manager)
-            result = async {
-                conn_mgr.read_any(&mut read_buf).await
-            } => {
+            // Data from VPN to send to Android - with timeout to ensure keepalive can fire
+            result = tokio::time::timeout(Duration::from_secs(1), conn_mgr.read_any(&mut read_buf)) => {
                 match result {
-                    Ok((_conn_idx, n)) if n > 0 => {
+                    Ok(Ok((_conn_idx, n))) if n > 0 => {
                         // Decode tunnel frames - returns Vec<Bytes>
                         if let Ok(frames) = tunnel_codec.decode(&read_buf[..n]) {
                             if !frames.is_empty() {
@@ -1123,22 +1184,19 @@ async fn run_packet_loop(
                             }
                         }
                     }
-                    Ok(_) => {
-                        // Connection closed
+                    Ok(Ok(_)) => {
+                        // Connection closed (zero bytes)
                         log_msg(&callbacks, 2, "[RUST] Connection closed by server");
                         break;
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         log_msg(&callbacks, 3, &format!("[RUST] Read error: {}", e));
                         return Err(crate::error::Error::Io(e));
                     }
+                    Err(_) => {
+                        // Timeout - this is fine, just loop again to check keepalive
+                    }
                 }
-            }
-
-            // Keepalive
-            _ = keepalive_interval.tick() => {
-                let keepalive = tunnel_codec.encode_keepalive();
-                conn_mgr.write_all(&keepalive).await.map_err(crate::error::Error::Io)?;
             }
         }
     }
@@ -1731,6 +1789,7 @@ impl Clone for SoftEtherCallbacks {
             on_disconnected: self.on_disconnected,
             on_packets_received: self.on_packets_received,
             on_log: self.on_log,
+            protect_socket: self.protect_socket,
         }
     }
 }
