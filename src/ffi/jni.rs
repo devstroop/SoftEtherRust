@@ -81,14 +81,19 @@ extern "C" fn jni_on_connected(context: *mut std::ffi::c_void, session: *const S
                 .into_owned()
         };
 
-        let server_ip_jstring = env.new_string(&server_ip).unwrap_or_else(|_| {
-            env.new_string("").unwrap()
-        });
+        let server_ip_jstring = env
+            .new_string(&server_ip)
+            .unwrap_or_else(|_| env.new_string("").unwrap());
+
+        // Create MAC address byte array
+        let mac_array = env
+            .byte_array_from_slice(&session.mac_address)
+            .unwrap_or_else(|_| env.byte_array_from_slice(&[0u8; 6]).unwrap());
 
         let _ = env.call_method(
             &ctx.bridge_ref,
             "onNativeConnected",
-            "(IIIIILjava/lang/String;II)V",
+            "(IIIIILjava/lang/String;II[B)V",
             &[
                 JValue::Int(session.ip_address as i32),
                 JValue::Int(session.subnet_mask as i32),
@@ -98,6 +103,7 @@ extern "C" fn jni_on_connected(context: *mut std::ffi::c_void, session: *const S
                 JValue::Object(&server_ip_jstring),
                 JValue::Int(session.server_version as i32),
                 JValue::Int(session.server_build as i32),
+                JValue::Object(&mac_array),
             ],
         );
     }
@@ -271,8 +277,14 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
         monitor_mode: if monitor_mode != 0 { 1 } else { 0 },
         default_route: if default_route != 0 { 1 } else { 0 },
         accept_pushed_routes: if accept_pushed_routes != 0 { 1 } else { 0 },
-        ipv4_include: ipv4_include_cstr.as_ref().map(|s| s.as_ptr()).unwrap_or(std::ptr::null()),
-        ipv4_exclude: ipv4_exclude_cstr.as_ref().map(|s| s.as_ptr()).unwrap_or(std::ptr::null()),
+        ipv4_include: ipv4_include_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        ipv4_exclude: ipv4_exclude_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
     };
 
     // Get JVM for callbacks
