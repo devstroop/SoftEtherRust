@@ -39,9 +39,10 @@ pub enum SoftEtherState {
     Connecting = 1,
     Handshaking = 2,
     Authenticating = 3,
-    Connected = 4,
-    Disconnecting = 5,
-    Error = 6,
+    EstablishingTunnel = 4,
+    Connected = 5,
+    Disconnecting = 6,
+    Error = 7,
 }
 
 /// VPN configuration passed from mobile apps.
@@ -55,18 +56,46 @@ pub struct SoftEtherConfig {
     pub hub: *const c_char,
     /// Username (null-terminated UTF-8).
     pub username: *const c_char,
-    /// Password hash, Base64 encoded (null-terminated UTF-8).
+    /// Password hash, hex or base64 encoded (null-terminated UTF-8).
     pub password_hash: *const c_char,
-    /// Use TLS (1 = true, 0 = false).
-    pub use_tls: c_int,
-    /// Maximum connections (1-32).
+
+    // TLS Settings
+    /// Skip TLS certificate verification (1 = true, 0 = false).
+    pub skip_tls_verify: c_int,
+
+    // Connection Settings
+    /// Maximum TCP connections (1-32).
     pub max_connections: c_uint,
-    /// Use compression (1 = true, 0 = false).
-    pub use_compress: c_int,
     /// Connection timeout in seconds.
-    pub connect_timeout_secs: c_uint,
-    /// Keepalive interval in seconds (0 = adaptive).
-    pub keepalive_interval_secs: c_uint,
+    pub timeout_seconds: c_uint,
+    /// MTU size (default 1400).
+    pub mtu: c_uint,
+
+    // Protocol Features
+    /// Use RC4 packet encryption within TLS tunnel (1 = true, 0 = false).
+    pub use_encrypt: c_int,
+    /// Use zlib compression (1 = true, 0 = false).
+    pub use_compress: c_int,
+    /// Enable UDP acceleration (1 = true, 0 = false).
+    pub udp_accel: c_int,
+    /// Enable QoS/VoIP prioritization (1 = true, 0 = false).
+    pub qos: c_int,
+
+    // Session Mode
+    /// NAT traversal mode (1 = NAT mode, 0 = Bridge mode).
+    pub nat_traversal: c_int,
+    /// Monitor/packet capture mode (1 = true, 0 = false).
+    pub monitor_mode: c_int,
+
+    // Routing
+    /// Route all traffic through VPN (1 = true, 0 = false).
+    pub default_route: c_int,
+    /// Accept server-pushed routes (1 = true, 0 = false).
+    pub accept_pushed_routes: c_int,
+    /// Comma-separated CIDRs to include in VPN routing (null-terminated UTF-8, can be null).
+    pub ipv4_include: *const c_char,
+    /// Comma-separated CIDRs to exclude from VPN routing (null-terminated UTF-8, can be null).
+    pub ipv4_exclude: *const c_char,
 }
 
 /// Session information returned after successful connection.
@@ -89,6 +118,10 @@ pub struct SoftEtherSession {
     pub server_version: u32,
     /// Server build number.
     pub server_build: u32,
+    /// MAC address used for this session (6 bytes).
+    pub mac_address: [u8; 6],
+    /// Gateway MAC address (6 bytes, 0 if unknown).
+    pub gateway_mac: [u8; 6],
 }
 
 /// Packet buffer for sending/receiving.
@@ -145,6 +178,10 @@ impl SoftEtherConfig {
             && !self.password_hash.is_null()
             && self.port > 0
             && self.port <= 65535
+            && self.max_connections >= 1
+            && self.max_connections <= 32
+            && self.mtu >= 576
+            && self.mtu <= 1500
     }
 }
 
@@ -159,6 +196,8 @@ impl Default for SoftEtherSession {
             connected_server_ip: [0; 64],
             server_version: 0,
             server_build: 0,
+            mac_address: [0; 6],
+            gateway_mac: [0; 6],
         }
     }
 }
