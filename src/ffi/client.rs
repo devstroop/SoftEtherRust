@@ -1205,54 +1205,31 @@ async fn authenticate(
         ),
     );
 
-    // Decode password hash - it might be base64 or hex
-    let password_hash_bytes: [u8; 20] =
-        if config.password_hash.len() == 28 && config.password_hash.ends_with('=') {
-            // Base64 encoded
-            log_msg(callbacks, 1, "[RUST] Decoding base64 password hash");
-            use base64::Engine;
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(&config.password_hash)
-                .map_err(|e| {
-                    log_msg(callbacks, 3, &format!("[RUST] Base64 decode error: {}", e));
-                    crate::error::Error::Config(format!("Invalid base64 password hash: {}", e))
-                })?;
+    // Decode password hash - hex format only (40 chars = 20 bytes)
+    if config.password_hash.len() != 40 {
+        log_msg(
+            callbacks,
+            3,
+            &format!(
+                "[RUST] Invalid hash format: len={}, expected 40 hex chars",
+                config.password_hash.len()
+            ),
+        );
+        return Err(crate::error::Error::Config(format!(
+            "Password hash must be 40 hex characters, got {}",
+            config.password_hash.len()
+        )));
+    }
 
-            if decoded.len() != 20 {
-                log_msg(
-                    callbacks,
-                    3,
-                    &format!("[RUST] Hash length wrong: {} bytes", decoded.len()),
-                );
-                return Err(crate::error::Error::Config(format!(
-                    "Password hash must be 20 bytes, got {}",
-                    decoded.len()
-                )));
-            }
-            log_msg(callbacks, 1, "[RUST] Base64 hash decoded successfully");
-            decoded.try_into().unwrap()
-        } else if config.password_hash.len() == 40 {
-            // Hex encoded
-            log_msg(callbacks, 1, "[RUST] Decoding hex password hash");
-            let decoded = hex::decode(&config.password_hash).map_err(|e| {
-                log_msg(callbacks, 3, &format!("[RUST] Hex decode error: {}", e));
-                crate::error::Error::Config(format!("Invalid hex password hash: {}", e))
-            })?;
-            log_msg(callbacks, 1, "[RUST] Hex hash decoded successfully");
-            decoded.try_into().unwrap()
-        } else {
-            log_msg(
-                callbacks,
-                3,
-                &format!(
-                    "[RUST] Invalid hash format: len={}",
-                    config.password_hash.len()
-                ),
-            );
-            return Err(crate::error::Error::Config(
-                "Password hash must be 20 bytes as base64 (28 chars) or hex (40 chars)".into(),
-            ));
-        };
+    log_msg(callbacks, 1, "[RUST] Decoding hex password hash");
+    let password_hash_bytes: [u8; 20] = hex::decode(&config.password_hash)
+        .map_err(|e| {
+            log_msg(callbacks, 3, &format!("[RUST] Hex decode error: {}", e));
+            crate::error::Error::Config(format!("Invalid hex password hash: {}", e))
+        })?
+        .try_into()
+        .map_err(|_| crate::error::Error::Config("Hash decode produced wrong length".into()))?;
+    log_msg(callbacks, 1, "[RUST] Hex hash decoded successfully");
 
     log_msg(callbacks, 1, "[RUST] Building auth pack...");
     let auth_pack = AuthPack::new(
