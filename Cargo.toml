@@ -17,7 +17,7 @@ crate-type = ["lib", "staticlib", "cdylib"]
 [features]
 default = []
 ffi = []
-jni = ["ffi"]
+jni = ["ffi", "dep:jni"]
 
 [dependencies]
 # Async runtime
@@ -59,6 +59,9 @@ hex = "0.4"
 
 # CLI parsing
 clap = { version = "4.5", features = ["derive", "env"] }
+
+# JNI for Android
+jni = { version = "0.21", optional = true }
 
 # Password prompting
 rpassword = "7.3"
