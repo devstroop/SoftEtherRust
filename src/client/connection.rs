@@ -5,7 +5,11 @@ use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
+
 use rustls;
+use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
@@ -109,6 +113,18 @@ impl VpnConnection {
         // Set TCP options
         stream.set_nodelay(true)?;
 
+        // Enable TCP keepalive to prevent NAT timeouts
+        // This is critical for mobile networks where NAT mappings can expire quickly
+        let sock_ref = SockRef::from(&stream);
+        let keepalive = TcpKeepalive::new()
+            .with_time(Duration::from_secs(10))      // Start keepalive probes after 10s idle
+            .with_interval(Duration::from_secs(5));  // Send probes every 5s
+        if let Err(e) = sock_ref.set_tcp_keepalive(&keepalive) {
+            debug!("Failed to set TCP keepalive: {} (continuing anyway)", e);
+        } else {
+            debug!("TCP keepalive enabled (time=10s, interval=5s)");
+        }
+
         // SoftEther always uses TLS/HTTPS
         // Get the ring crypto provider
         let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -154,6 +170,97 @@ impl VpnConnection {
             .map_err(|e| Error::Tls(format!("TLS handshake failed: {}", e)))?;
 
         info!("TLS connection established");
+        Ok(VpnConnection::Tls(Box::new(tls_stream)))
+    }
+
+    /// Connect to the VPN server with socket protection callback.
+    /// The protect_socket callback is called with the raw socket fd before TLS handshake.
+    /// On Android, this should call VpnService.protect() to exclude the socket from VPN routing.
+    #[cfg(unix)]
+    pub async fn connect_with_protect<F>(config: &VpnConfig, protect_socket: F) -> Result<Self>
+    where
+        F: FnOnce(i32) -> bool,
+    {
+        let addr = format!("{}:{}", config.server, config.port);
+
+        // Resolve address
+        let socket_addr = addr
+            .to_socket_addrs()
+            .map_err(|e| Error::ConnectionFailed(format!("Failed to resolve {}: {}", addr, e)))?
+            .next()
+            .ok_or_else(|| Error::ConnectionFailed(format!("No addresses found for {}", addr)))?;
+
+        debug!("Connecting to {} (with socket protection)", socket_addr);
+
+        // Connect with timeout
+        let timeout = Duration::from_secs(config.timeout_seconds);
+        let stream = tokio::time::timeout(timeout, TcpStream::connect(socket_addr))
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(|e| Error::ConnectionFailed(format!("TCP connect failed: {}", e)))?;
+
+        // CRITICAL: Protect the socket BEFORE TLS and BEFORE VPN tunnel is established
+        let fd = stream.as_raw_fd();
+        if !protect_socket(fd) {
+            return Err(Error::ConnectionFailed(
+                "Failed to protect socket".to_string(),
+            ));
+        }
+        debug!("Socket fd {} protected", fd);
+
+        // Set TCP options
+        stream.set_nodelay(true)?;
+
+        // Enable TCP keepalive to prevent NAT timeouts
+        // This is critical for mobile networks where NAT mappings can expire quickly
+        let sock_ref = SockRef::from(&stream);
+        let keepalive = TcpKeepalive::new()
+            .with_time(Duration::from_secs(10))      // Start keepalive probes after 10s idle
+            .with_interval(Duration::from_secs(5));  // Send probes every 5s
+        if let Err(e) = sock_ref.set_tcp_keepalive(&keepalive) {
+            debug!("Failed to set TCP keepalive: {} (continuing anyway)", e);
+        } else {
+            debug!("TCP keepalive enabled (time=10s, interval=5s)");
+        }
+
+        // SoftEther always uses TLS/HTTPS
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+
+        // Build TLS config
+        let tls_config = if config.skip_tls_verify {
+            ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoVerifier))
+                .with_no_client_auth()
+        } else {
+            let root_store = RootCertStore::empty();
+            ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(root_store)
+                .with_no_client_auth()
+        };
+
+        let connector = TlsConnector::from(Arc::new(tls_config));
+
+        let server_name = if config.server.parse::<std::net::IpAddr>().is_ok() {
+            ServerName::try_from("softether")
+                .map_err(|_| Error::Tls("Failed to create server name".to_string()))?
+        } else {
+            ServerName::try_from(config.server.clone())
+                .map_err(|_| Error::Tls(format!("Invalid server name: {}", config.server)))?
+        };
+
+        debug!("TLS connecting with SNI: {:?}", server_name);
+
+        let tls_stream = connector
+            .connect(server_name, stream)
+            .await
+            .map_err(|e| Error::Tls(format!("TLS handshake failed: {}", e)))?;
+
+        info!("TLS connection established (protected)");
         Ok(VpnConnection::Tls(Box::new(tls_stream)))
     }
 

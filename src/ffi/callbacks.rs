@@ -56,6 +56,17 @@ pub type PacketsReceivedCallback = Option<
 pub type LogCallback =
     Option<extern "C" fn(context: *mut c_void, level: i32, message: *const std::ffi::c_char)>;
 
+/// Socket protection callback type.
+/// Called when a socket needs to be protected from VPN routing.
+///
+/// # Parameters
+/// - `context`: User context pointer.
+/// - `fd`: The socket file descriptor to protect.
+///
+/// # Returns
+/// true if protection succeeded, false otherwise.
+pub type ProtectSocketCallback = Option<extern "C" fn(context: *mut c_void, fd: i32) -> bool>;
+
 /// Collection of all callbacks.
 #[repr(C)]
 pub struct SoftEtherCallbacks {
@@ -71,6 +82,8 @@ pub struct SoftEtherCallbacks {
     pub on_packets_received: PacketsReceivedCallback,
     /// Log callback.
     pub on_log: LogCallback,
+    /// Socket protection callback (Android VPN).
+    pub protect_socket: ProtectSocketCallback,
 }
 
 impl Default for SoftEtherCallbacks {
@@ -82,6 +95,7 @@ impl Default for SoftEtherCallbacks {
             on_disconnected: None,
             on_packets_received: None,
             on_log: None,
+            protect_socket: None,
         }
     }
 }
