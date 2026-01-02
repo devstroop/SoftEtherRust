@@ -5,7 +5,7 @@
 
 use std::ffi::{c_char, c_int, CStr};
 use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -30,8 +30,10 @@ struct FfiClient {
     config: crate::config::VpnConfig,
     /// Callbacks
     callbacks: SoftEtherCallbacks,
-    /// Connection state
+    /// Connection state (for FFI layer - may be stale)
     state: SoftEtherState,
+    /// Atomic state shared with async task
+    atomic_state: Arc<AtomicU8>,
     /// Session info (after connection)
     session: Option<SoftEtherSession>,
     /// Statistics
@@ -71,11 +73,30 @@ impl FfiClient {
             config,
             callbacks,
             state: SoftEtherState::Disconnected,
+            atomic_state: Arc::new(AtomicU8::new(SoftEtherState::Disconnected as u8)),
             session: None,
             stats: FfiStats::default(),
             runtime: None,
             running: Arc::new(AtomicBool::new(false)),
             tx_sender: None,
+        }
+    }
+
+    fn set_state(&mut self, state: SoftEtherState) {
+        self.state = state;
+        self.atomic_state.store(state as u8, Ordering::SeqCst);
+    }
+
+    fn get_atomic_state(&self) -> SoftEtherState {
+        match self.atomic_state.load(Ordering::SeqCst) {
+            0 => SoftEtherState::Disconnected,
+            1 => SoftEtherState::Connecting,
+            2 => SoftEtherState::Handshaking,
+            3 => SoftEtherState::Authenticating,
+            4 => SoftEtherState::EstablishingTunnel,
+            5 => SoftEtherState::Connected,
+            6 => SoftEtherState::Disconnecting,
+            _ => SoftEtherState::Error,
         }
     }
 
@@ -304,7 +325,7 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
         }
     };
 
-    guard.state = SoftEtherState::Connecting;
+    guard.set_state(SoftEtherState::Connecting);
     guard.notify_state(SoftEtherState::Connecting);
     guard.running.store(true, Ordering::SeqCst);
 
@@ -316,6 +337,7 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
     let config = guard.config.clone();
     let running = guard.running.clone();
     let callbacks = guard.callbacks.clone();
+    let atomic_state = guard.atomic_state.clone();
 
     // Log that we're starting the async task
     if let Some(cb) = callbacks.on_log {
@@ -335,7 +357,14 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
             }
         }
 
-        let result = connect_and_run(config, running.clone(), callbacks.clone(), tx_recv).await;
+        let result = connect_and_run(
+            config,
+            running.clone(),
+            callbacks.clone(),
+            tx_recv,
+            atomic_state,
+        )
+        .await;
 
         // Notify disconnection
         running.store(false, Ordering::SeqCst);
@@ -379,12 +408,25 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
     SoftEtherResult::Ok
 }
 
+/// Helper to update atomic state and notify callback
+fn update_state(
+    atomic_state: &Arc<AtomicU8>,
+    callbacks: &SoftEtherCallbacks,
+    state: SoftEtherState,
+) {
+    atomic_state.store(state as u8, Ordering::SeqCst);
+    if let Some(cb) = callbacks.on_state_changed {
+        cb(callbacks.context, state);
+    }
+}
+
 /// The main connection and tunnel loop
 async fn connect_and_run(
     config: crate::config::VpnConfig,
     running: Arc<AtomicBool>,
     callbacks: SoftEtherCallbacks,
     mut tx_recv: mpsc::Receiver<Vec<u8>>,
+    atomic_state: Arc<AtomicU8>,
 ) -> crate::error::Result<()> {
     // Log helper - must clone callbacks for local use
     fn log_message(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
@@ -448,9 +490,7 @@ async fn connect_and_run(
 
     // Notify state: Handshaking
     log_message(&callbacks, 1, "[RUST] Starting HTTP handshake...");
-    if let Some(cb) = callbacks.on_state_changed {
-        cb(callbacks.context, SoftEtherState::Handshaking);
-    }
+    update_state(&atomic_state, &callbacks, SoftEtherState::Handshaking);
 
     // HTTP handshake
     let hello = match perform_handshake(&mut conn, &config).await {
@@ -473,9 +513,7 @@ async fn connect_and_run(
 
     // Notify state: Authenticating
     log_message(&callbacks, 1, "[RUST] Starting authentication...");
-    if let Some(cb) = callbacks.on_state_changed {
-        cb(callbacks.context, SoftEtherState::Authenticating);
-    }
+    update_state(&atomic_state, &callbacks, SoftEtherState::Authenticating);
 
     // Authenticate
     log_message(&callbacks, 1, "[RUST] >>> About to call authenticate() <<<");
@@ -619,9 +657,11 @@ async fn connect_and_run(
 
     // Perform DHCP to get IP configuration
     log_message(&callbacks, 1, "[RUST] Starting DHCP...");
-    if let Some(cb) = callbacks.on_state_changed {
-        cb(callbacks.context, SoftEtherState::EstablishingTunnel);
-    }
+    update_state(
+        &atomic_state,
+        &callbacks,
+        SoftEtherState::EstablishingTunnel,
+    );
 
     let dhcp_config = match perform_dhcp(&mut conn_mgr, mac, &callbacks, config.use_compress).await
     {
@@ -650,9 +690,7 @@ async fn connect_and_run(
     if let Some(cb) = callbacks.on_connected {
         cb(callbacks.context, &session);
     }
-    if let Some(cb) = callbacks.on_state_changed {
-        cb(callbacks.context, SoftEtherState::Connected);
-    }
+    update_state(&atomic_state, &callbacks, SoftEtherState::Connected);
 
     log_message(
         &callbacks,
@@ -1009,9 +1047,25 @@ async fn run_packet_loop(
     _mac: [u8; 6],
     _dhcp_config: DhcpConfig,
 ) -> crate::error::Result<()> {
+    fn log_msg(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
+        if let Some(cb) = callbacks.on_log {
+            if let Ok(cstr) = std::ffi::CString::new(msg) {
+                cb(callbacks.context, level, cstr.as_ptr());
+            }
+        }
+    }
+
     let mut tunnel_codec = TunnelCodec::new();
     let mut read_buf = vec![0u8; 65536];
     let mut keepalive_interval = tokio::time::interval(Duration::from_secs(3));
+    let mut tx_packet_count: u64 = 0;
+    let mut rx_packet_count: u64 = 0;
+
+    log_msg(
+        &callbacks,
+        1,
+        "[RUST] Packet loop started, waiting for traffic...",
+    );
 
     while running.load(Ordering::SeqCst) {
         tokio::select! {
@@ -1021,6 +1075,10 @@ async fn run_packet_loop(
                 // Parse and send
                 let frames = parse_length_prefixed_packets(&frame_data);
                 if !frames.is_empty() {
+                    tx_packet_count += frames.len() as u64;
+                    if tx_packet_count <= 5 || tx_packet_count % 100 == 0 {
+                        log_msg(&callbacks, 0, &format!("[RUST] TX: {} frames (total: {})", frames.len(), tx_packet_count));
+                    }
                     let encoded = tunnel_codec.encode(&frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
                     conn_mgr.write_all(&encoded).await.map_err(crate::error::Error::Io)?;
                 }
@@ -1035,6 +1093,11 @@ async fn run_packet_loop(
                         // Decode tunnel frames - returns Vec<Bytes>
                         if let Ok(frames) = tunnel_codec.decode(&read_buf[..n]) {
                             if !frames.is_empty() {
+                                rx_packet_count += frames.len() as u64;
+                                if rx_packet_count <= 5 || rx_packet_count % 100 == 0 {
+                                    log_msg(&callbacks, 0, &format!("[RUST] RX: {} frames (total: {})", frames.len(), rx_packet_count));
+                                }
+
                                 // Build length-prefixed buffer for callback
                                 let mut buffer = Vec::with_capacity(n + frames.len() * 2);
                                 for frame in &frames {
@@ -1062,9 +1125,11 @@ async fn run_packet_loop(
                     }
                     Ok(_) => {
                         // Connection closed
+                        log_msg(&callbacks, 2, "[RUST] Connection closed by server");
                         break;
                     }
                     Err(e) => {
+                        log_msg(&callbacks, 3, &format!("[RUST] Read error: {}", e));
                         return Err(crate::error::Error::Io(e));
                     }
                 }
@@ -1078,6 +1143,7 @@ async fn run_packet_loop(
         }
     }
 
+    log_msg(&callbacks, 1, "[RUST] Packet loop ended");
     Ok(())
 }
 
@@ -1408,7 +1474,7 @@ pub unsafe extern "C" fn softether_get_state(handle: SoftEtherHandle) -> SoftEth
 
     let client = &*(handle as *const Mutex<FfiClient>);
     match client.lock() {
-        Ok(guard) => guard.state,
+        Ok(guard) => guard.get_atomic_state(),
         Err(_) => SoftEtherState::Disconnected,
     }
 }
@@ -1489,7 +1555,8 @@ pub unsafe extern "C" fn softether_send_packets(
         Err(_) => return SoftEtherResult::InternalError as c_int,
     };
 
-    if guard.state != SoftEtherState::Connected {
+    // Check atomic state (updated by async task) instead of stale guard.state
+    if guard.get_atomic_state() != SoftEtherState::Connected {
         return SoftEtherResult::NotConnected as c_int;
     }
 
