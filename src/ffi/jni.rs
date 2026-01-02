@@ -179,6 +179,31 @@ extern "C" fn jni_on_log(
     }
 }
 
+extern "C" fn jni_protect_socket(context: *mut std::ffi::c_void, fd: i32) -> bool {
+    if context.is_null() {
+        return false;
+    }
+
+    let ctx = unsafe { &*(context as *const JniCallbackContext) };
+
+    if let Ok(mut env) = ctx.jvm.attach_current_thread() {
+        match env.call_method(
+            &ctx.bridge_ref,
+            "onProtectSocket",
+            "(I)Z",
+            &[JValue::Int(fd)],
+        ) {
+            Ok(result) => {
+                if let Ok(protected) = result.z() {
+                    return protected;
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    false
+}
+
 // =============================================================================
 // JNI Native Methods
 // =============================================================================
@@ -311,6 +336,7 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
         on_disconnected: Some(jni_on_disconnected),
         on_packets_received: Some(jni_on_packets_received),
         on_log: Some(jni_on_log),
+        protect_socket: Some(jni_protect_socket),
     };
 
     // Create client
