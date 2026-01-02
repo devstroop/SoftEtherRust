@@ -51,6 +51,9 @@ bytes = "1.9"
 # Compression
 flate2 = "1.0"
 
+# Socket utilities for TCP keepalive
+socket2 = "0.5"
+
 # Base64 encoding
 base64 = "0.22"
 

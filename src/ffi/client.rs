@@ -1083,10 +1083,12 @@ async fn run_packet_loop(
 
     let mut tunnel_codec = TunnelCodec::new();
     let mut read_buf = vec![0u8; 65536];
-    let mut keepalive_interval = tokio::time::interval(Duration::from_secs(3));
     let mut tx_packet_count: u64 = 0;
     let mut rx_packet_count: u64 = 0;
     let mut keepalive_count: u64 = 0;
+    let start_time = std::time::Instant::now();
+    let mut last_keepalive = std::time::Instant::now();
+    let keepalive_interval_secs = 5u64;
 
     log_msg(
         &callbacks,
@@ -1098,39 +1100,44 @@ async fn run_packet_loop(
     {
         keepalive_count += 1;
         let keepalive = tunnel_codec.encode_keepalive();
+        let ka_len = keepalive.len();
         conn_mgr
             .write_all(&keepalive)
             .await
             .map_err(crate::error::Error::Io)?;
         log_msg(
             &callbacks,
-            0,
+            1,
             &format!(
-                "[RUST] Keepalive #{} sent ({} bytes)",
+                "[RUST] Keepalive #{} sent ({} bytes) at t+{}ms",
                 keepalive_count,
-                keepalive.len()
+                ka_len,
+                start_time.elapsed().as_millis()
             ),
         );
+        last_keepalive = std::time::Instant::now();
     }
 
     while running.load(Ordering::SeqCst) {
-        tokio::select! {
-            biased;  // Ensures branches are checked in order - keepalive gets priority
-
-            // Keepalive - check first to ensure it fires
-            _ = keepalive_interval.tick() => {
-                keepalive_count += 1;
-                let keepalive = tunnel_codec.encode_keepalive();
-                match conn_mgr.write_all(&keepalive).await {
-                    Ok(()) => {
-                        log_msg(&callbacks, 0, &format!("[RUST] Keepalive #{} sent ({} bytes)", keepalive_count, keepalive.len()));
-                    }
-                    Err(e) => {
-                        log_msg(&callbacks, 3, &format!("[RUST] Keepalive send failed: {}", e));
-                        return Err(crate::error::Error::Io(e));
-                    }
+        // Check if we need to send keepalive BEFORE waiting for I/O
+        if last_keepalive.elapsed() >= Duration::from_secs(keepalive_interval_secs) {
+            keepalive_count += 1;
+            let keepalive = tunnel_codec.encode_keepalive();
+            let ka_len = keepalive.len();
+            match conn_mgr.write_all(&keepalive).await {
+                Ok(()) => {
+                    log_msg(&callbacks, 1, &format!("[RUST] Keepalive #{} sent ({} bytes) at t+{}ms", keepalive_count, ka_len, start_time.elapsed().as_millis()));
+                    last_keepalive = std::time::Instant::now();
+                }
+                Err(e) => {
+                    log_msg(&callbacks, 3, &format!("[RUST] Keepalive send failed: {}", e));
+                    return Err(crate::error::Error::Io(e));
                 }
             }
+        }
+
+        tokio::select! {
+            biased;
 
             // Packets from Android to send to VPN
             Some(frame_data) = tx_recv.recv() => {
@@ -1147,8 +1154,8 @@ async fn run_packet_loop(
                 }
             }
 
-            // Data from VPN to send to Android - with timeout to ensure keepalive can fire
-            result = tokio::time::timeout(Duration::from_secs(1), conn_mgr.read_any(&mut read_buf)) => {
+            // Data from VPN to send to Android - short timeout to allow keepalive checks
+            result = tokio::time::timeout(Duration::from_millis(500), conn_mgr.read_any(&mut read_buf)) => {
                 match result {
                     Ok(Ok((_conn_idx, n))) if n > 0 => {
                         // Decode tunnel frames - returns Vec<Bytes>

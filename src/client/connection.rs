@@ -9,6 +9,7 @@ use std::time::Duration;
 use std::os::unix::io::AsRawFd;
 
 use rustls;
+use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
@@ -112,6 +113,18 @@ impl VpnConnection {
         // Set TCP options
         stream.set_nodelay(true)?;
 
+        // Enable TCP keepalive to prevent NAT timeouts
+        // This is critical for mobile networks where NAT mappings can expire quickly
+        let sock_ref = SockRef::from(&stream);
+        let keepalive = TcpKeepalive::new()
+            .with_time(Duration::from_secs(10))      // Start keepalive probes after 10s idle
+            .with_interval(Duration::from_secs(5));  // Send probes every 5s
+        if let Err(e) = sock_ref.set_tcp_keepalive(&keepalive) {
+            debug!("Failed to set TCP keepalive: {} (continuing anyway)", e);
+        } else {
+            debug!("TCP keepalive enabled (time=10s, interval=5s)");
+        }
+
         // SoftEther always uses TLS/HTTPS
         // Get the ring crypto provider
         let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -197,6 +210,18 @@ impl VpnConnection {
 
         // Set TCP options
         stream.set_nodelay(true)?;
+
+        // Enable TCP keepalive to prevent NAT timeouts
+        // This is critical for mobile networks where NAT mappings can expire quickly
+        let sock_ref = SockRef::from(&stream);
+        let keepalive = TcpKeepalive::new()
+            .with_time(Duration::from_secs(10))      // Start keepalive probes after 10s idle
+            .with_interval(Duration::from_secs(5));  // Send probes every 5s
+        if let Err(e) = sock_ref.set_tcp_keepalive(&keepalive) {
+            debug!("Failed to set TCP keepalive: {} (continuing anyway)", e);
+        } else {
+            debug!("TCP keepalive enabled (time=10s, interval=5s)");
+        }
 
         // SoftEther always uses TLS/HTTPS
         let provider = Arc::new(rustls::crypto::ring::default_provider());
