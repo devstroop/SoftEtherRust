@@ -16,6 +16,7 @@ jobs:
   build-desktop:
     name: Build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -104,6 +105,7 @@ jobs:
   build-ios:
     name: Build (ios)
     runs-on: macos-14
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       
@@ -142,8 +144,8 @@ jobs:
           mkdir -p dist/libsoftether-ios
           cp -r target/ios/SoftEtherVPN.xcframework dist/libsoftether-ios/
           cp -r include dist/libsoftether-ios/
-          cp FFI_GUIDE.md dist/libsoftether-ios/
-          cp -r examples/ios dist/libsoftether-ios/examples
+          cp FFI.md dist/libsoftether-ios/ || true
+          cp -r examples/ios dist/libsoftether-ios/examples || true
           cd dist && zip -r ../libsoftether-ios.zip libsoftether-ios
       
       - name: Upload to Release
@@ -156,6 +158,7 @@ jobs:
   build-android:
     name: Build (android)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       
@@ -227,14 +230,20 @@ jobs:
           cp target/x86_64-linux-android/release/libsoftether.so dist/libsoftether-android/jniLibs/x86_64/
           cp target/i686-linux-android/release/libsoftether.so dist/libsoftether-android/jniLibs/x86/
           cp -r include dist/libsoftether-android/
-          cp FFI_GUIDE.md dist/libsoftether-android/
-          cp -r examples/android dist/libsoftether-android/examples
+          cp FFI.md dist/libsoftether-android/ || true
+          cp -r examples/android dist/libsoftether-android/examples || true
           cd dist && zip -r ../libsoftether-android.zip libsoftether-android
+      
+      - name: Generate checksums
+        run: |
+          sha256sum libsoftether-android.zip > libsoftether-android.zip.sha256
       
       - name: Upload to Release
         uses: softprops/action-gh-release@v1
         with:
-          files: libsoftether-android.zip
+          files: |
+            libsoftether-android.zip
+            libsoftether-android.zip.sha256
           draft: true
 
   # Finalize release after all builds complete
