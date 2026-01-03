@@ -1081,97 +1081,29 @@ async fn run_packet_loop(
         }
     }
 
-    log_msg(
-        &callbacks,
-        1,
-        "[RUST] CHECKPOINT A - entering run_packet_loop",
-    );
-
     let mut tunnel_codec = TunnelCodec::new();
-
-    log_msg(&callbacks, 1, "[RUST] CHECKPOINT B - tunnel_codec created");
-
     let mut read_buf = vec![0u8; 65536];
-    let mut tx_packet_count: u64 = 0;
-    let mut rx_packet_count: u64 = 0;
-    let mut keepalive_count: u64 = 0;
-    let start_time = std::time::Instant::now();
-    let mut last_keepalive = std::time::Instant::now();
     let keepalive_interval_secs = 5u64;
 
-    log_msg(&callbacks, 1, "[RUST] CHECKPOINT C - variables initialized");
-
-    log_msg(
-        &callbacks,
-        1,
-        "[RUST] Packet loop started (BUILD:JAN3-0345), waiting for traffic...",
-    );
-
-    log_msg(
-        &callbacks,
-        1,
-        "[RUST] CHECKPOINT D - about to send initial keepalive",
-    );
+    log_msg(&callbacks, 1, "[RUST] Packet loop started");
 
     // Send first keepalive immediately
-    {
-        keepalive_count += 1;
-        log_msg(&callbacks, 1, "[RUST] CHECKPOINT E - encoding keepalive");
-        let keepalive = tunnel_codec.encode_keepalive();
-        let ka_len = keepalive.len();
-        log_msg(
-            &callbacks,
-            1,
-            &format!("[RUST] CHECKPOINT F - sending keepalive ({} bytes)", ka_len),
-        );
-        conn_mgr
-            .write_all(&keepalive)
-            .await
-            .map_err(crate::error::Error::Io)?;
-        log_msg(
-            &callbacks,
-            1,
-            &format!(
-                "[RUST] Keepalive #{} sent ({} bytes) at t+{}ms",
-                keepalive_count,
-                ka_len,
-                start_time.elapsed().as_millis()
-            ),
-        );
-        last_keepalive = std::time::Instant::now();
-    }
-
-    log_msg(&callbacks, 1, "[RUST] CHECKPOINT G - entering main loop");
+    let keepalive = tunnel_codec.encode_keepalive();
+    conn_mgr
+        .write_all(&keepalive)
+        .await
+        .map_err(crate::error::Error::Io)?;
+    let mut last_keepalive = std::time::Instant::now();
 
     while running.load(Ordering::SeqCst) {
-        // Check if we need to send keepalive BEFORE waiting for I/O
+        // Check if we need to send keepalive
         if last_keepalive.elapsed() >= Duration::from_secs(keepalive_interval_secs) {
-            keepalive_count += 1;
             let keepalive = tunnel_codec.encode_keepalive();
-            let ka_len = keepalive.len();
-            match conn_mgr.write_all(&keepalive).await {
-                Ok(()) => {
-                    log_msg(
-                        &callbacks,
-                        1,
-                        &format!(
-                            "[RUST] Keepalive #{} sent ({} bytes) at t+{}ms",
-                            keepalive_count,
-                            ka_len,
-                            start_time.elapsed().as_millis()
-                        ),
-                    );
-                    last_keepalive = std::time::Instant::now();
-                }
-                Err(e) => {
-                    log_msg(
-                        &callbacks,
-                        3,
-                        &format!("[RUST] Keepalive send failed: {}", e),
-                    );
-                    return Err(crate::error::Error::Io(e));
-                }
-            }
+            conn_mgr
+                .write_all(&keepalive)
+                .await
+                .map_err(crate::error::Error::Io)?;
+            last_keepalive = std::time::Instant::now();
         }
 
         tokio::select! {
@@ -1179,50 +1111,31 @@ async fn run_packet_loop(
 
             // Packets from Android to send to VPN
             Some(frame_data) = tx_recv.recv() => {
-                // frame_data is already Ethernet frames, concatenated with length prefixes
-                // Parse and send
                 let frames = parse_length_prefixed_packets(&frame_data);
                 if !frames.is_empty() {
-                    tx_packet_count += frames.len() as u64;
-                    if tx_packet_count <= 5 || tx_packet_count % 100 == 0 {
-                        log_msg(&callbacks, 0, &format!("[RUST] TX: {} frames (total: {})", frames.len(), tx_packet_count));
-                    }
                     let encoded = tunnel_codec.encode(&frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
                     conn_mgr.write_all(&encoded).await.map_err(crate::error::Error::Io)?;
                 }
             }
 
-            // Data from VPN to send to Android - short timeout to allow keepalive checks
+            // Data from VPN to send to Android
             result = tokio::time::timeout(Duration::from_millis(500), conn_mgr.read_any(&mut read_buf)) => {
                 match result {
                     Ok(Ok((_conn_idx, n))) if n > 0 => {
-                        // Decode tunnel frames - returns Vec<Bytes>
                         if let Ok(frames) = tunnel_codec.decode(&read_buf[..n]) {
                             if !frames.is_empty() {
-                                rx_packet_count += frames.len() as u64;
-                                if rx_packet_count <= 5 || rx_packet_count % 100 == 0 {
-                                    log_msg(&callbacks, 0, &format!("[RUST] RX: {} frames (total: {})", frames.len(), rx_packet_count));
-                                }
-
                                 // Build length-prefixed buffer for callback
                                 let mut buffer = Vec::with_capacity(n + frames.len() * 2);
                                 for frame in &frames {
-                                    // Decompress if needed
                                     let frame_data: Vec<u8> = if is_compressed(frame) {
-                                        match decompress(frame) {
-                                            Ok(d) => d,
-                                            Err(_) => frame.to_vec(),
-                                        }
+                                        decompress(frame).unwrap_or_else(|_| frame.to_vec())
                                     } else {
                                         frame.to_vec()
                                     };
-
                                     let len = frame_data.len() as u16;
                                     buffer.extend_from_slice(&len.to_be_bytes());
                                     buffer.extend_from_slice(&frame_data);
                                 }
-
-                                // Call Android callback
                                 if let Some(cb) = callbacks.on_packets_received {
                                     cb(callbacks.context, buffer.as_ptr(), buffer.len(), frames.len() as u32);
                                 }
@@ -1230,7 +1143,6 @@ async fn run_packet_loop(
                         }
                     }
                     Ok(Ok(_)) => {
-                        // Connection closed (zero bytes)
                         log_msg(&callbacks, 2, "[RUST] Connection closed by server");
                         break;
                     }
@@ -1238,9 +1150,7 @@ async fn run_packet_loop(
                         log_msg(&callbacks, 3, &format!("[RUST] Read error: {}", e));
                         return Err(crate::error::Error::Io(e));
                     }
-                    Err(_) => {
-                        // Timeout - this is fine, just loop again to check keepalive
-                    }
+                    Err(_) => {} // Timeout - fine, loop to check keepalive
                 }
             }
         }
