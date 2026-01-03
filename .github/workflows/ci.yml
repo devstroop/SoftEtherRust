@@ -7,6 +7,11 @@ on:
     branches: [master]
   workflow_dispatch:
 
+# Cancel in-progress runs on new commits to same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -16,6 +21,7 @@ jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       
@@ -40,14 +46,29 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       
-      - name: Clippy
+      - name: Clippy (default features)
         run: cargo clippy --all-targets -- -D warnings
+      
+      - name: Clippy (FFI/JNI features)
+        run: cargo clippy --all-targets --features ffi,jni -- -D warnings -A unused_mut
+  
+  # Security audit
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   # Build and test on multiple platforms
   build:
     name: Build (${{ matrix.name }})
     needs: [check]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -129,6 +150,7 @@ jobs:
     name: Build (ios)
     needs: [check]
     runs-on: macos-14
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       
@@ -158,6 +180,7 @@ jobs:
     name: Build (android)
     needs: [check]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       
