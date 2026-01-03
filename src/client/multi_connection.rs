@@ -589,6 +589,16 @@ impl ConnectionManager {
         stats
     }
 
+    /// Flush all send-capable connections.
+    pub async fn flush(&mut self) -> io::Result<()> {
+        for conn in &mut self.connections {
+            if conn.healthy && conn.direction.can_send() {
+                conn.conn.flush().await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Update received bytes stats from concurrent reader.
     pub fn update_recv_stats(&mut self, recv_stats: &[(usize, u64)]) {
         // These stats are for extracted connections, add to total
