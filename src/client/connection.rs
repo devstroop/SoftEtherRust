@@ -117,8 +117,8 @@ impl VpnConnection {
         // This is critical for mobile networks where NAT mappings can expire quickly
         let sock_ref = SockRef::from(&stream);
         let keepalive = TcpKeepalive::new()
-            .with_time(Duration::from_secs(10))      // Start keepalive probes after 10s idle
-            .with_interval(Duration::from_secs(5));  // Send probes every 5s
+            .with_time(Duration::from_secs(10)) // Start keepalive probes after 10s idle
+            .with_interval(Duration::from_secs(5)); // Send probes every 5s
         if let Err(e) = sock_ref.set_tcp_keepalive(&keepalive) {
             debug!("Failed to set TCP keepalive: {} (continuing anyway)", e);
         } else {
@@ -215,8 +215,8 @@ impl VpnConnection {
         // This is critical for mobile networks where NAT mappings can expire quickly
         let sock_ref = SockRef::from(&stream);
         let keepalive = TcpKeepalive::new()
-            .with_time(Duration::from_secs(10))      // Start keepalive probes after 10s idle
-            .with_interval(Duration::from_secs(5));  // Send probes every 5s
+            .with_time(Duration::from_secs(10)) // Start keepalive probes after 10s idle
+            .with_interval(Duration::from_secs(5)); // Send probes every 5s
         if let Err(e) = sock_ref.set_tcp_keepalive(&keepalive) {
             debug!("Failed to set TCP keepalive: {} (continuing anyway)", e);
         } else {

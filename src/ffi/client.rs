@@ -1081,7 +1081,16 @@ async fn run_packet_loop(
         }
     }
 
+    log_msg(
+        &callbacks,
+        1,
+        "[RUST] CHECKPOINT A - entering run_packet_loop",
+    );
+
     let mut tunnel_codec = TunnelCodec::new();
+
+    log_msg(&callbacks, 1, "[RUST] CHECKPOINT B - tunnel_codec created");
+
     let mut read_buf = vec![0u8; 65536];
     let mut tx_packet_count: u64 = 0;
     let mut rx_packet_count: u64 = 0;
@@ -1090,17 +1099,31 @@ async fn run_packet_loop(
     let mut last_keepalive = std::time::Instant::now();
     let keepalive_interval_secs = 5u64;
 
+    log_msg(&callbacks, 1, "[RUST] CHECKPOINT C - variables initialized");
+
     log_msg(
         &callbacks,
         1,
-        "[RUST] Packet loop started, waiting for traffic...",
+        "[RUST] Packet loop started (BUILD:JAN3-0345), waiting for traffic...",
+    );
+
+    log_msg(
+        &callbacks,
+        1,
+        "[RUST] CHECKPOINT D - about to send initial keepalive",
     );
 
     // Send first keepalive immediately
     {
         keepalive_count += 1;
+        log_msg(&callbacks, 1, "[RUST] CHECKPOINT E - encoding keepalive");
         let keepalive = tunnel_codec.encode_keepalive();
         let ka_len = keepalive.len();
+        log_msg(
+            &callbacks,
+            1,
+            &format!("[RUST] CHECKPOINT F - sending keepalive ({} bytes)", ka_len),
+        );
         conn_mgr
             .write_all(&keepalive)
             .await
@@ -1118,6 +1141,8 @@ async fn run_packet_loop(
         last_keepalive = std::time::Instant::now();
     }
 
+    log_msg(&callbacks, 1, "[RUST] CHECKPOINT G - entering main loop");
+
     while running.load(Ordering::SeqCst) {
         // Check if we need to send keepalive BEFORE waiting for I/O
         if last_keepalive.elapsed() >= Duration::from_secs(keepalive_interval_secs) {
@@ -1126,11 +1151,24 @@ async fn run_packet_loop(
             let ka_len = keepalive.len();
             match conn_mgr.write_all(&keepalive).await {
                 Ok(()) => {
-                    log_msg(&callbacks, 1, &format!("[RUST] Keepalive #{} sent ({} bytes) at t+{}ms", keepalive_count, ka_len, start_time.elapsed().as_millis()));
+                    log_msg(
+                        &callbacks,
+                        1,
+                        &format!(
+                            "[RUST] Keepalive #{} sent ({} bytes) at t+{}ms",
+                            keepalive_count,
+                            ka_len,
+                            start_time.elapsed().as_millis()
+                        ),
+                    );
                     last_keepalive = std::time::Instant::now();
                 }
                 Err(e) => {
-                    log_msg(&callbacks, 3, &format!("[RUST] Keepalive send failed: {}", e));
+                    log_msg(
+                        &callbacks,
+                        3,
+                        &format!("[RUST] Keepalive send failed: {}", e),
+                    );
                     return Err(crate::error::Error::Io(e));
                 }
             }
