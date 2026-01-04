@@ -64,6 +64,9 @@ pub struct TunnelConfig {
     pub use_compress: bool,
     /// VPN server IP address (used for host route when default_route is true).
     pub vpn_server_ip: Option<Ipv4Addr>,
+    /// RC4 key pair for tunnel encryption (UseFastRC4 mode).
+    /// If None, either encryption is disabled or UseSSLDataEncryption is used (TLS handles it).
+    pub rc4_key_pair: Option<Rc4KeyPair>,
 }
 
 /// Route configuration.
@@ -85,6 +88,7 @@ impl Default for TunnelConfig {
             routes: Vec::new(),
             use_compress: false,
             vpn_server_ip: None,
+            rc4_key_pair: None,
         }
     }
 }
