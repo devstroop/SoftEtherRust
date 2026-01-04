@@ -142,6 +142,10 @@ class SoftEtherBridge {
         val passwordHash: String,
         // TLS Settings
         val skipTlsVerify: Boolean = false,
+        /** Custom CA certificate in PEM format for server verification. */
+        val customCaPem: String? = null,
+        /** Server certificate SHA-256 fingerprint for pinning (64 hex chars). */
+        val certFingerprintSha256: String? = null,
         // Connection Settings
         val maxConnections: Int = 1,
         val timeoutSeconds: Int = 30,
@@ -196,6 +200,8 @@ class SoftEtherBridge {
         passwordHash: String,
         // TLS Settings
         skipTlsVerify: Boolean,
+        customCaPem: String?,
+        certFingerprintSha256: String?,
         // Connection Settings
         maxConnections: Int,
         timeoutSeconds: Int,
@@ -243,6 +249,8 @@ class SoftEtherBridge {
             config.username,
             config.passwordHash,
             config.skipTlsVerify,
+            config.customCaPem,
+            config.certFingerprintSha256,
             config.maxConnections,
             config.timeoutSeconds,
             config.mtu,
