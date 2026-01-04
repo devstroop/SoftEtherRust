@@ -97,6 +97,8 @@ typedef struct {
     char connected_server_ip[64]; // Actual server IP (for route exclusion)
     uint32_t server_version;      // Server version
     uint32_t server_build;        // Server build number
+    uint8_t mac_address[6];       // MAC address assigned to this session
+    uint8_t gateway_mac[6];       // Gateway MAC address (learned from ARP)
 } SoftEtherSession;
 
 // =============================================================================
