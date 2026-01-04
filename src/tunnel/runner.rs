@@ -112,7 +112,7 @@ pub struct TunnelRunner {
 }
 
 /// RC4 encryption state for tunnel data.
-/// 
+///
 /// RC4 is a streaming cipher - each cipher instance maintains state
 /// and MUST NOT be reset between packets. Send and recv use separate ciphers.
 pub struct TunnelEncryption {
@@ -624,7 +624,7 @@ impl TunnelRunner {
         state.configure(dhcp_config.ip, gateway);
 
         let mut codec = TunnelCodec::new();
-        
+
         // Initialize RC4 encryption if enabled
         let mut encryption = self.create_encryption();
         if encryption.is_some() {
@@ -649,12 +649,14 @@ impl TunnelRunner {
 
         // Send gratuitous ARP to announce our presence
         let garp = arp.build_gratuitous_arp();
-        self.send_frame_encrypted(conn, &garp, &mut send_buf, &mut encryption).await?;
+        self.send_frame_encrypted(conn, &garp, &mut send_buf, &mut encryption)
+            .await?;
         debug!("Sent gratuitous ARP");
 
         // Send ARP request for gateway
         let gateway_arp = arp.build_gateway_request();
-        self.send_frame_encrypted(conn, &gateway_arp, &mut send_buf, &mut encryption).await?;
+        self.send_frame_encrypted(conn, &gateway_arp, &mut send_buf, &mut encryption)
+            .await?;
         debug!("Sent gateway ARP request");
 
         let mut keepalive_interval = interval(Duration::from_secs(self.config.keepalive_interval));
@@ -835,7 +837,7 @@ impl TunnelRunner {
                             if let Some(ref mut enc) = encryption {
                                 enc.decrypt(&mut net_buf[..n]);
                             }
-                            
+
                             // Decode frames
                             match codec.feed(&net_buf[..n]) {
                                 Ok(frames) => {
@@ -948,7 +950,7 @@ impl TunnelRunner {
         state.configure(dhcp_config.ip, gateway);
 
         let mut codec = TunnelCodec::new();
-        
+
         // Initialize RC4 encryption if enabled
         let mut encryption = self.create_encryption();
         if encryption.is_some() {
@@ -966,12 +968,14 @@ impl TunnelRunner {
 
         // Send gratuitous ARP to announce our presence
         let garp = arp.build_gratuitous_arp();
-        self.send_frame_encrypted(conn, &garp, &mut send_buf, &mut encryption).await?;
+        self.send_frame_encrypted(conn, &garp, &mut send_buf, &mut encryption)
+            .await?;
         debug!("Sent gratuitous ARP");
 
         // Send ARP request for gateway
         let gateway_arp = arp.build_gateway_request();
-        self.send_frame_encrypted(conn, &gateway_arp, &mut send_buf, &mut encryption).await?;
+        self.send_frame_encrypted(conn, &gateway_arp, &mut send_buf, &mut encryption)
+            .await?;
         debug!("Sent gateway ARP request");
 
         let mut keepalive_interval = interval(Duration::from_secs(self.config.keepalive_interval));
@@ -1135,7 +1139,7 @@ impl TunnelRunner {
                             if let Some(ref mut enc) = encryption {
                                 enc.decrypt(&mut net_buf[..n]);
                             }
-                            
+
                             match codec.feed(&net_buf[..n]) {
                                 Ok(frames) => {
                                     for frame in frames {

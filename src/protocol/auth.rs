@@ -2,7 +2,7 @@
 
 use super::constants::*;
 use super::pack::Pack;
-use crate::crypto::{self, Rc4KeyPair, SHA0_DIGEST_LEN, RC4_KEY_SIZE};
+use crate::crypto::{self, Rc4KeyPair, RC4_KEY_SIZE, SHA0_DIGEST_LEN};
 use crate::error::{Error, Result};
 use crate::net::{
     UdpAccelAuthParams, UdpAccelServerResponse, UDP_ACCELERATION_COMMON_KEY_SIZE_V1,
@@ -167,7 +167,7 @@ impl AuthResult {
         // Parse RC4 key pair for tunnel encryption (UseFastRC4 mode)
         // Server sends these in the Welcome packet if encryption is enabled
         let rc4_key_pair = Self::parse_rc4_keys(pack);
-        
+
         // Determine encryption mode:
         // - If RC4 keys present -> UseFastRC4 mode (application-level RC4)
         // - If no RC4 keys but use_encrypt was requested -> UseSSLDataEncryption mode (TLS layer handles it)
