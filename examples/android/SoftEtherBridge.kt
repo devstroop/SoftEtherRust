@@ -194,19 +194,34 @@ class SoftEtherBridge {
         hub: String,
         username: String,
         passwordHash: String,
-        useTLS: Boolean,
+        // TLS Settings
+        skipTlsVerify: Boolean,
+        // Connection Settings
         maxConnections: Int,
+        timeoutSeconds: Int,
+        mtu: Int,
+        // Protocol Features
+        useEncrypt: Boolean,
         useCompress: Boolean,
-        connectTimeoutSecs: Int,
-        keepaliveIntervalSecs: Int
+        udpAccel: Boolean,
+        qos: Boolean,
+        // Session Mode
+        natTraversal: Boolean,
+        monitorMode: Boolean,
+        // Routing
+        defaultRoute: Boolean,
+        acceptPushedRoutes: Boolean,
+        ipv4Include: String?,
+        ipv4Exclude: String?
     ): Long
     
     private external fun nativeDestroy(handle: Long)
     private external fun nativeConnect(handle: Long): Int
     private external fun nativeDisconnect(handle: Long): Int
     private external fun nativeGetState(handle: Long): Int
-    private external fun nativeGetSession(handle: Long): IntArray?
+    private external fun nativeGetSession(handle: Long): LongArray?
     private external fun nativeGetSessionServerIP(handle: Long): String?
+    private external fun nativeGetSessionMAC(handle: Long): ByteArray?
     private external fun nativeGetStats(handle: Long): LongArray?
     private external fun nativeSendPackets(handle: Long, data: ByteArray, count: Int): Int
     private external fun nativeReceivePackets(handle: Long, buffer: ByteArray): Int
@@ -227,11 +242,20 @@ class SoftEtherBridge {
             config.hub,
             config.username,
             config.passwordHash,
-            config.useTLS,
+            config.skipTlsVerify,
             config.maxConnections,
+            config.timeoutSeconds,
+            config.mtu,
+            config.useEncrypt,
             config.useCompress,
-            config.connectTimeoutSecs,
-            config.keepaliveIntervalSecs
+            config.udpAccel,
+            config.qos,
+            config.natTraversal,
+            config.monitorMode,
+            config.defaultRoute,
+            config.acceptPushedRoutes,
+            config.ipv4Include,
+            config.ipv4Exclude
         )
         
         if (nativeHandle == 0L) {
