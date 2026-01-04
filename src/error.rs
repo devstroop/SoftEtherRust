@@ -83,6 +83,10 @@ pub enum Error {
     /// Channel closed
     #[error("Internal channel closed unexpectedly")]
     ChannelClosed,
+
+    /// Connection closed by peer
+    #[error("Connection closed: {0}")]
+    ConnectionClosed(String),
 }
 
 impl Error {

@@ -571,26 +571,16 @@ async fn connect_and_run(
                 &callbacks,
                 1,
                 &format!(
-                    "[RUST] Cluster redirect to {}:{}",
-                    redirect_ip, redirect.port
+                    "[RUST] Cluster redirect to {}:{}, ticket={:02X?}",
+                    redirect_ip, redirect.port, &redirect.ticket[..8]
                 ),
             );
 
-            // Send empty Pack acknowledgment before closing connection
-            let ack_pack = Pack::new();
-            let request = HttpRequest::post(VPN_TARGET)
-                .header("Content-Type", CONTENT_TYPE_PACK)
-                .header("Connection", "Keep-Alive")
-                .body(ack_pack.to_bytes());
-            let host = format!("{}:{}", config.server, config.port);
-            let request_bytes = request.build(&host);
-            let _ = conn.write_all(&request_bytes).await;
-
-            // Small delay before closing
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            // Close original connection immediately - ticket has very short TTL
+            // DO NOT send acknowledgment or delay - ticket expires quickly!
             drop(conn);
 
-            // Connect to redirect server
+            // Connect to redirect server ASAP
             match connect_redirect(&config, &redirect, &callbacks).await {
                 Ok((redirect_conn, redirect_auth)) => {
                     let new_ip = match redirect_ip.parse::<Ipv4Addr>() {
@@ -656,6 +646,18 @@ async fn connect_and_run(
         &final_auth,
         &actual_server_addr,
         actual_server_port,
+    );
+    
+    // Log connection manager settings
+    log_message(
+        &callbacks,
+        1,
+        &format!(
+            "[RUST] ConnectionManager: half_conn={}, max_conn={}, needs_more={}",
+            conn_mgr.is_half_connection(),
+            config.max_connections,
+            conn_mgr.needs_more_connections()
+        ),
     );
 
     // Generate MAC address for DHCP
@@ -821,18 +823,39 @@ async fn connect_redirect(
         ),
     );
 
-    // Build connection options
+    // Build connection options - must match initial auth options
     let options = ConnectionOptions {
         max_connections: config.max_connections,
         use_encrypt: config.use_encrypt,
         use_compress: config.use_compress,
-        udp_accel: false,
-        bridge_mode: false,
-        monitor_mode: false,
+        udp_accel: config.udp_accel,
+        bridge_mode: !config.nat_traversal, // Match working client/mod.rs
+        monitor_mode: config.monitor_mode,
         qos: config.qos,
     };
 
+    // Log connection mode settings
+    log_msg(
+        callbacks,
+        1,
+        &format!(
+            "[RUST] Client requesting: max_connections={}, half_connection={}",
+            options.max_connections,
+            options.max_connections >= 2
+        ),
+    );
+
     // Build ticket auth pack
+    log_msg(
+        callbacks,
+        1,
+        &format!(
+            "[RUST] Building ticket auth: hub={}, user={}, ticket={:02X?}",
+            config.hub,
+            config.username,
+            &redirect.ticket[..8]
+        ),
+    );
     let auth_pack = AuthPack::new_ticket(
         &config.hub,
         &config.username,
@@ -850,15 +873,98 @@ async fn connect_redirect(
     let host = format!("{}:{}", redirect_server, redirect_port);
     let request_bytes = request.build(&host);
 
-    log_msg(callbacks, 1, "[RUST] Sending ticket authentication");
+    log_msg(
+        callbacks,
+        1,
+        &format!(
+            "[RUST] Sending ticket authentication ({} bytes)",
+            request_bytes.len()
+        ),
+    );
+    
+    // Log first few bytes of the request for debugging
+    let preview_len = std::cmp::min(100, request_bytes.len());
+    let preview: Vec<u8> = request_bytes[..preview_len].to_vec();
+    // Try to show as string if it's HTTP
+    if let Ok(preview_str) = std::str::from_utf8(&preview) {
+        log_msg(
+            callbacks,
+            1,
+            &format!("[RUST] Request preview (string): {}", preview_str.replace('\r', "\\r").replace('\n', "\\n")),
+        );
+    } else {
+        log_msg(
+            callbacks,
+            1,
+            &format!("[RUST] Request preview (hex): {:02X?}", preview),
+        );
+    }
+    
     conn.write_all(&request_bytes).await?;
+    conn.flush().await?;
+    log_msg(callbacks, 1, "[RUST] Ticket auth sent and flushed, waiting for response...");
 
     // Read response
     let mut codec = HttpCodec::new();
     let mut buf = vec![0u8; 8192];
 
+    // Add a small delay before reading to ensure server has time to process
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    
     loop {
-        let n = conn.read(&mut buf).await?;
+        log_msg(callbacks, 1, "[RUST] Reading redirect auth response...");
+        
+        // Add timeout to detect if connection hangs
+        let read_result = tokio::time::timeout(
+            Duration::from_secs(30),
+            conn.read(&mut buf)
+        ).await;
+        
+        let n = match read_result {
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => {
+                // Log detailed error information
+                let error_kind = e.kind();
+                let error_debug = format!("{:?}", e);
+                log_msg(
+                    callbacks,
+                    3,
+                    &format!("[RUST] Read error during redirect auth: {}", e),
+                );
+                log_msg(
+                    callbacks,
+                    3,
+                    &format!("[RUST] Error kind: {:?}", error_kind),
+                );
+                log_msg(
+                    callbacks,
+                    3,
+                    &format!("[RUST] Error debug: {}", error_debug),
+                );
+                // Check if this is a TLS error
+                if let Some(inner) = e.get_ref() {
+                    log_msg(
+                        callbacks,
+                        3,
+                        &format!("[RUST] Inner error: {:?}", inner),
+                    );
+                }
+                return Err(crate::error::Error::Io(e));
+            }
+            Err(_) => {
+                log_msg(
+                    callbacks,
+                    3,
+                    "[RUST] Read timeout (30s) during redirect auth - server not responding",
+                );
+                return Err(crate::error::Error::Timeout);
+            }
+        };
+        log_msg(
+            callbacks,
+            1,
+            &format!("[RUST] Received {} bytes from redirect server", n),
+        );
         if n == 0 {
             return Err(crate::error::Error::ConnectionFailed(
                 "Connection closed during redirect auth".into(),
@@ -875,9 +981,39 @@ async fn connect_redirect(
 
             if !response.body.is_empty() {
                 let pack = Pack::deserialize(&response.body)?;
+                
+                // Debug: log all keys in response
+                let keys: Vec<_> = pack.keys().collect();
+                log_msg(
+                    callbacks,
+                    1,
+                    &format!("[RUST] Redirect response keys: {:?}", keys),
+                );
+                
+                // Log critical connection mode values from server
+                let server_half_conn = pack.get_int("half_connection").unwrap_or(0);
+                let server_max_conn = pack.get_int("max_connection").unwrap_or(0);
+                let server_direction = pack.get_int("direction").unwrap_or(0);
+                log_msg(
+                    callbacks,
+                    1,
+                    &format!(
+                        "[RUST] Server response: half_connection={}, max_connection={}, direction={}",
+                        server_half_conn, server_max_conn, server_direction
+                    ),
+                );
+                
                 let result = AuthResult::from_pack(&pack)?;
 
                 if result.error > 0 {
+                    // Log error message if present
+                    if let Some(msg) = &result.error_message {
+                        log_msg(
+                            callbacks,
+                            3,
+                            &format!("[RUST] Redirect auth error message: {}", msg),
+                        );
+                    }
                     return Err(crate::error::Error::AuthenticationFailed(format!(
                         "Redirect auth error: {}",
                         result.error
@@ -986,11 +1122,20 @@ async fn perform_dhcp(
                 // Zero bytes - continue
             }
             Ok(Err(e)) => {
+                let err_str = e.to_string();
                 log_msg(
                     callbacks,
                     2,
                     &format!("[RUST] Read error during DHCP: {}", e),
                 );
+                // If connection was closed, don't keep retrying
+                if err_str.contains("close_notify") || err_str.contains("closed") || err_str.contains("eof") {
+                    return Err(crate::error::Error::ConnectionClosed(
+                        "Connection closed during DHCP".into(),
+                    ));
+                }
+                // Small delay to avoid tight loop on transient errors
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
             Err(_) => {
                 // Timeout, retry
@@ -1269,10 +1414,10 @@ async fn authenticate(
         max_connections: config.max_connections,
         use_encrypt: config.use_encrypt,
         use_compress: config.use_compress,
-        udp_accel: false,
-        bridge_mode: false,
-        monitor_mode: false,
-        qos: true,
+        udp_accel: config.udp_accel,
+        bridge_mode: !config.nat_traversal, // Match working client/mod.rs
+        monitor_mode: config.monitor_mode,
+        qos: config.qos,
     };
 
     log_msg(
