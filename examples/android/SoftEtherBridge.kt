@@ -348,6 +348,7 @@ class SoftEtherBridge {
     /**
      * Send packets to VPN server.
      * Each packet should be a complete Ethernet frame (L2).
+     * @throws QueueFullException if backpressure is detected - caller should retry.
      */
     fun sendPackets(packets: List<ByteArray>) {
         if (nativeHandle == 0L || packets.isEmpty()) return
@@ -368,10 +369,15 @@ class SoftEtherBridge {
         }
         
         val result = nativeSendPackets(nativeHandle, buffer.array(), packets.size)
-        if (result < 0) {
+        if (result == RESULT_QUEUE_FULL) {
+            throw QueueFullException("Queue full - backpressure, retry later")
+        } else if (result < 0) {
             throw RuntimeException("Send failed: $result")
         }
     }
+    
+    /** Exception thrown when the packet queue is full (backpressure). */
+    class QueueFullException(message: String) : Exception(message)
     
     /**
      * Receive packets from VPN server.
