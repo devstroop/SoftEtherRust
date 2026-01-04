@@ -88,11 +88,30 @@ public class SoftEtherBridge {
         public let hub: String
         public let username: String
         public let passwordHash: String
-        public let useTLS: Bool
+        
+        // TLS Settings
+        public let skipTlsVerify: Bool
+        
+        // Connection Settings
         public let maxConnections: UInt8
+        public let timeoutSeconds: UInt32
+        public let mtu: UInt32
+        
+        // Protocol Features
+        public let useEncrypt: Bool
         public let useCompress: Bool
-        public let connectTimeoutSecs: UInt32
-        public let keepaliveIntervalSecs: UInt32
+        public let udpAccel: Bool
+        public let qos: Bool
+        
+        // Session Mode
+        public let natTraversal: Bool
+        public let monitorMode: Bool
+        
+        // Routing
+        public let defaultRoute: Bool
+        public let acceptPushedRoutes: Bool
+        public let ipv4Include: String?
+        public let ipv4Exclude: String?
         
         public init(
             server: String,
@@ -100,22 +119,40 @@ public class SoftEtherBridge {
             hub: String,
             username: String,
             passwordHash: String,
-            useTLS: Bool = true,
+            skipTlsVerify: Bool = false,
             maxConnections: UInt8 = 1,
+            timeoutSeconds: UInt32 = 30,
+            mtu: UInt32 = 1400,
+            useEncrypt: Bool = true,
             useCompress: Bool = false,
-            connectTimeoutSecs: UInt32 = 30,
-            keepaliveIntervalSecs: UInt32 = 5
+            udpAccel: Bool = false,
+            qos: Bool = false,
+            natTraversal: Bool = true,
+            monitorMode: Bool = false,
+            defaultRoute: Bool = true,
+            acceptPushedRoutes: Bool = true,
+            ipv4Include: String? = nil,
+            ipv4Exclude: String? = nil
         ) {
             self.server = server
             self.port = port
             self.hub = hub
             self.username = username
             self.passwordHash = passwordHash
-            self.useTLS = useTLS
+            self.skipTlsVerify = skipTlsVerify
             self.maxConnections = maxConnections
+            self.timeoutSeconds = timeoutSeconds
+            self.mtu = mtu
+            self.useEncrypt = useEncrypt
             self.useCompress = useCompress
-            self.connectTimeoutSecs = connectTimeoutSecs
-            self.keepaliveIntervalSecs = keepaliveIntervalSecs
+            self.udpAccel = udpAccel
+            self.qos = qos
+            self.natTraversal = natTraversal
+            self.monitorMode = monitorMode
+            self.defaultRoute = defaultRoute
+            self.acceptPushedRoutes = acceptPushedRoutes
+            self.ipv4Include = ipv4Include
+            self.ipv4Exclude = ipv4Exclude
         }
     }
     
@@ -161,12 +198,16 @@ public class SoftEtherBridge {
         let hubCString = config.hub.withCString { strdup($0) }!
         let usernameCString = config.username.withCString { strdup($0) }!
         let passwordHashCString = config.passwordHash.withCString { strdup($0) }!
+        let ipv4IncludeCString = config.ipv4Include?.withCString { strdup($0) }
+        let ipv4ExcludeCString = config.ipv4Exclude?.withCString { strdup($0) }
         
         defer {
             free(serverCString)
             free(hubCString)
             free(usernameCString)
             free(passwordHashCString)
+            if let ptr = ipv4IncludeCString { free(ptr) }
+            if let ptr = ipv4ExcludeCString { free(ptr) }
         }
         
         cConfig.server = UnsafePointer(serverCString)
@@ -174,11 +215,30 @@ public class SoftEtherBridge {
         cConfig.hub = UnsafePointer(hubCString)
         cConfig.username = UnsafePointer(usernameCString)
         cConfig.password_hash = UnsafePointer(passwordHashCString)
-        cConfig.use_tls = config.useTLS ? 1 : 0
+        
+        // TLS Settings
+        cConfig.skip_tls_verify = config.skipTlsVerify ? 1 : 0
+        
+        // Connection Settings
         cConfig.max_connections = UInt32(config.maxConnections)
+        cConfig.timeout_seconds = config.timeoutSeconds
+        cConfig.mtu = config.mtu
+        
+        // Protocol Features
+        cConfig.use_encrypt = config.useEncrypt ? 1 : 0
         cConfig.use_compress = config.useCompress ? 1 : 0
-        cConfig.connect_timeout_secs = config.connectTimeoutSecs
-        cConfig.keepalive_interval_secs = config.keepaliveIntervalSecs
+        cConfig.udp_accel = config.udpAccel ? 1 : 0
+        cConfig.qos = config.qos ? 1 : 0
+        
+        // Session Mode
+        cConfig.nat_traversal = config.natTraversal ? 1 : 0
+        cConfig.monitor_mode = config.monitorMode ? 1 : 0
+        
+        // Routing
+        cConfig.default_route = config.defaultRoute ? 1 : 0
+        cConfig.accept_pushed_routes = config.acceptPushedRoutes ? 1 : 0
+        cConfig.ipv4_include = ipv4IncludeCString.map { UnsafePointer($0) }
+        cConfig.ipv4_exclude = ipv4ExcludeCString.map { UnsafePointer($0) }
         
         // Create C callbacks
         var cCallbacks = SoftEtherCallbacks()
