@@ -356,6 +356,7 @@ public class SoftEtherBridge {
     
     /// Send packets to VPN server.
     /// Each packet should be a complete Ethernet frame (L2).
+    /// Throws `queueFull` if backpressure is detected - caller should retry.
     public func sendPackets(_ packets: [Data]) throws {
         guard !packets.isEmpty else { return }
         
@@ -384,7 +385,9 @@ public class SoftEtherBridge {
             )
         }
         
-        if result < 0 {
+        if result == Int32(SOFTETHER_QUEUE_FULL.rawValue) {
+            throw BridgeError.queueFull
+        } else if result < 0 {
             throw BridgeError.sendFailed(code: Int(result))
         }
     }
@@ -499,4 +502,5 @@ public enum BridgeError: Error {
     case connectFailed(code: Int)
     case sendFailed(code: Int)
     case disconnected(code: Int)
+    case queueFull  // Backpressure - caller should retry
 }
