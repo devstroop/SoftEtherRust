@@ -29,6 +29,7 @@ typedef enum {
     SOFTETHER_TIMEOUT = -6,
     SOFTETHER_IO_ERROR = -7,
     SOFTETHER_ALREADY_CONNECTED = -8,
+    SOFTETHER_QUEUE_FULL = -9,         // Backpressure - caller should retry
     SOFTETHER_INTERNAL_ERROR = -99,
 } SoftEtherResult;
 
@@ -61,6 +62,8 @@ typedef struct {
     
     // TLS Settings
     int skip_tls_verify;          // Skip TLS certificate verification (1 = yes, 0 = no)
+    const char* custom_ca_pem;    // Custom CA certificate in PEM format (nullable)
+    const char* cert_fingerprint_sha256; // Server cert SHA-256 fingerprint (64 hex chars, nullable)
     
     // Connection Settings
     unsigned int max_connections; // Max TCP connections (1-32, default 1)
@@ -113,6 +116,7 @@ typedef struct {
     uint64_t uptime_secs;
     unsigned int active_connections;
     unsigned int reconnect_count;
+    uint64_t packets_dropped;         // Packets dropped due to queue full (backpressure)
 } SoftEtherStats;
 
 // =============================================================================

@@ -52,6 +52,7 @@ struct FfiStats {
     bytes_received: AtomicU64,
     packets_sent: AtomicU64,
     packets_received: AtomicU64,
+    packets_dropped: AtomicU64,
     uptime_start: AtomicU64,
 }
 
@@ -62,6 +63,7 @@ impl Default for FfiStats {
             bytes_received: AtomicU64::new(0),
             packets_sent: AtomicU64::new(0),
             packets_received: AtomicU64::new(0),
+            packets_dropped: AtomicU64::new(0),
             uptime_start: AtomicU64::new(0),
         }
     }
@@ -140,6 +142,7 @@ impl FfiClient {
             uptime_secs: uptime,
             active_connections: 1,
             reconnect_count: 0,
+            packets_dropped: self.stats.packets_dropped.load(Ordering::Relaxed),
         }
     }
 }
@@ -221,6 +224,33 @@ pub unsafe extern "C" fn softether_create(
             .collect()
     };
 
+    // Parse optional certificate pinning fields
+    let custom_ca_pem = if config.custom_ca_pem.is_null() {
+        None
+    } else {
+        let pem = CStr::from_ptr(config.custom_ca_pem)
+            .to_string_lossy()
+            .into_owned();
+        if pem.is_empty() {
+            None
+        } else {
+            Some(pem)
+        }
+    };
+
+    let cert_fingerprint_sha256 = if config.cert_fingerprint_sha256.is_null() {
+        None
+    } else {
+        let fp = CStr::from_ptr(config.cert_fingerprint_sha256)
+            .to_string_lossy()
+            .into_owned();
+        if fp.is_empty() {
+            None
+        } else {
+            Some(fp)
+        }
+    };
+
     // Create VPN config with all options
     let vpn_config = crate::config::VpnConfig {
         server,
@@ -229,6 +259,8 @@ pub unsafe extern "C" fn softether_create(
         username,
         password_hash,
         skip_tls_verify: config.skip_tls_verify != 0,
+        custom_ca_pem,
+        cert_fingerprint_sha256,
         max_connections: config.max_connections.clamp(1, 32) as u8,
         timeout_seconds: config.timeout_seconds.max(5) as u64,
         mtu: config.mtu.clamp(576, 1500) as u16,
@@ -314,8 +346,9 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
     }
 
     // Create tokio runtime
+    // Use single thread for mobile battery efficiency - VPN workload is I/O bound
     let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
+        .worker_threads(1)
         .enable_all()
         .build()
     {
@@ -380,7 +413,7 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
             }
             Err(ref e) => {
                 if let Some(cb) = callbacks.on_log {
-                    if let Ok(cstr) = std::ffi::CString::new(format!("Connection error: {}", e)) {
+                    if let Ok(cstr) = std::ffi::CString::new(format!("Connection error: {e}")) {
                         cb(callbacks.context, 3, cstr.as_ptr());
                     }
                 }
@@ -458,15 +491,11 @@ async fn connect_and_run(
     log_message(&callbacks, 1, "[RUST] Resolving server IP...");
     let server_ip = match resolve_server_ip(&config.server) {
         Ok(ip) => {
-            log_message(&callbacks, 1, &format!("[RUST] Resolved server IP: {}", ip));
+            log_message(&callbacks, 1, &format!("[RUST] Resolved server IP: {ip}"));
             ip
         }
         Err(e) => {
-            log_message(
-                &callbacks,
-                3,
-                &format!("[RUST] DNS resolution failed: {}", e),
-            );
+            log_message(&callbacks, 3, &format!("[RUST] DNS resolution failed: {e}"));
             return Err(e);
         }
     };
@@ -499,7 +528,7 @@ async fn connect_and_run(
             log_message(
                 &callbacks,
                 3,
-                &format!("[RUST] TCP/TLS connection failed: {}", e),
+                &format!("[RUST] TCP/TLS connection failed: {e}"),
             );
             return Err(e);
         }
@@ -523,7 +552,7 @@ async fn connect_and_run(
             h
         }
         Err(e) => {
-            log_message(&callbacks, 3, &format!("[RUST] Handshake failed: {}", e));
+            log_message(&callbacks, 3, &format!("[RUST] Handshake failed: {e}"));
             return Err(e);
         }
     };
@@ -540,11 +569,7 @@ async fn connect_and_run(
             r
         }
         Err(e) => {
-            log_message(
-                &callbacks,
-                3,
-                &format!("[RUST] Authentication failed: {}", e),
-            );
+            log_message(&callbacks, 3, &format!("[RUST] Authentication failed: {e}"));
             return Err(e);
         }
     };
@@ -606,7 +631,7 @@ async fn connect_and_run(
                     )
                 }
                 Err(e) => {
-                    log_message(&callbacks, 3, &format!("[RUST] Redirect failed: {}", e));
+                    log_message(&callbacks, 3, &format!("[RUST] Redirect failed: {e}"));
                     return Err(e);
                 }
             }
@@ -694,7 +719,7 @@ async fn connect_and_run(
             config
         }
         Err(e) => {
-            log_message(&callbacks, 3, &format!("[RUST] DHCP failed: {}", e));
+            log_message(&callbacks, 3, &format!("[RUST] DHCP failed: {e}"));
             return Err(e);
         }
     };
@@ -738,7 +763,7 @@ fn create_session_from_dhcp(
     mac: [u8; 6],
 ) -> SoftEtherSession {
     let mut server_ip_str = [0 as std::ffi::c_char; 64];
-    let ip_string = format!("{}", server_ip);
+    let ip_string = format!("{server_ip}");
     for (i, b) in ip_string.bytes().enumerate() {
         if i < 63 {
             server_ip_str[i] = b as std::ffi::c_char;
@@ -787,10 +812,7 @@ async fn connect_redirect(
     log_msg(
         callbacks,
         1,
-        &format!(
-            "[RUST] Connecting to cluster server {}:{}",
-            redirect_server, redirect_port
-        ),
+        &format!("[RUST] Connecting to cluster server {redirect_server}:{redirect_port}"),
     );
 
     // Create a modified config for the redirect server
@@ -847,7 +869,7 @@ async fn connect_redirect(
         .header("Connection", "Keep-Alive")
         .body(auth_pack.to_bytes());
 
-    let host = format!("{}:{}", redirect_server, redirect_port);
+    let host = format!("{redirect_server}:{redirect_port}");
     let request_bytes = request.build(&host);
 
     log_msg(callbacks, 1, "[RUST] Sending ticket authentication");
@@ -986,11 +1008,7 @@ async fn perform_dhcp(
                 // Zero bytes - continue
             }
             Ok(Err(e)) => {
-                log_msg(
-                    callbacks,
-                    2,
-                    &format!("[RUST] Read error during DHCP: {}", e),
-                );
+                log_msg(callbacks, 2, &format!("[RUST] Read error during DHCP: {e}"));
             }
             Err(_) => {
                 // Timeout, retry
@@ -1147,7 +1165,7 @@ async fn run_packet_loop(
                         break;
                     }
                     Ok(Err(e)) => {
-                        log_msg(&callbacks, 3, &format!("[RUST] Read error: {}", e));
+                        log_msg(&callbacks, 3, &format!("[RUST] Read error: {e}"));
                         return Err(crate::error::Error::Io(e));
                     }
                     Err(_) => {} // Timeout - fine, loop to check keepalive
@@ -1269,11 +1287,44 @@ async fn authenticate(
         max_connections: config.max_connections,
         use_encrypt: config.use_encrypt,
         use_compress: config.use_compress,
-        udp_accel: false,
+        udp_accel: config.udp_accel,
         bridge_mode: false,
-        monitor_mode: false,
-        qos: true,
+        monitor_mode: config.monitor_mode,
+        qos: config.qos,
     };
+
+    // Setup UDP acceleration if enabled
+    let udp_accel = if config.udp_accel {
+        log_msg(callbacks, 1, "[RUST] Creating UDP acceleration socket...");
+        match crate::net::UdpAccel::new(None, true, false) {
+            Ok(accel) => {
+                log_msg(
+                    callbacks,
+                    1,
+                    &format!(
+                        "[RUST] UDP accel created: port={}, version={}",
+                        accel.my_port, accel.version
+                    ),
+                );
+                Some(accel)
+            }
+            Err(e) => {
+                log_msg(
+                    callbacks,
+                    2,
+                    &format!("[RUST] Failed to create UDP accel: {e}, continuing without it"),
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Build UDP accel params if we have a socket
+    let udp_accel_params = udp_accel
+        .as_ref()
+        .map(crate::net::UdpAccelAuthParams::from_udp_accel);
 
     log_msg(
         callbacks,
@@ -1303,8 +1354,8 @@ async fn authenticate(
     log_msg(callbacks, 1, "[RUST] Decoding hex password hash");
     let password_hash_bytes: [u8; 20] = hex::decode(&config.password_hash)
         .map_err(|e| {
-            log_msg(callbacks, 3, &format!("[RUST] Hex decode error: {}", e));
-            crate::error::Error::Config(format!("Invalid hex password hash: {}", e))
+            log_msg(callbacks, 3, &format!("[RUST] Hex decode error: {e}"));
+            crate::error::Error::Config(format!("Invalid hex password hash: {e}"))
         })?
         .try_into()
         .map_err(|_| crate::error::Error::Config("Hash decode produced wrong length".into()))?;
@@ -1318,7 +1369,7 @@ async fn authenticate(
         auth_type,
         &hello.random,
         &options,
-        None,
+        udp_accel_params.as_ref(),
     );
 
     let request = HttpRequest::post(VPN_TARGET)
@@ -1345,7 +1396,7 @@ async fn authenticate(
     log_msg(callbacks, 1, "[RUST] Waiting for auth response...");
     loop {
         let n = conn.read(&mut buf).await?;
-        log_msg(callbacks, 1, &format!("[RUST] Received {} bytes", n));
+        log_msg(callbacks, 1, &format!("[RUST] Received {n} bytes"));
         if n == 0 {
             log_msg(callbacks, 3, "[RUST] Connection closed during auth");
             return Err(crate::error::Error::ConnectionFailed(
@@ -1395,6 +1446,35 @@ async fn authenticate(
                     )));
                 }
 
+                // Check if server supports UDP acceleration
+                if config.udp_accel {
+                    // Try to get remote IP for UDP accel parsing
+                    let remote_ip = resolve_server_ip(&config.server)
+                        .map(std::net::IpAddr::V4)
+                        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+
+                    if let Some(udp_response) =
+                        AuthResult::parse_udp_accel_response(&pack, remote_ip)
+                    {
+                        log_msg(
+                            callbacks,
+                            1,
+                            &format!(
+                                "[RUST] Server supports UDP accel: version={}, port={}, encryption={}",
+                                udp_response.version, udp_response.server_port, udp_response.use_encryption
+                            ),
+                        );
+                        // TODO: Initialize UDP accel with server params and integrate with tunnel runner
+                        // For now, we just log that the server supports it
+                    } else {
+                        log_msg(
+                            callbacks,
+                            2,
+                            "[RUST] Server does not support UDP acceleration",
+                        );
+                    }
+                }
+
                 log_msg(
                     callbacks,
                     1,
@@ -1421,7 +1501,7 @@ fn resolve_server_ip(server: &str) -> crate::error::Result<Ipv4Addr> {
     }
 
     use std::net::ToSocketAddrs;
-    let addr_str = format!("{}:443", server);
+    let addr_str = format!("{server}:443");
     match addr_str.to_socket_addrs() {
         Ok(mut addrs) => {
             for addr in addrs.by_ref() {
@@ -1430,13 +1510,11 @@ fn resolve_server_ip(server: &str) -> crate::error::Result<Ipv4Addr> {
                 }
             }
             Err(crate::error::Error::ConnectionFailed(format!(
-                "No IPv4 address found for {}",
-                server
+                "No IPv4 address found for {server}"
             )))
         }
         Err(e) => Err(crate::error::Error::ConnectionFailed(format!(
-            "Failed to resolve {}: {}",
-            server, e
+            "Failed to resolve {server}: {e}"
         ))),
     }
 }
@@ -1579,9 +1657,23 @@ pub unsafe extern "C" fn softether_send_packets(
     if let Some(tx) = &guard.tx_sender {
         match tx.try_send(packet_data) {
             Ok(()) => count,
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                // Queue full, drop packets
-                0
+            Err(mpsc::error::TrySendError::Full(dropped_data)) => {
+                // Queue full - backpressure signal
+                // Count packets in the dropped data for stats
+                let mut dropped_count = 0u64;
+                let mut offset = 0;
+                while offset + 2 <= dropped_data.len() {
+                    let len = u16::from_be_bytes([dropped_data[offset], dropped_data[offset + 1]])
+                        as usize;
+                    dropped_count += 1;
+                    offset += 2 + len;
+                }
+                guard
+                    .stats
+                    .packets_dropped
+                    .fetch_add(dropped_count, Ordering::Relaxed);
+                // Return QueueFull to signal caller should retry/backoff
+                SoftEtherResult::QueueFull as c_int
             }
             Err(mpsc::error::TrySendError::Closed(_)) => SoftEtherResult::NotConnected as c_int,
         }
@@ -1708,6 +1800,7 @@ impl Clone for SoftEtherStats {
             uptime_secs: self.uptime_secs,
             active_connections: self.active_connections,
             reconnect_count: self.reconnect_count,
+            packets_dropped: self.packets_dropped,
         }
     }
 }

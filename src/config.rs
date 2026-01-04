@@ -42,6 +42,17 @@ pub struct VpnConfig {
     /// Most SoftEther servers use self-signed certificates.
     pub skip_tls_verify: bool,
 
+    /// Custom CA certificate in PEM format (optional).
+    /// When set, this CA is used to verify the server certificate instead of system roots.
+    #[serde(default)]
+    pub custom_ca_pem: Option<String>,
+
+    /// Server certificate SHA-256 fingerprint for pinning (optional).
+    /// Format: hex-encoded 64 characters (e.g., "a1b2c3...").
+    /// When set, the server certificate must match this fingerprint exactly.
+    #[serde(default)]
+    pub cert_fingerprint_sha256: Option<String>,
+
     // ─────────────────────────────────────────────────────────────────────────
     // Tunnel Features
     // ─────────────────────────────────────────────────────────────────────────
@@ -171,6 +182,8 @@ impl Default for VpnConfig {
             password_hash: String::new(),
             // TLS
             skip_tls_verify: true, // SoftEther often uses self-signed certs
+            custom_ca_pem: None,
+            cert_fingerprint_sha256: None,
             // Tunnel Features
             use_encrypt: true,
             use_compress: false,

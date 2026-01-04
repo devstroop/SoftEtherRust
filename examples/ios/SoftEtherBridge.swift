@@ -101,6 +101,10 @@ public class SoftEtherBridge {
         
         // TLS Settings
         public let skipTlsVerify: Bool
+        /// Custom CA certificate in PEM format for server verification.
+        public let customCaPem: String?
+        /// Server certificate SHA-256 fingerprint for pinning (64 hex chars).
+        public let certFingerprintSha256: String?
         
         // Connection Settings
         public let maxConnections: UInt8
@@ -130,6 +134,8 @@ public class SoftEtherBridge {
             username: String,
             passwordHash: String,
             skipTlsVerify: Bool = false,
+            customCaPem: String? = nil,
+            certFingerprintSha256: String? = nil,
             maxConnections: UInt8 = 1,
             timeoutSeconds: UInt32 = 30,
             mtu: UInt32 = 1400,
@@ -150,6 +156,8 @@ public class SoftEtherBridge {
             self.username = username
             self.passwordHash = passwordHash
             self.skipTlsVerify = skipTlsVerify
+            self.customCaPem = customCaPem
+            self.certFingerprintSha256 = certFingerprintSha256
             self.maxConnections = maxConnections
             self.timeoutSeconds = timeoutSeconds
             self.mtu = mtu
@@ -219,6 +227,8 @@ public class SoftEtherBridge {
         let passwordHashCString = config.passwordHash.withCString { strdup($0) }!
         let ipv4IncludeCString = config.ipv4Include?.withCString { strdup($0) }
         let ipv4ExcludeCString = config.ipv4Exclude?.withCString { strdup($0) }
+        let customCaPemCString = config.customCaPem?.withCString { strdup($0) }
+        let certFingerprintCString = config.certFingerprintSha256?.withCString { strdup($0) }
         
         defer {
             free(serverCString)
@@ -227,6 +237,8 @@ public class SoftEtherBridge {
             free(passwordHashCString)
             if let ptr = ipv4IncludeCString { free(ptr) }
             if let ptr = ipv4ExcludeCString { free(ptr) }
+            if let ptr = customCaPemCString { free(ptr) }
+            if let ptr = certFingerprintCString { free(ptr) }
         }
         
         cConfig.server = UnsafePointer(serverCString)
@@ -237,6 +249,8 @@ public class SoftEtherBridge {
         
         // TLS Settings
         cConfig.skip_tls_verify = config.skipTlsVerify ? 1 : 0
+        cConfig.custom_ca_pem = customCaPemCString.map { UnsafePointer($0) }
+        cConfig.cert_fingerprint_sha256 = certFingerprintCString.map { UnsafePointer($0) }
         
         // Connection Settings
         cConfig.max_connections = UInt32(config.maxConnections)
@@ -342,6 +356,7 @@ public class SoftEtherBridge {
     
     /// Send packets to VPN server.
     /// Each packet should be a complete Ethernet frame (L2).
+    /// Throws `queueFull` if backpressure is detected - caller should retry.
     public func sendPackets(_ packets: [Data]) throws {
         guard !packets.isEmpty else { return }
         
@@ -370,7 +385,9 @@ public class SoftEtherBridge {
             )
         }
         
-        if result < 0 {
+        if result == Int32(SOFTETHER_QUEUE_FULL.rawValue) {
+            throw BridgeError.queueFull
+        } else if result < 0 {
             throw BridgeError.sendFailed(code: Int(result))
         }
     }
@@ -485,4 +502,5 @@ public enum BridgeError: Error {
     case connectFailed(code: Int)
     case sendFailed(code: Int)
     case disconnected(code: Int)
+    case queueFull  // Backpressure - caller should retry
 }
