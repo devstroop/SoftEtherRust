@@ -32,6 +32,7 @@ class SoftEtherBridge {
         const val RESULT_TIMEOUT = -6
         const val RESULT_IO_ERROR = -7
         const val RESULT_ALREADY_CONNECTED = -8
+        const val RESULT_QUEUE_FULL = -9      // Backpressure - caller should retry
         const val RESULT_INTERNAL_ERROR = -99
         
         /**
