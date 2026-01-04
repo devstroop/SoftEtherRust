@@ -27,6 +27,8 @@ pub enum SoftEtherResult {
     IoError = -7,
     /// Already connected.
     AlreadyConnected = -8,
+    /// Queue full - backpressure, caller should retry.
+    QueueFull = -9,
     /// Internal error.
     InternalError = -99,
 }
