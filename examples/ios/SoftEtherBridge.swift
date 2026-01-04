@@ -172,6 +172,15 @@ public class SoftEtherBridge {
     public var onConnected: ((Session) -> Void)?
     public var onDisconnected: ((Error?) -> Void)?
     public var onPacketsReceived: (([Data]) -> Void)?
+    public var onLog: ((LogLevel, String) -> Void)?
+    
+    public enum LogLevel: Int {
+        case error = 0
+        case warn = 1
+        case info = 2
+        case debug = 3
+        case trace = 4
+    }
     
     // MARK: - Private
     
@@ -257,6 +266,7 @@ public class SoftEtherBridge {
         cCallbacks.on_connected = connectedCallback
         cCallbacks.on_disconnected = disconnectedCallback
         cCallbacks.on_packets_received = packetsReceivedCallback
+        cCallbacks.on_log = logCallback
         
         // Create client
         handle = softether_create(&cConfig, &cCallbacks)
@@ -456,6 +466,15 @@ private func packetsReceivedCallback(
     }
     
     ctx.bridge?.onPacketsReceived?(parsedPackets)
+}
+
+private func logCallback(context: UnsafeMutableRawPointer?, level: Int32, message: UnsafePointer<CChar>?) {
+    guard let context = context, let message = message else { return }
+    let ctx = Unmanaged<CallbackContext>.fromOpaque(context).takeUnretainedValue()
+    
+    let logLevel = SoftEtherBridge.LogLevel(rawValue: Int(level)) ?? .info
+    let logMessage = String(cString: message)
+    ctx.bridge?.onLog?(logLevel, logMessage)
 }
 
 // MARK: - Errors
