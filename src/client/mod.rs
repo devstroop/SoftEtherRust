@@ -295,7 +295,9 @@ impl VpnClient {
 
         debug!(server = %redirect_server, port = redirect_port, "Connecting to cluster server");
 
+        // CRITICAL: Preserve original server hostname for TLS SNI
         let mut redirect_config = self.config.clone();
+        redirect_config.sni_hostname = Some(self.config.server.clone());
         redirect_config.server = redirect_server.clone();
         redirect_config.port = redirect_port;
 

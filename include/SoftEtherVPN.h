@@ -126,6 +126,7 @@ typedef void (*SoftEtherDisconnectedCallback)(void* context, SoftEtherResult res
 typedef void (*SoftEtherPacketsCallback)(void* context, const uint8_t* packets, size_t total_size, uint32_t count);
 typedef void (*SoftEtherLogCallback)(void* context, int level, const char* message);
 typedef bool (*SoftEtherProtectSocketCallback)(void* context, int fd);
+typedef bool (*SoftEtherExcludeIPCallback)(void* context, const char* ip);
 
 typedef struct {
     void* context;                              // User context passed to callbacks
@@ -134,7 +135,8 @@ typedef struct {
     SoftEtherDisconnectedCallback on_disconnected; // Disconnection callback
     SoftEtherPacketsCallback on_packets_received;  // Packets received callback
     SoftEtherLogCallback on_log;                // Log message callback
-    SoftEtherProtectSocketCallback protect_socket; // Socket protection callback (iOS/Android VPN)
+    SoftEtherProtectSocketCallback protect_socket; // Socket protection callback (Android VPN)
+    SoftEtherExcludeIPCallback exclude_ip;      // IP exclusion callback (iOS - for redirect servers)
 } SoftEtherCallbacks;
 
 // =============================================================================

@@ -347,7 +347,9 @@ impl AuthPack {
 
         // Connection options (wired from config)
         pack.add_int("max_connection", options.max_connections as u32);
-        pack.add_bool("use_encrypt", options.use_encrypt);
+        // IMPORTANT: Always request encryption to match Swift's hardcoded behavior
+        // This ensures the server doesn't send non-TLS data after auth
+        pack.add_bool("use_encrypt", true);
         pack.add_bool("use_compress", options.use_compress);
         // half_connection only makes sense with max_connections >= 2
         // For now we only support 1 connection, so always false
@@ -480,7 +482,10 @@ impl AuthPack {
 
         // Connection options (same as password auth, from config)
         pack.add_int("max_connection", options.max_connections as u32);
-        pack.add_bool("use_encrypt", options.use_encrypt);
+        // IMPORTANT: For ticket auth (cluster redirect), always request encryption
+        // This matches Swift's behavior which hardcodes use_encrypt=true
+        // Without this, the cluster server may respond with non-TLS data
+        pack.add_bool("use_encrypt", true);
         pack.add_bool("use_compress", options.use_compress);
         // half_connection only makes sense with max_connections >= 2
         pack.add_bool("half_connection", options.max_connections >= 2);

@@ -67,6 +67,18 @@ pub type LogCallback =
 /// true if protection succeeded, false otherwise.
 pub type ProtectSocketCallback = Option<extern "C" fn(context: *mut c_void, fd: i32) -> bool>;
 
+/// IP exclusion callback type (iOS specific).
+/// Called when an IP address needs to be excluded from VPN routing.
+/// This is needed on iOS when connecting to cluster/redirect servers.
+///
+/// # Parameters
+/// - `context`: User context pointer.
+/// - `ip`: Null-terminated IP address string (e.g., "62.24.65.213").
+///
+/// # Returns
+/// true if exclusion succeeded, false otherwise.
+pub type ExcludeIPCallback = Option<extern "C" fn(context: *mut c_void, ip: *const std::ffi::c_char) -> bool>;
+
 /// Collection of all callbacks.
 #[repr(C)]
 pub struct SoftEtherCallbacks {
@@ -84,6 +96,8 @@ pub struct SoftEtherCallbacks {
     pub on_log: LogCallback,
     /// Socket protection callback (Android VPN).
     pub protect_socket: ProtectSocketCallback,
+    /// IP exclusion callback (iOS - to exclude redirect servers from VPN routing).
+    pub exclude_ip: ExcludeIPCallback,
 }
 
 impl Default for SoftEtherCallbacks {
@@ -96,6 +110,7 @@ impl Default for SoftEtherCallbacks {
             on_packets_received: None,
             on_log: None,
             protect_socket: None,
+            exclude_ip: None,
         }
     }
 }

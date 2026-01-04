@@ -18,6 +18,11 @@ pub struct VpnConfig {
     /// Server port (default: 443).
     pub port: u16,
 
+    /// SNI hostname for TLS (uses server if None).
+    /// Used when connecting to redirect servers via IP to preserve original hostname for TLS.
+    #[serde(default)]
+    pub sni_hostname: Option<String>,
+
     /// Virtual Hub name.
     pub hub: String,
 
@@ -164,6 +169,7 @@ impl Default for VpnConfig {
             // Connection
             server: String::new(),
             port: 443,
+            sni_hostname: None,
             hub: String::new(),
             timeout_seconds: 30,
             // Authentication

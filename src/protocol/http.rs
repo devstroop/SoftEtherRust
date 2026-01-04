@@ -207,7 +207,8 @@ impl HttpCodec {
                             body,
                         };
 
-                        self.reset();
+                        // Don't reset - keep remaining bytes in buffer
+                        // Caller should use take_remaining() if needed
                         return Ok(Some(response));
                     } else {
                         return Ok(None);
@@ -249,6 +250,25 @@ impl HttpCodec {
             let value = line[pos + 1..].trim().to_string();
             self.headers.insert(key, value);
         }
+    }
+
+    /// Take any remaining bytes from the buffer after parsing.
+    /// This is useful when the server sends additional data after the HTTP response
+    /// (e.g., tunnel data right after authentication).
+    pub fn take_remaining(&mut self) -> Vec<u8> {
+        let remaining = self.buffer.to_vec();
+        self.buffer.clear();
+        remaining
+    }
+
+    /// Check if there are remaining bytes in the buffer.
+    pub fn has_remaining(&self) -> bool {
+        !self.buffer.is_empty()
+    }
+
+    /// Get the number of remaining bytes.
+    pub fn remaining_len(&self) -> usize {
+        self.buffer.len()
     }
 }
 
