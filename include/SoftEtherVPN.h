@@ -29,6 +29,7 @@ typedef enum {
     SOFTETHER_TIMEOUT = -6,
     SOFTETHER_IO_ERROR = -7,
     SOFTETHER_ALREADY_CONNECTED = -8,
+    SOFTETHER_QUEUE_FULL = -9,         // Backpressure - caller should retry
     SOFTETHER_INTERNAL_ERROR = -99,
 } SoftEtherResult;
 
