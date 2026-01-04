@@ -61,6 +61,8 @@ typedef struct {
     
     // TLS Settings
     int skip_tls_verify;          // Skip TLS certificate verification (1 = yes, 0 = no)
+    const char* custom_ca_pem;    // Custom CA certificate in PEM format (nullable)
+    const char* cert_fingerprint_sha256; // Server cert SHA-256 fingerprint (64 hex chars, nullable)
     
     // Connection Settings
     unsigned int max_connections; // Max TCP connections (1-32, default 1)

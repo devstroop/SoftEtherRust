@@ -221,6 +221,33 @@ pub unsafe extern "C" fn softether_create(
             .collect()
     };
 
+    // Parse optional certificate pinning fields
+    let custom_ca_pem = if config.custom_ca_pem.is_null() {
+        None
+    } else {
+        let pem = CStr::from_ptr(config.custom_ca_pem)
+            .to_string_lossy()
+            .into_owned();
+        if pem.is_empty() {
+            None
+        } else {
+            Some(pem)
+        }
+    };
+
+    let cert_fingerprint_sha256 = if config.cert_fingerprint_sha256.is_null() {
+        None
+    } else {
+        let fp = CStr::from_ptr(config.cert_fingerprint_sha256)
+            .to_string_lossy()
+            .into_owned();
+        if fp.is_empty() {
+            None
+        } else {
+            Some(fp)
+        }
+    };
+
     // Create VPN config with all options
     let vpn_config = crate::config::VpnConfig {
         server,
@@ -229,6 +256,8 @@ pub unsafe extern "C" fn softether_create(
         username,
         password_hash,
         skip_tls_verify: config.skip_tls_verify != 0,
+        custom_ca_pem,
+        cert_fingerprint_sha256,
         max_connections: config.max_connections.clamp(1, 32) as u8,
         timeout_seconds: config.timeout_seconds.max(5) as u64,
         mtu: config.mtu.clamp(576, 1500) as u16,
