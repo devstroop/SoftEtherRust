@@ -166,6 +166,8 @@ pub struct SoftEtherStats {
     pub active_connections: c_uint,
     /// Number of reconnections.
     pub reconnect_count: c_uint,
+    /// Packets dropped due to queue full (backpressure).
+    pub packets_dropped: u64,
 }
 
 /// Opaque handle to a SoftEther client instance.

@@ -52,6 +52,7 @@ struct FfiStats {
     bytes_received: AtomicU64,
     packets_sent: AtomicU64,
     packets_received: AtomicU64,
+    packets_dropped: AtomicU64,
     uptime_start: AtomicU64,
 }
 
@@ -62,6 +63,7 @@ impl Default for FfiStats {
             bytes_received: AtomicU64::new(0),
             packets_sent: AtomicU64::new(0),
             packets_received: AtomicU64::new(0),
+            packets_dropped: AtomicU64::new(0),
             uptime_start: AtomicU64::new(0),
         }
     }
@@ -140,6 +142,7 @@ impl FfiClient {
             uptime_secs: uptime,
             active_connections: 1,
             reconnect_count: 0,
+            packets_dropped: self.stats.packets_dropped.load(Ordering::Relaxed),
         }
     }
 }

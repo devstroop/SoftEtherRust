@@ -116,6 +116,7 @@ typedef struct {
     uint64_t uptime_secs;
     unsigned int active_connections;
     unsigned int reconnect_count;
+    uint64_t packets_dropped;         // Packets dropped due to queue full (backpressure)
 } SoftEtherStats;
 
 // =============================================================================
