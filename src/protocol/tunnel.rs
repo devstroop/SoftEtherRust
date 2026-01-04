@@ -102,6 +102,22 @@ pub fn compress(data: &[u8]) -> Result<Vec<u8>> {
         .map_err(|e| Error::Protocol(format!("Compression finish failed: {e}")))
 }
 
+/// Compress data into a pre-allocated buffer (zero-allocation hot path).
+/// Returns the number of bytes written to the output buffer.
+/// If the output buffer is too small, returns an error.
+pub fn compress_into(data: &[u8], output: &mut [u8]) -> Result<usize> {
+    use std::io::Cursor;
+    let cursor = Cursor::new(output);
+    let mut encoder = ZlibEncoder::new(cursor, Compression::fast());
+    encoder
+        .write_all(data)
+        .map_err(|e| Error::Protocol(format!("Compression failed: {e}")))?;
+    let cursor = encoder
+        .finish()
+        .map_err(|e| Error::Protocol(format!("Compression finish failed: {e}")))?;
+    Ok(cursor.position() as usize)
+}
+
 /// Tunnel frame type.
 #[derive(Debug, Clone)]
 pub enum TunnelFrame {
