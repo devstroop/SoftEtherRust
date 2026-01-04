@@ -198,7 +198,7 @@ impl TunnelRunner {
         // Step 2: Create TUN device
         #[cfg(target_os = "macos")]
         let mut tun = UtunDevice::new(None)
-            .map_err(|e| Error::TunDevice(format!("Failed to create TUN: {}", e)))?;
+            .map_err(|e| Error::TunDevice(format!("Failed to create TUN: {e}")))?;
         #[cfg(target_os = "linux")]
         let mut tun = TunDevice::new(None)
             .map_err(|e| Error::TunDevice(format!("Failed to create TUN: {}", e)))?;
@@ -216,11 +216,11 @@ impl TunnelRunner {
 
             // Step 3: Configure TUN device
             tun.configure(dhcp_config.ip, dhcp_config.netmask)
-                .map_err(|e| Error::TunDevice(format!("Failed to configure TUN: {}", e)))?;
+                .map_err(|e| Error::TunDevice(format!("Failed to configure TUN: {e}")))?;
             tun.set_up()
-                .map_err(|e| Error::TunDevice(format!("Failed to bring up TUN: {}", e)))?;
+                .map_err(|e| Error::TunDevice(format!("Failed to bring up TUN: {e}")))?;
             tun.set_mtu(self.config.mtu)
-                .map_err(|e| Error::TunDevice(format!("Failed to set MTU: {}", e)))?;
+                .map_err(|e| Error::TunDevice(format!("Failed to set MTU: {e}")))?;
 
             // Step 4: Set up routes
             self.configure_routes(&tun, &dhcp_config)?;
@@ -262,7 +262,7 @@ impl TunnelRunner {
         // Step 3: Create TUN device
         #[cfg(target_os = "macos")]
         let mut tun = UtunDevice::new(None)
-            .map_err(|e| Error::TunDevice(format!("Failed to create TUN: {}", e)))?;
+            .map_err(|e| Error::TunDevice(format!("Failed to create TUN: {e}")))?;
         #[cfg(target_os = "linux")]
         let mut tun = TunDevice::new(None)
             .map_err(|e| Error::TunDevice(format!("Failed to create TUN: {}", e)))?;
@@ -280,11 +280,11 @@ impl TunnelRunner {
 
             // Step 4: Configure TUN device
             tun.configure(dhcp_config.ip, dhcp_config.netmask)
-                .map_err(|e| Error::TunDevice(format!("Failed to configure TUN: {}", e)))?;
+                .map_err(|e| Error::TunDevice(format!("Failed to configure TUN: {e}")))?;
             tun.set_up()
-                .map_err(|e| Error::TunDevice(format!("Failed to bring up TUN: {}", e)))?;
+                .map_err(|e| Error::TunDevice(format!("Failed to bring up TUN: {e}")))?;
             tun.set_mtu(self.config.mtu)
-                .map_err(|e| Error::TunDevice(format!("Failed to set MTU: {}", e)))?;
+                .map_err(|e| Error::TunDevice(format!("Failed to set MTU: {e}")))?;
 
             // Step 5: Set up routes
             self.configure_routes(&tun, &dhcp_config)?;
@@ -309,7 +309,7 @@ impl TunnelRunner {
             if let Some(gateway) = dhcp_config.gateway {
                 // set_default_route adds the host route first internally, then the split-tunnel routes
                 tun.set_default_route(gateway, self.config.vpn_server_ip)
-                    .map_err(|e| Error::TunDevice(format!("Failed to set default route: {}", e)))?;
+                    .map_err(|e| Error::TunDevice(format!("Failed to set default route: {e}")))?;
             }
         }
 
@@ -317,7 +317,7 @@ impl TunnelRunner {
         if !self.config.routes.is_empty() {
             for route in &self.config.routes {
                 tun.add_route_via_interface(route.dest, route.prefix_len)
-                    .map_err(|e| Error::TunDevice(format!("Failed to add route: {}", e)))?;
+                    .map_err(|e| Error::TunDevice(format!("Failed to add route: {e}")))?;
             }
         } else {
             // Auto-detect VPN subnet from DHCP config (only if default_route is false)
@@ -364,14 +364,14 @@ impl TunnelRunner {
                 debug!(network = %route_network, prefix = route_prefix, "Adding VPN subnet route");
                 tun.add_route_via_interface(route_network, route_prefix)
                     .map_err(|e| {
-                        Error::TunDevice(format!("Failed to add VPN subnet route: {}", e))
+                        Error::TunDevice(format!("Failed to add VPN subnet route: {e}"))
                     })?;
             }
         }
 
         // Configure DNS servers from DHCP
         tun.configure_dns(dhcp_config.dns1, dhcp_config.dns2)
-            .map_err(|e| Error::TunDevice(format!("Failed to configure DNS: {}", e)))?;
+            .map_err(|e| Error::TunDevice(format!("Failed to configure DNS: {e}")))?;
 
         Ok(())
     }

@@ -97,9 +97,9 @@ impl VpnConnection {
         // Resolve address
         let socket_addr = addr
             .to_socket_addrs()
-            .map_err(|e| Error::ConnectionFailed(format!("Failed to resolve {}: {}", addr, e)))?
+            .map_err(|e| Error::ConnectionFailed(format!("Failed to resolve {addr}: {e}")))?
             .next()
-            .ok_or_else(|| Error::ConnectionFailed(format!("No addresses found for {}", addr)))?;
+            .ok_or_else(|| Error::ConnectionFailed(format!("No addresses found for {addr}")))?;
 
         debug!("Connecting to {}", socket_addr);
 
@@ -108,7 +108,7 @@ impl VpnConnection {
         let stream = tokio::time::timeout(timeout, TcpStream::connect(socket_addr))
             .await
             .map_err(|_| Error::Timeout)?
-            .map_err(|e| Error::ConnectionFailed(format!("TCP connect failed: {}", e)))?;
+            .map_err(|e| Error::ConnectionFailed(format!("TCP connect failed: {e}")))?;
 
         // Set TCP options
         stream.set_nodelay(true)?;
@@ -167,7 +167,7 @@ impl VpnConnection {
         let tls_stream = connector
             .connect(server_name, stream)
             .await
-            .map_err(|e| Error::Tls(format!("TLS handshake failed: {}", e)))?;
+            .map_err(|e| Error::Tls(format!("TLS handshake failed: {e}")))?;
 
         info!("TLS connection established");
         Ok(VpnConnection::Tls(Box::new(tls_stream)))
@@ -186,9 +186,9 @@ impl VpnConnection {
         // Resolve address
         let socket_addr = addr
             .to_socket_addrs()
-            .map_err(|e| Error::ConnectionFailed(format!("Failed to resolve {}: {}", addr, e)))?
+            .map_err(|e| Error::ConnectionFailed(format!("Failed to resolve {addr}: {e}")))?
             .next()
-            .ok_or_else(|| Error::ConnectionFailed(format!("No addresses found for {}", addr)))?;
+            .ok_or_else(|| Error::ConnectionFailed(format!("No addresses found for {addr}")))?;
 
         debug!("Connecting to {} (with socket protection)", socket_addr);
 
@@ -197,7 +197,7 @@ impl VpnConnection {
         let stream = tokio::time::timeout(timeout, TcpStream::connect(socket_addr))
             .await
             .map_err(|_| Error::Timeout)?
-            .map_err(|e| Error::ConnectionFailed(format!("TCP connect failed: {}", e)))?;
+            .map_err(|e| Error::ConnectionFailed(format!("TCP connect failed: {e}")))?;
 
         // CRITICAL: Protect the socket BEFORE TLS and BEFORE VPN tunnel is established
         let fd = stream.as_raw_fd();
@@ -258,7 +258,7 @@ impl VpnConnection {
         let tls_stream = connector
             .connect(server_name, stream)
             .await
-            .map_err(|e| Error::Tls(format!("TLS handshake failed: {}", e)))?;
+            .map_err(|e| Error::Tls(format!("TLS handshake failed: {e}")))?;
 
         info!("TLS connection established (protected)");
         Ok(VpnConnection::Tls(Box::new(tls_stream)))

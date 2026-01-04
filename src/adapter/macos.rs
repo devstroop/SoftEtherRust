@@ -304,7 +304,7 @@ impl TunAdapter for UtunDevice {
                 "-n",
                 "add",
                 "-net",
-                &format!("{}/{}", dest, prefix_len),
+                &format!("{dest}/{prefix_len}"),
                 &gateway.to_string(),
             ])
             .status()?;
@@ -319,7 +319,7 @@ impl TunAdapter for UtunDevice {
     }
 
     fn add_route_via_interface(&self, dest: Ipv4Addr, prefix_len: u8) -> io::Result<()> {
-        let route_str = format!("{}/{}", dest, prefix_len);
+        let route_str = format!("{dest}/{prefix_len}");
         let status = Command::new("route")
             .args(["-n", "add", "-net", &route_str, "-interface", &self.name])
             .status()?;
@@ -377,7 +377,7 @@ impl TunAdapter for UtunDevice {
                     }
                     // Track the host route for cleanup
                     if let Ok(mut routes) = self.routes_added.lock() {
-                        routes.push(format!("-host {}", server_ip));
+                        routes.push(format!("-host {server_ip}"));
                     }
                     info!("Added host route: {} via {}", server_ip, orig_gateway);
                 } else {

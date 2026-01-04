@@ -39,7 +39,7 @@ impl TryFrom<u32> for PackValueType {
             2 => Ok(Self::Str),
             3 => Ok(Self::UniStr),
             4 => Ok(Self::Int64),
-            _ => Err(Error::pack(format!("Invalid Pack value type: {}", value))),
+            _ => Err(Error::pack(format!("Invalid Pack value type: {value}"))),
         }
     }
 }
@@ -326,7 +326,7 @@ impl Pack {
 
         let num_elements = buf.get_u32();
         if num_elements as usize > MAX_ELEMENTS {
-            return Err(Error::pack(format!("Too many elements: {}", num_elements)));
+            return Err(Error::pack(format!("Too many elements: {num_elements}")));
         }
 
         let mut pack = Pack::new();
@@ -350,7 +350,7 @@ impl Pack {
         // Read name length
         let name_len = buf.get_u32() as usize;
         if !(1..=4096).contains(&name_len) {
-            return Err(Error::pack(format!("Invalid name length: {}", name_len)));
+            return Err(Error::pack(format!("Invalid name length: {name_len}")));
         }
 
         // Name length includes null terminator which isn't written
@@ -378,7 +378,7 @@ impl Pack {
         // Read number of values
         let num_values = buf.get_u32() as usize;
         if num_values > MAX_VALUE_NUM {
-            return Err(Error::pack(format!("Too many values: {}", num_values)));
+            return Err(Error::pack(format!("Too many values: {num_values}")));
         }
 
         let mut values = Vec::with_capacity(num_values);
@@ -415,7 +415,7 @@ impl Pack {
                 }
                 let len = buf.get_u32() as usize;
                 if len > MAX_VALUE_SIZE {
-                    return Err(Error::pack(format!("String too long: {}", len)));
+                    return Err(Error::pack(format!("String too long: {len}")));
                 }
                 if buf.remaining() < len {
                     return Err(Error::pack("Unexpected end of Pack data"));
@@ -430,7 +430,7 @@ impl Pack {
                 }
                 let size = buf.get_u32() as usize;
                 if size > MAX_VALUE_SIZE {
-                    return Err(Error::pack(format!("UniStr too long: {}", size)));
+                    return Err(Error::pack(format!("UniStr too long: {size}")));
                 }
                 if size == 0 {
                     return Ok(PackValue::UniStr(String::new()));
@@ -454,7 +454,7 @@ impl Pack {
                 }
                 let size = buf.get_u32() as usize;
                 if size > MAX_VALUE_SIZE {
-                    return Err(Error::pack(format!("Data too large: {}", size)));
+                    return Err(Error::pack(format!("Data too large: {size}")));
                 }
                 if buf.remaining() < size {
                     return Err(Error::pack("Unexpected end of Pack data"));

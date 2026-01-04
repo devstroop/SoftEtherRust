@@ -59,7 +59,7 @@ impl std::fmt::Display for VpnState {
             VpnState::ConfiguringNetwork => write!(f, "Configuring Network"),
             VpnState::Connected => write!(f, "Connected"),
             VpnState::Reconnecting => write!(f, "Reconnecting"),
-            VpnState::Error(e) => write!(f, "Error: {}", e),
+            VpnState::Error(e) => write!(f, "Error: {e}"),
         }
     }
 }

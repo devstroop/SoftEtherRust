@@ -203,27 +203,27 @@ impl VpnConfig {
     /// Load configuration from a JSON file.
     pub fn from_file<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
         let content = std::fs::read_to_string(path)
-            .map_err(|e| crate::Error::Config(format!("Failed to read config file: {}", e)))?;
+            .map_err(|e| crate::Error::Config(format!("Failed to read config file: {e}")))?;
         Self::from_json(&content)
     }
 
     /// Parse configuration from JSON string.
     pub fn from_json(json: &str) -> crate::Result<Self> {
         serde_json::from_str(json)
-            .map_err(|e| crate::Error::Config(format!("Failed to parse config JSON: {}", e)))
+            .map_err(|e| crate::Error::Config(format!("Failed to parse config JSON: {e}")))
     }
 
     /// Serialize configuration to JSON.
     pub fn to_json(&self) -> crate::Result<String> {
         serde_json::to_string_pretty(self)
-            .map_err(|e| crate::Error::Config(format!("Failed to serialize config: {}", e)))
+            .map_err(|e| crate::Error::Config(format!("Failed to serialize config: {e}")))
     }
 
     /// Save configuration to a JSON file.
     pub fn to_file<P: AsRef<Path>>(&self, path: P) -> crate::Result<()> {
         let json = self.to_json()?;
         std::fs::write(path, json)
-            .map_err(|e| crate::Error::Config(format!("Failed to write config file: {}", e)))
+            .map_err(|e| crate::Error::Config(format!("Failed to write config file: {e}")))
     }
 
     /// Get the connection timeout as a Duration.

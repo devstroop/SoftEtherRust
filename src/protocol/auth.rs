@@ -46,7 +46,7 @@ impl HelloResponse {
         // Check for error
         if let Some(error) = pack.get_int("error") {
             if error != 0 {
-                return Err(Error::server(error, format!("Server error: {}", error)));
+                return Err(Error::server(error, format!("Server error: {error}")));
             }
         }
 
@@ -278,10 +278,10 @@ impl AuthResult {
     fn parse_ip(pack: &Pack, name: &str) -> Option<IpAddr> {
         use std::net::{Ipv4Addr, Ipv6Addr};
 
-        let is_ipv6 = pack.get_int(&format!("{}@ipv6_bool", name)).unwrap_or(0) != 0;
+        let is_ipv6 = pack.get_int(&format!("{name}@ipv6_bool")).unwrap_or(0) != 0;
 
         if is_ipv6 {
-            let ipv6_data = pack.get_data(&format!("{}@ipv6_array", name))?;
+            let ipv6_data = pack.get_data(&format!("{name}@ipv6_array"))?;
             if ipv6_data.len() >= 16 {
                 let mut octets = [0u8; 16];
                 octets.copy_from_slice(&ipv6_data[..16]);
@@ -612,9 +612,9 @@ impl AuthPack {
 
     /// Add IP address in PackAddIp32 format.
     fn add_ip32(pack: &mut Pack, name: &str, ip: u32) {
-        pack.add_bool(&format!("{}@ipv6_bool", name), false);
-        pack.add_data(&format!("{}@ipv6_array", name), vec![0u8; 16]);
-        pack.add_int(&format!("{}@ipv6_scope_id", name), 0);
+        pack.add_bool(&format!("{name}@ipv6_bool"), false);
+        pack.add_data(&format!("{name}@ipv6_array"), vec![0u8; 16]);
+        pack.add_int(&format!("{name}@ipv6_scope_id"), 0);
         pack.add_int(name, ip);
     }
 
@@ -622,18 +622,18 @@ impl AuthPack {
     fn add_ip(pack: &mut Pack, name: &str, ip: IpAddr) {
         match ip {
             IpAddr::V4(v4) => {
-                pack.add_bool(&format!("{}@ipv6_bool", name), false);
-                pack.add_data(&format!("{}@ipv6_array", name), vec![0u8; 16]);
-                pack.add_int(&format!("{}@ipv6_scope_id", name), 0);
+                pack.add_bool(&format!("{name}@ipv6_bool"), false);
+                pack.add_data(&format!("{name}@ipv6_array"), vec![0u8; 16]);
+                pack.add_int(&format!("{name}@ipv6_scope_id"), 0);
                 // IPv4 address as u32 in network byte order stored as little-endian
                 let octets = v4.octets();
                 let ip_u32 = u32::from_le_bytes(octets);
                 pack.add_int(name, ip_u32);
             }
             IpAddr::V6(v6) => {
-                pack.add_bool(&format!("{}@ipv6_bool", name), true);
-                pack.add_data(&format!("{}@ipv6_array", name), v6.octets().to_vec());
-                pack.add_int(&format!("{}@ipv6_scope_id", name), 0);
+                pack.add_bool(&format!("{name}@ipv6_bool"), true);
+                pack.add_data(&format!("{name}@ipv6_array"), v6.octets().to_vec());
+                pack.add_int(&format!("{name}@ipv6_scope_id"), 0);
                 pack.add_int(name, 0);
             }
         }
