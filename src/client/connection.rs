@@ -8,6 +8,7 @@ use std::time::Duration;
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 
+use ring::digest::{digest, SHA256};
 use rustls;
 use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -16,7 +17,7 @@ use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::config::VpnConfig;
 use crate::error::{Error, Result};
@@ -81,6 +82,170 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for NoVerifier {
     }
 }
 
+/// Certificate fingerprint verifier for pinning.
+/// Validates that the server certificate matches an expected SHA-256 fingerprint.
+#[derive(Debug)]
+struct FingerprintVerifier {
+    expected_fingerprint: [u8; 32],
+}
+
+impl FingerprintVerifier {
+    /// Create a new fingerprint verifier from a hex-encoded SHA-256 fingerprint.
+    fn from_hex(hex: &str) -> Option<Self> {
+        let hex = hex.replace([':', ' '], ""); // Allow colons or spaces in fingerprint
+        if hex.len() != 64 {
+            return None;
+        }
+        let mut fingerprint = [0u8; 32];
+        for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+            let s = std::str::from_utf8(chunk).ok()?;
+            fingerprint[i] = u8::from_str_radix(s, 16).ok()?;
+        }
+        Some(Self {
+            expected_fingerprint: fingerprint,
+        })
+    }
+}
+
+impl tokio_rustls::rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[tokio_rustls::rustls::pki_types::CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: tokio_rustls::rustls::pki_types::UnixTime,
+    ) -> std::result::Result<
+        tokio_rustls::rustls::client::danger::ServerCertVerified,
+        tokio_rustls::rustls::Error,
+    > {
+        // Compute SHA-256 of the certificate
+        let actual_fingerprint = digest(&SHA256, end_entity.as_ref());
+        let actual_bytes = actual_fingerprint.as_ref();
+
+        if actual_bytes == &self.expected_fingerprint[..] {
+            debug!("Certificate fingerprint verified");
+            Ok(tokio_rustls::rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            let actual_hex: String = actual_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+            let expected_hex: String = self
+                .expected_fingerprint
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect();
+            warn!(
+                "Certificate fingerprint mismatch! Expected: {}, Got: {}",
+                expected_hex, actual_hex
+            );
+            Err(tokio_rustls::rustls::Error::InvalidCertificate(
+                tokio_rustls::rustls::CertificateError::BadSignature,
+            ))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _dss: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> std::result::Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
+        // We trust the certificate based on fingerprint, so signatures are assumed valid
+        Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _dss: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> std::result::Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
+        Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<tokio_rustls::rustls::SignatureScheme> {
+        vec![
+            tokio_rustls::rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            tokio_rustls::rustls::SignatureScheme::RSA_PKCS1_SHA384,
+            tokio_rustls::rustls::SignatureScheme::RSA_PKCS1_SHA512,
+            tokio_rustls::rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            tokio_rustls::rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            tokio_rustls::rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+            tokio_rustls::rustls::SignatureScheme::RSA_PSS_SHA256,
+            tokio_rustls::rustls::SignatureScheme::RSA_PSS_SHA384,
+            tokio_rustls::rustls::SignatureScheme::RSA_PSS_SHA512,
+            tokio_rustls::rustls::SignatureScheme::ED25519,
+        ]
+    }
+}
+
+/// Build TLS client configuration based on VpnConfig settings.
+fn build_tls_config(config: &VpnConfig) -> Result<ClientConfig> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+
+    // Priority: fingerprint pinning > custom CA > skip verify > system roots
+    if let Some(ref fingerprint) = config.cert_fingerprint_sha256 {
+        // Certificate fingerprint pinning
+        let verifier = FingerprintVerifier::from_hex(fingerprint).ok_or_else(|| {
+            Error::Tls(format!(
+                "Invalid certificate fingerprint: {} (expected 64 hex chars)",
+                fingerprint
+            ))
+        })?;
+        debug!("Using certificate fingerprint pinning");
+        Ok(ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(verifier))
+            .with_no_client_auth())
+    } else if let Some(ref ca_pem) = config.custom_ca_pem {
+        // Custom CA certificate
+        let mut root_store = RootCertStore::empty();
+        let certs = rustls_pemfile::certs(&mut ca_pem.as_bytes())
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>();
+        if certs.is_empty() {
+            return Err(Error::Tls("No valid certificates found in custom_ca_pem".to_string()));
+        }
+        for cert in certs {
+            root_store.add(cert).map_err(|e| {
+                Error::Tls(format!("Failed to add custom CA certificate: {}", e))
+            })?;
+        }
+        debug!("Using custom CA certificate for verification");
+        Ok(ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(root_store)
+            .with_no_client_auth())
+    } else if config.skip_tls_verify {
+        // Accept any certificate (needed for self-signed certs)
+        debug!("TLS verification disabled (skip_tls_verify=true)");
+        Ok(ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoVerifier))
+            .with_no_client_auth())
+    } else {
+        // Use system root certificates
+        debug!("Using system root certificates for verification");
+        let root_store = RootCertStore::empty();
+        // In production, you'd load system certs here
+        Ok(ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(root_store)
+            .with_no_client_auth())
+    }
+}
+
 /// VPN connection wrapper that handles both plain and TLS connections.
 pub enum VpnConnection {
     /// Plain TCP connection.
@@ -125,29 +290,8 @@ impl VpnConnection {
             debug!("TCP keepalive enabled (time=10s, interval=5s)");
         }
 
-        // SoftEther always uses TLS/HTTPS
-        // Get the ring crypto provider
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-
-        // Build TLS config
-        let tls_config = if config.skip_tls_verify {
-            // Accept any certificate (needed for self-signed certs)
-            ClientConfig::builder_with_provider(provider)
-                .with_safe_default_protocol_versions()
-                .unwrap()
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(NoVerifier))
-                .with_no_client_auth()
-        } else {
-            // Use system root certificates
-            let root_store = RootCertStore::empty();
-            // In production, you'd load system certs here
-            ClientConfig::builder_with_provider(provider)
-                .with_safe_default_protocol_versions()
-                .unwrap()
-                .with_root_certificates(root_store)
-                .with_no_client_auth()
-        };
+        // SoftEther always uses TLS/HTTPS - build TLS config based on settings
+        let tls_config = build_tls_config(config)?;
 
         let connector = TlsConnector::from(Arc::new(tls_config));
 
@@ -223,25 +367,8 @@ impl VpnConnection {
             debug!("TCP keepalive enabled (time=10s, interval=5s)");
         }
 
-        // SoftEther always uses TLS/HTTPS
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-
-        // Build TLS config
-        let tls_config = if config.skip_tls_verify {
-            ClientConfig::builder_with_provider(provider)
-                .with_safe_default_protocol_versions()
-                .unwrap()
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(NoVerifier))
-                .with_no_client_auth()
-        } else {
-            let root_store = RootCertStore::empty();
-            ClientConfig::builder_with_provider(provider)
-                .with_safe_default_protocol_versions()
-                .unwrap()
-                .with_root_certificates(root_store)
-                .with_no_client_auth()
-        };
+        // SoftEther always uses TLS/HTTPS - build TLS config based on settings
+        let tls_config = build_tls_config(config)?;
 
         let connector = TlsConnector::from(Arc::new(tls_config));
 
