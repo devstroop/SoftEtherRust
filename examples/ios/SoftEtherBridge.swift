@@ -43,6 +43,8 @@ public class SoftEtherBridge {
         public let connectedServerIP: String
         public let serverVersion: UInt32
         public let serverBuild: UInt32
+        public let macAddress: [UInt8]
+        public let gatewayMac: [UInt8]
         
         public var ipAddressString: String {
             formatIPv4(ipAddress)
@@ -61,6 +63,14 @@ public class SoftEtherBridge {
             if dns1 != 0 { servers.append(formatIPv4(dns1)) }
             if dns2 != 0 { servers.append(formatIPv4(dns2)) }
             return servers
+        }
+        
+        public var macAddressString: String {
+            macAddress.map { String(format: "%02x", $0) }.joined(separator: ":")
+        }
+        
+        public var gatewayMacString: String {
+            gatewayMac.map { String(format: "%02x", $0) }.joined(separator: ":")
         }
         
         private func formatIPv4(_ ip: UInt32) -> String {
@@ -296,7 +306,11 @@ public class SoftEtherBridge {
                 }
             },
             serverVersion: cSession.server_version,
-            serverBuild: cSession.server_build
+            serverBuild: cSession.server_build,
+            macAddress: Array(withUnsafeBytes(of: cSession.mac_address) { Array($0) }),
+            gatewayMac: Array(withUnsafeBytes(of: cSession.gateway_mac) { Array($0) })
+        )
+    }
         )
     }
     
@@ -398,7 +412,9 @@ private func connectedCallback(context: UnsafeMutableRawPointer?, session: Unsaf
             }
         },
         serverVersion: s.server_version,
-        serverBuild: s.server_build
+        serverBuild: s.server_build,
+        macAddress: Array(withUnsafeBytes(of: s.mac_address) { Array($0) }),
+        gatewayMac: Array(withUnsafeBytes(of: s.gateway_mac) { Array($0) })
     )
     
     ctx.bridge?.onConnected?(swiftSession)
