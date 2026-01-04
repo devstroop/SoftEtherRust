@@ -1,4 +1,4 @@
-# FFI Integration Guide
+# FFI/JNI Integration Guide
 
 This document explains how to integrate the SoftEther VPN Rust library with iOS and Android applications.
 
