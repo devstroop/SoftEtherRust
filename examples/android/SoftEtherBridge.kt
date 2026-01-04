@@ -446,6 +446,16 @@ class SoftEtherBridge {
         listener?.onPacketsReceived(packets)
     }
     
+    @Suppress("unused")  // Called from JNI
+    private fun onNativeLog(level: Int, message: String) {
+        listener?.onLog(LogLevel.fromInt(level), message)
+    }
+    
+    @Suppress("unused")  // Called from JNI
+    private fun onProtectSocket(fd: Int): Boolean {
+        return listener?.onProtectSocket(fd) ?: false
+    }
+    
     // MARK: - Cleanup
     
     protected fun finalize() {
