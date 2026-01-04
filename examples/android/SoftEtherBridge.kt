@@ -79,7 +79,8 @@ class SoftEtherBridge {
         val dns2: Int,
         val connectedServerIP: String,
         val serverVersion: Int,
-        val serverBuild: Int
+        val serverBuild: Int,
+        val macAddress: ByteArray = ByteArray(6)
     ) {
         val ipAddressString: String get() = formatIPv4(ipAddress)
         val subnetMaskString: String get() = formatIPv4(subnetMask)
@@ -91,8 +92,35 @@ class SoftEtherBridge {
                 if (dns2 != 0) formatIPv4(dns2) else null
             )
         
+        val macAddressString: String
+            get() = macAddress.joinToString(":") { String.format("%02x", it) }
+        
         private fun formatIPv4(ip: Int): String {
             return "${(ip shr 24) and 0xFF}.${(ip shr 16) and 0xFF}.${(ip shr 8) and 0xFF}.${ip and 0xFF}"
+        }
+        
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (javaClass != other?.javaClass) return false
+            other as Session
+            return ipAddress == other.ipAddress && subnetMask == other.subnetMask &&
+                   gateway == other.gateway && dns1 == other.dns1 && dns2 == other.dns2 &&
+                   connectedServerIP == other.connectedServerIP &&
+                   serverVersion == other.serverVersion && serverBuild == other.serverBuild &&
+                   macAddress.contentEquals(other.macAddress)
+        }
+        
+        override fun hashCode(): Int {
+            var result = ipAddress
+            result = 31 * result + subnetMask
+            result = 31 * result + gateway
+            result = 31 * result + dns1
+            result = 31 * result + dns2
+            result = 31 * result + connectedServerIP.hashCode()
+            result = 31 * result + serverVersion
+            result = 31 * result + serverBuild
+            result = 31 * result + macAddress.contentHashCode()
+            return result
         }
     }
     
