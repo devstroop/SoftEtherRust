@@ -2,20 +2,7 @@
 
 ## 1. Critical
 
-### 1.1 RC4 Tunnel Encryption Not Implemented
-- `use_encrypt` flag sent to server but no actual encryption in data path
-- Official C code uses `UseFastRC4` flag → calls `WriteSendFifo()`/`WriteRecvFifo()` with `Encrypt()` (RC4 stream cipher)
-- Key exchange: Server sends `rc4_key_client_to_server` and `rc4_key_server_to_client` in Welcome packet (16 bytes each)
-- Client must call equivalent of `InitTcpSockRc4Key()` to create separate `SendKey`/`RecvKey` crypt contexts
-- Without RC4: server expects encrypted data if `use_encrypt=true`, connection may fail or produce garbage
-- Need: `src/crypto/rc4.rs` with streaming cipher
-- Need: Parse RC4 keys from auth response in `src/protocol/auth.rs`
-- Need: Integrate into `src/tunnel/runner.rs` TX/RX paths
-
-### 1.2 RC4 Key Pair Not Parsed from Server Response
-- Server returns `rc4_key_client_to_server` and `rc4_key_server_to_client` (both 16 bytes) in auth Welcome packet
-- `AuthResult::from_pack()` doesn't parse these fields
-- Missing: `RC4_KEY_PAIR` struct with `ClientToServerKey[16]` and `ServerToClientKey[16]`
+_All critical issues resolved._
 
 ---
 
@@ -102,3 +89,6 @@
 - ✅ DHCP through tunnel
 - ✅ C header state enum fixed
 - ✅ Half-connection mode direction parsing (TcpDirection enum)
+- ✅ RC4 Tunnel Encryption (src/crypto/rc4.rs with streaming cipher)
+- ✅ RC4 Key Pair parsing from server Welcome packet
+- ✅ RC4 integration in tunnel TX/RX paths (single-conn Unix & Windows)
