@@ -14,9 +14,7 @@ _All iOS integration issues resolved._
 
 ## 3. Android
 
-### 3.3 Packet Queue No Backpressure
-- Fixed 256 queue size, packets silently dropped when full
-- Location: `src/ffi/client.rs:20`
+_All Android issues resolved._
 
 ---
 
@@ -71,3 +69,4 @@ _All iOS integration issues resolved._
 - ✅ Compression switched to fast level for low latency
 - ✅ Tokio worker threads reduced to 1 for mobile battery
 - ✅ Certificate pinning implemented (custom CA PEM and SHA-256 fingerprint verification)
+- ✅ Packet queue backpressure implemented (QueueFull result code, dropped packet stats)
