@@ -2,7 +2,7 @@
 
 use super::constants::*;
 use super::pack::Pack;
-use crate::crypto::{self, SHA0_DIGEST_LEN};
+use crate::crypto::{self, Rc4KeyPair, RC4_KEY_SIZE, SHA0_DIGEST_LEN};
 use crate::error::{Error, Result};
 use crate::net::{
     UdpAccelAuthParams, UdpAccelServerResponse, UDP_ACCELERATION_COMMON_KEY_SIZE_V1,
@@ -92,6 +92,10 @@ pub struct AuthResult {
     pub redirect: Option<RedirectInfo>,
     /// Connection direction for half-connection mode (0=both, 1=c2s, 2=s2c).
     pub direction: u32,
+    /// RC4 key pair for tunnel encryption (if UseFastRC4 is enabled).
+    pub rc4_key_pair: Option<Rc4KeyPair>,
+    /// Whether to use SSL/TLS layer for data encryption (when use_encrypt=true but UseFastRC4=false).
+    pub use_ssl_data_encryption: bool,
 }
 
 /// Redirect information for cluster server setup.
@@ -128,6 +132,8 @@ impl AuthResult {
                 session_key: Bytes::new(),
                 redirect: None,
                 direction: 0,
+                rc4_key_pair: None,
+                use_ssl_data_encryption: false,
             });
         }
 
@@ -150,11 +156,22 @@ impl AuthResult {
                 session_key: Bytes::new(),
                 redirect: Some(RedirectInfo { ip, port, ticket }),
                 direction: 0,
+                rc4_key_pair: None,
+                use_ssl_data_encryption: false,
             });
         }
 
         // Parse direction for half-connection mode (0=both, 1=c2s, 2=s2c)
         let direction = pack.get_int("direction").unwrap_or(0);
+
+        // Parse RC4 key pair for tunnel encryption (UseFastRC4 mode)
+        // Server sends these in the Welcome packet if encryption is enabled
+        let rc4_key_pair = Self::parse_rc4_keys(pack);
+
+        // Determine encryption mode:
+        // - If RC4 keys present -> UseFastRC4 mode (application-level RC4)
+        // - If no RC4 keys but use_encrypt was requested -> UseSSLDataEncryption mode (TLS layer handles it)
+        let use_ssl_data_encryption = rc4_key_pair.is_none();
 
         Ok(Self {
             success: true,
@@ -163,7 +180,36 @@ impl AuthResult {
             session_key: pack.get_data("session_key").cloned().unwrap_or_default(),
             redirect: None,
             direction,
+            rc4_key_pair,
+            use_ssl_data_encryption,
         })
+    }
+
+    /// Parse RC4 key pair from server response.
+    ///
+    /// Server sends `rc4_key_client_to_server` and `rc4_key_server_to_client` (16 bytes each)
+    /// when UseFastRC4 mode is enabled.
+    fn parse_rc4_keys(pack: &Pack) -> Option<Rc4KeyPair> {
+        let c2s_key = pack.get_data("rc4_key_client_to_server")?;
+        let s2c_key = pack.get_data("rc4_key_server_to_client")?;
+
+        if c2s_key.len() != RC4_KEY_SIZE || s2c_key.len() != RC4_KEY_SIZE {
+            tracing::warn!(
+                "Invalid RC4 key sizes: c2s={}, s2c={} (expected {})",
+                c2s_key.len(),
+                s2c_key.len(),
+                RC4_KEY_SIZE
+            );
+            return None;
+        }
+
+        let mut client_to_server = [0u8; RC4_KEY_SIZE];
+        let mut server_to_client = [0u8; RC4_KEY_SIZE];
+        client_to_server.copy_from_slice(c2s_key);
+        server_to_client.copy_from_slice(s2c_key);
+
+        tracing::debug!("Parsed RC4 key pair from server response (UseFastRC4 mode)");
+        Some(Rc4KeyPair::new(client_to_server, server_to_client))
     }
 
     /// Parse UDP acceleration response from the server's auth result Pack.

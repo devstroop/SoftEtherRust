@@ -252,6 +252,7 @@ impl VpnClient {
             routes,
             use_compress: self.config.use_compress,
             vpn_server_ip: Some(actual_server_ip),
+            rc4_key_pair: auth_result.rc4_key_pair.clone(),
         };
 
         let mut runner = TunnelRunner::new(tunnel_config);
