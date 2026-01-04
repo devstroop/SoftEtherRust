@@ -300,15 +300,18 @@ class SoftEtherBridge {
             val data = nativeGetSession(nativeHandle) ?: return null
             if (data.size < 7) return null
             
+            val macAddress = nativeGetSessionMAC(nativeHandle) ?: ByteArray(6)
+            
             return Session(
-                ipAddress = data[0],
-                subnetMask = data[1],
-                gateway = data[2],
-                dns1 = data[3],
-                dns2 = data[4],
+                ipAddress = data[0].toInt(),
+                subnetMask = data[1].toInt(),
+                gateway = data[2].toInt(),
+                dns1 = data[3].toInt(),
+                dns2 = data[4].toInt(),
                 connectedServerIP = nativeGetSessionServerIP(nativeHandle) ?: "",
-                serverVersion = data[5],
-                serverBuild = data[6]
+                serverVersion = data[5].toInt(),
+                serverBuild = data[6].toInt(),
+                macAddress = macAddress
             )
         }
     
@@ -406,11 +409,12 @@ class SoftEtherBridge {
         dns2: Int,
         connectedServerIP: String,
         serverVersion: Int,
-        serverBuild: Int
+        serverBuild: Int,
+        macAddress: ByteArray
     ) {
         listener?.onConnected(Session(
             ipAddress, subnetMask, gateway, dns1, dns2,
-            connectedServerIP, serverVersion, serverBuild
+            connectedServerIP, serverVersion, serverBuild, macAddress
         ))
     }
     
