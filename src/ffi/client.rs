@@ -413,7 +413,7 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
             }
             Err(ref e) => {
                 if let Some(cb) = callbacks.on_log {
-                    if let Ok(cstr) = std::ffi::CString::new(format!("Connection error: {}", e)) {
+                    if let Ok(cstr) = std::ffi::CString::new(format!("Connection error: {e}")) {
                         cb(callbacks.context, 3, cstr.as_ptr());
                     }
                 }
@@ -491,15 +491,11 @@ async fn connect_and_run(
     log_message(&callbacks, 1, "[RUST] Resolving server IP...");
     let server_ip = match resolve_server_ip(&config.server) {
         Ok(ip) => {
-            log_message(&callbacks, 1, &format!("[RUST] Resolved server IP: {}", ip));
+            log_message(&callbacks, 1, &format!("[RUST] Resolved server IP: {ip}"));
             ip
         }
         Err(e) => {
-            log_message(
-                &callbacks,
-                3,
-                &format!("[RUST] DNS resolution failed: {}", e),
-            );
+            log_message(&callbacks, 3, &format!("[RUST] DNS resolution failed: {e}"));
             return Err(e);
         }
     };
@@ -532,7 +528,7 @@ async fn connect_and_run(
             log_message(
                 &callbacks,
                 3,
-                &format!("[RUST] TCP/TLS connection failed: {}", e),
+                &format!("[RUST] TCP/TLS connection failed: {e}"),
             );
             return Err(e);
         }
@@ -556,7 +552,7 @@ async fn connect_and_run(
             h
         }
         Err(e) => {
-            log_message(&callbacks, 3, &format!("[RUST] Handshake failed: {}", e));
+            log_message(&callbacks, 3, &format!("[RUST] Handshake failed: {e}"));
             return Err(e);
         }
     };
@@ -573,11 +569,7 @@ async fn connect_and_run(
             r
         }
         Err(e) => {
-            log_message(
-                &callbacks,
-                3,
-                &format!("[RUST] Authentication failed: {}", e),
-            );
+            log_message(&callbacks, 3, &format!("[RUST] Authentication failed: {e}"));
             return Err(e);
         }
     };
@@ -639,7 +631,7 @@ async fn connect_and_run(
                     )
                 }
                 Err(e) => {
-                    log_message(&callbacks, 3, &format!("[RUST] Redirect failed: {}", e));
+                    log_message(&callbacks, 3, &format!("[RUST] Redirect failed: {e}"));
                     return Err(e);
                 }
             }
@@ -727,7 +719,7 @@ async fn connect_and_run(
             config
         }
         Err(e) => {
-            log_message(&callbacks, 3, &format!("[RUST] DHCP failed: {}", e));
+            log_message(&callbacks, 3, &format!("[RUST] DHCP failed: {e}"));
             return Err(e);
         }
     };
@@ -771,7 +763,7 @@ fn create_session_from_dhcp(
     mac: [u8; 6],
 ) -> SoftEtherSession {
     let mut server_ip_str = [0 as std::ffi::c_char; 64];
-    let ip_string = format!("{}", server_ip);
+    let ip_string = format!("{server_ip}");
     for (i, b) in ip_string.bytes().enumerate() {
         if i < 63 {
             server_ip_str[i] = b as std::ffi::c_char;
@@ -820,10 +812,7 @@ async fn connect_redirect(
     log_msg(
         callbacks,
         1,
-        &format!(
-            "[RUST] Connecting to cluster server {}:{}",
-            redirect_server, redirect_port
-        ),
+        &format!("[RUST] Connecting to cluster server {redirect_server}:{redirect_port}"),
     );
 
     // Create a modified config for the redirect server
@@ -880,7 +869,7 @@ async fn connect_redirect(
         .header("Connection", "Keep-Alive")
         .body(auth_pack.to_bytes());
 
-    let host = format!("{}:{}", redirect_server, redirect_port);
+    let host = format!("{redirect_server}:{redirect_port}");
     let request_bytes = request.build(&host);
 
     log_msg(callbacks, 1, "[RUST] Sending ticket authentication");
@@ -1019,11 +1008,7 @@ async fn perform_dhcp(
                 // Zero bytes - continue
             }
             Ok(Err(e)) => {
-                log_msg(
-                    callbacks,
-                    2,
-                    &format!("[RUST] Read error during DHCP: {}", e),
-                );
+                log_msg(callbacks, 2, &format!("[RUST] Read error during DHCP: {e}"));
             }
             Err(_) => {
                 // Timeout, retry
@@ -1180,7 +1165,7 @@ async fn run_packet_loop(
                         break;
                     }
                     Ok(Err(e)) => {
-                        log_msg(&callbacks, 3, &format!("[RUST] Read error: {}", e));
+                        log_msg(&callbacks, 3, &format!("[RUST] Read error: {e}"));
                         return Err(crate::error::Error::Io(e));
                     }
                     Err(_) => {} // Timeout - fine, loop to check keepalive
@@ -1327,10 +1312,7 @@ async fn authenticate(
                 log_msg(
                     callbacks,
                     2,
-                    &format!(
-                        "[RUST] Failed to create UDP accel: {}, continuing without it",
-                        e
-                    ),
+                    &format!("[RUST] Failed to create UDP accel: {e}, continuing without it"),
                 );
                 None
             }
@@ -1372,8 +1354,8 @@ async fn authenticate(
     log_msg(callbacks, 1, "[RUST] Decoding hex password hash");
     let password_hash_bytes: [u8; 20] = hex::decode(&config.password_hash)
         .map_err(|e| {
-            log_msg(callbacks, 3, &format!("[RUST] Hex decode error: {}", e));
-            crate::error::Error::Config(format!("Invalid hex password hash: {}", e))
+            log_msg(callbacks, 3, &format!("[RUST] Hex decode error: {e}"));
+            crate::error::Error::Config(format!("Invalid hex password hash: {e}"))
         })?
         .try_into()
         .map_err(|_| crate::error::Error::Config("Hash decode produced wrong length".into()))?;
@@ -1414,7 +1396,7 @@ async fn authenticate(
     log_msg(callbacks, 1, "[RUST] Waiting for auth response...");
     loop {
         let n = conn.read(&mut buf).await?;
-        log_msg(callbacks, 1, &format!("[RUST] Received {} bytes", n));
+        log_msg(callbacks, 1, &format!("[RUST] Received {n} bytes"));
         if n == 0 {
             log_msg(callbacks, 3, "[RUST] Connection closed during auth");
             return Err(crate::error::Error::ConnectionFailed(
@@ -1468,7 +1450,7 @@ async fn authenticate(
                 if config.udp_accel {
                     // Try to get remote IP for UDP accel parsing
                     let remote_ip = resolve_server_ip(&config.server)
-                        .map(|ip| std::net::IpAddr::V4(ip))
+                        .map(std::net::IpAddr::V4)
                         .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
 
                     if let Some(udp_response) =
@@ -1519,7 +1501,7 @@ fn resolve_server_ip(server: &str) -> crate::error::Result<Ipv4Addr> {
     }
 
     use std::net::ToSocketAddrs;
-    let addr_str = format!("{}:443", server);
+    let addr_str = format!("{server}:443");
     match addr_str.to_socket_addrs() {
         Ok(mut addrs) => {
             for addr in addrs.by_ref() {
@@ -1528,13 +1510,11 @@ fn resolve_server_ip(server: &str) -> crate::error::Result<Ipv4Addr> {
                 }
             }
             Err(crate::error::Error::ConnectionFailed(format!(
-                "No IPv4 address found for {}",
-                server
+                "No IPv4 address found for {server}"
             )))
         }
         Err(e) => Err(crate::error::Error::ConnectionFailed(format!(
-            "Failed to resolve {}: {}",
-            server, e
+            "Failed to resolve {server}: {e}"
         ))),
     }
 }
