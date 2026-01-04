@@ -298,9 +298,7 @@ impl TunnelCodec {
                         }
 
                         if block_size > TunnelConstants::MAX_PACKET_SIZE * 2 {
-                            return Err(Error::protocol(format!(
-                                "Packet too large: {block_size}"
-                            )));
+                            return Err(Error::protocol(format!("Packet too large: {block_size}")));
                         }
 
                         if self.buffer.remaining() < 4 + block_size {
@@ -577,9 +575,7 @@ impl TunnelCodec {
                         }
 
                         if block_size > TunnelConstants::MAX_PACKET_SIZE * 2 {
-                            return Err(Error::protocol(format!(
-                                "Packet too large: {block_size}"
-                            )));
+                            return Err(Error::protocol(format!("Packet too large: {block_size}")));
                         }
 
                         if self.buffer.remaining() < 4 + block_size {

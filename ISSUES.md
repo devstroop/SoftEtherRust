@@ -8,14 +8,7 @@ _All critical issues resolved._
 
 ## 2. iOS Integration
 
-### 2.1 Swift Bridge Mismatches Rust FFI
-- Wrong field names: `use_tls` → `skip_tls_verify`, `connect_timeout_secs` → `timeout_seconds`
-- Missing fields: `mtu`, `use_encrypt`, `udp_accel`, `qos`, `nat_traversal`, routing options
-- Missing: `mac_address`, `gateway_mac` in Session struct
-- File: `examples/ios/SoftEtherBridge.swift`
-
-### 2.2 Log Callback Not Wired
-- `on_log` callback exists in FFI but Swift bridge doesn't implement it
+_All iOS integration issues resolved._
 
 ---
 
@@ -92,3 +85,7 @@ _All critical issues resolved._
 - ✅ RC4 Tunnel Encryption (src/crypto/rc4.rs with streaming cipher)
 - ✅ RC4 Key Pair parsing from server Welcome packet
 - ✅ RC4 integration in tunnel TX/RX paths (single-conn Unix & Windows)
+- ✅ Swift bridge field name mismatches fixed (skip_tls_verify, timeout_seconds, mtu, etc.)
+- ✅ Swift bridge missing fields added (useEncrypt, udpAccel, qos, natTraversal, routing)
+- ✅ Swift Session mac_address and gateway_mac added
+- ✅ Swift log callback wired (on_log)

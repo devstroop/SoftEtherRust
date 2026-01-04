@@ -103,8 +103,8 @@ fn init_logging(verbose: bool, debug: bool) {
 
     // Filter out wintun's "Element not found" errors which are expected
     // when checking for existing adapters
-    let filter = EnvFilter::try_new(format!("{level},wintun=off"))
-        .unwrap_or_else(|_| EnvFilter::new(level));
+    let filter =
+        EnvFilter::try_new(format!("{level},wintun=off")).unwrap_or_else(|_| EnvFilter::new(level));
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
