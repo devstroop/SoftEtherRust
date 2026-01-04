@@ -32,25 +32,9 @@ _All iOS integration issues resolved._
 - Only supports: skip verify or system roots
 - No custom CA or fingerprint pinning
 
-### 4.3 Keep-Alive NAT-T Port Signaling Not Implemented
-- Official C: `SendKeepAlive()` embeds UDP NAT-T port via `UDP_NAT_T_PORT_SIGNATURE_IN_KEEP_ALIVE` prefix
-- Allows server to discover client's NAT-mapped UDP port for acceleration
-- Current code sends random keep-alive padding without this signature
-
-### 4.4 UseSSLDataEncryption Flag Not Handled
-- Official C: If `UseEncrypt=true` but `UseFastRC4=false`, sets `UseSSLDataEncryption=true`
-- This means data encryption is handled by TLS layer, not application-level RC4
-- Need to detect this case and skip application-level encryption
-
 ---
 
 ## 5. Performance
-
-### 5.1 Compression Level
-- `src/protocol/tunnel.rs:92` uses `Compression::default()`, should use `Compression::fast()`
-
-### 5.2 Tokio Threads Hardcoded
-- FFI uses 2 worker threads, should be 1 for mobile battery
 
 ### 5.3 FIFO Buffer Pre-allocation
 - Official C pre-allocates `RecvFifo`/`SendFifo` per connection
@@ -86,3 +70,7 @@ _All iOS integration issues resolved._
 - ✅ Kotlin Session now includes macAddress from session
 - ✅ VpnService uses session MAC instead of hardcoded
 - ✅ Kotlin log callback and socket protection callback added
+- ✅ UseSSLDataEncryption flag handled (skip RC4 when no keys present)
+- ✅ NAT-T port keepalive signaling implemented (encode_keepalive_with_nat_t)
+- ✅ Compression switched to fast level for low latency
+- ✅ Tokio worker threads reduced to 1 for mobile battery

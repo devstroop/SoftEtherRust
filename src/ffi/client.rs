@@ -314,8 +314,9 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
     }
 
     // Create tokio runtime
+    // Use single thread for mobile battery efficiency - VPN workload is I/O bound
     let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
+        .worker_threads(1)
         .enable_all()
         .build()
     {
