@@ -28,10 +28,6 @@ _All iOS integration issues resolved._
   - Tunnel runner: No fallback/upgrade to UDP when available
 - Official C: `UdpAccel` integrated with `SessionMain()`, parallel send/recv paths
 
-### 4.2 Certificate Pinning Missing
-- Only supports: skip verify or system roots
-- No custom CA or fingerprint pinning
-
 ---
 
 ## 5. Performance
@@ -74,3 +70,4 @@ _All iOS integration issues resolved._
 - ✅ NAT-T port keepalive signaling implemented (encode_keepalive_with_nat_t)
 - ✅ Compression switched to fast level for low latency
 - ✅ Tokio worker threads reduced to 1 for mobile battery
+- ✅ Certificate pinning implemented (custom CA PEM and SHA-256 fingerprint verification)
