@@ -638,6 +638,8 @@ impl TunnelRunner {
         let mut send_buf = vec![0u8; 4096];
         // Decompression buffer (reused to avoid allocation per packet)
         let mut decomp_buf = vec![0u8; 4096];
+        // Compression output buffer (reused to avoid allocation per packet)
+        let mut comp_buf = vec![0u8; 4096];
 
         // TUN write buffer with utun header space pre-allocated
         // Layout: [4-byte utun header][IP packet]
@@ -772,15 +774,15 @@ impl TunnelRunner {
 
                         let eth_frame = &send_buf[eth_start..eth_start + eth_len];
 
-                        // Compress to decomp_buf (reused buffer)
-                        match compress(eth_frame) {
-                            Ok(compressed) => {
-                                let comp_total = 8 + compressed.len();
+                        // Compress into pre-allocated buffer (zero allocation hot path)
+                        match compress_into(eth_frame, &mut comp_buf) {
+                            Ok(comp_len) => {
+                                let comp_total = 8 + comp_len;
                                 if comp_total <= send_buf.len() {
                                     // Write header
                                     send_buf[0..4].copy_from_slice(&1u32.to_be_bytes());
-                                    send_buf[4..8].copy_from_slice(&(compressed.len() as u32).to_be_bytes());
-                                    send_buf[8..8 + compressed.len()].copy_from_slice(&compressed);
+                                    send_buf[4..8].copy_from_slice(&(comp_len as u32).to_be_bytes());
+                                    send_buf[8..8 + comp_len].copy_from_slice(&comp_buf[..comp_len]);
                                     // Encrypt before sending
                                     if let Some(ref mut enc) = encryption {
                                         enc.encrypt(&mut send_buf[..comp_total]);
