@@ -32,19 +32,13 @@ _All Android issues resolved._
 
 ## 5. Performance
 
-### 5.3 FIFO Buffer Pre-allocation
-- Official C pre-allocates `RecvFifo`/`SendFifo` per connection
-- Rust uses `BytesMut::with_capacity()` but could benefit from pool allocation for high throughput
+_All performance issues resolved._
 
 ---
 
 ## 6. Half-Connection Mode
 
-### 6.1 Direction Assignment Not Verified
-- Implementation exists in `src/client/multi_connection.rs`
-- Official C: First connection is always `TCP_CLIENT_TO_SERVER`, server assigns additional connection directions
-- Need to verify direction parsing matches official: `1=ServerToClient`, `2=ClientToServer`
-- Current implementation looks correct but needs integration testing
+_All half-connection mode issues resolved._
 
 ---
 
@@ -73,3 +67,5 @@ _All Android issues resolved._
 - ✅ Certificate pinning implemented (custom CA PEM and SHA-256 fingerprint verification)
 - ✅ Packet queue backpressure implemented (QueueFull result code, dropped packet stats)
 - ✅ UDP acceleration auth flow wired (params sent, server response parsed)
+- ✅ FIFO buffer pre-allocation (compress_into for zero-alloc hot path, pre-alloc comp_buf)
+- ✅ Half-connection mode direction verified (TcpDirection 0=Both, 1=ServerToClient, 2=ClientToServer matches official C; primary always ClientToServer; can_send/can_recv filters connections correctly)
