@@ -1612,9 +1612,23 @@ pub unsafe extern "C" fn softether_send_packets(
     if let Some(tx) = &guard.tx_sender {
         match tx.try_send(packet_data) {
             Ok(()) => count,
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                // Queue full, drop packets
-                0
+            Err(mpsc::error::TrySendError::Full(dropped_data)) => {
+                // Queue full - backpressure signal
+                // Count packets in the dropped data for stats
+                let mut dropped_count = 0u64;
+                let mut offset = 0;
+                while offset + 2 <= dropped_data.len() {
+                    let len = u16::from_be_bytes([dropped_data[offset], dropped_data[offset + 1]])
+                        as usize;
+                    dropped_count += 1;
+                    offset += 2 + len;
+                }
+                guard
+                    .stats
+                    .packets_dropped
+                    .fetch_add(dropped_count, Ordering::Relaxed);
+                // Return QueueFull to signal caller should retry/backoff
+                SoftEtherResult::QueueFull as c_int
             }
             Err(mpsc::error::TrySendError::Closed(_)) => SoftEtherResult::NotConnected as c_int,
         }
