@@ -124,14 +124,16 @@ typedef void (*SoftEtherConnectedCallback)(void* context, const SoftEtherSession
 typedef void (*SoftEtherDisconnectedCallback)(void* context, SoftEtherResult result);
 typedef void (*SoftEtherPacketsCallback)(void* context, const uint8_t* packets, size_t total_size, uint32_t count);
 typedef void (*SoftEtherLogCallback)(void* context, int level, const char* message);
+typedef int (*SoftEtherProtectSocketCallback)(void* context, int socket_fd);  // Returns 1 on success, 0 on failure
 
 typedef struct {
-    void* context;                              // User context passed to callbacks
-    SoftEtherStateCallback on_state_changed;    // State change callback
-    SoftEtherConnectedCallback on_connected;    // Connection established callback
-    SoftEtherDisconnectedCallback on_disconnected; // Disconnection callback
-    SoftEtherPacketsCallback on_packets_received;  // Packets received callback
-    SoftEtherLogCallback on_log;                // Log message callback
+    void* context;                                    // User context passed to callbacks
+    SoftEtherStateCallback on_state_changed;          // State change callback
+    SoftEtherConnectedCallback on_connected;          // Connection established callback
+    SoftEtherDisconnectedCallback on_disconnected;    // Disconnection callback
+    SoftEtherPacketsCallback on_packets_received;     // Packets received callback
+    SoftEtherLogCallback on_log;                      // Log message callback
+    SoftEtherProtectSocketCallback protect_socket;    // Socket protection (Android VPN)
 } SoftEtherCallbacks;
 
 // =============================================================================
