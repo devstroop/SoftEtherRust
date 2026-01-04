@@ -211,12 +211,14 @@ fn build_tls_config(config: &VpnConfig) -> Result<ClientConfig> {
             .filter_map(|r| r.ok())
             .collect::<Vec<_>>();
         if certs.is_empty() {
-            return Err(Error::Tls("No valid certificates found in custom_ca_pem".to_string()));
+            return Err(Error::Tls(
+                "No valid certificates found in custom_ca_pem".to_string(),
+            ));
         }
         for cert in certs {
-            root_store.add(cert).map_err(|e| {
-                Error::Tls(format!("Failed to add custom CA certificate: {}", e))
-            })?;
+            root_store
+                .add(cert)
+                .map_err(|e| Error::Tls(format!("Failed to add custom CA certificate: {}", e)))?;
         }
         debug!("Using custom CA certificate for verification");
         Ok(ClientConfig::builder_with_provider(provider)
