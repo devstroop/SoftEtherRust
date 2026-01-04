@@ -127,11 +127,11 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for FingerprintVer
             debug!("Certificate fingerprint verified");
             Ok(tokio_rustls::rustls::client::danger::ServerCertVerified::assertion())
         } else {
-            let actual_hex: String = actual_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+            let actual_hex: String = actual_bytes.iter().map(|b| format!("{b:02x}")).collect();
             let expected_hex: String = self
                 .expected_fingerprint
                 .iter()
-                .map(|b| format!("{:02x}", b))
+                .map(|b| format!("{b:02x}"))
                 .collect();
             warn!(
                 "Certificate fingerprint mismatch! Expected: {}, Got: {}",
@@ -193,8 +193,7 @@ fn build_tls_config(config: &VpnConfig) -> Result<ClientConfig> {
         // Certificate fingerprint pinning
         let verifier = FingerprintVerifier::from_hex(fingerprint).ok_or_else(|| {
             Error::Tls(format!(
-                "Invalid certificate fingerprint: {} (expected 64 hex chars)",
-                fingerprint
+                "Invalid certificate fingerprint: {fingerprint} (expected 64 hex chars)"
             ))
         })?;
         debug!("Using certificate fingerprint pinning");
@@ -218,7 +217,7 @@ fn build_tls_config(config: &VpnConfig) -> Result<ClientConfig> {
         for cert in certs {
             root_store
                 .add(cert)
-                .map_err(|e| Error::Tls(format!("Failed to add custom CA certificate: {}", e)))?;
+                .map_err(|e| Error::Tls(format!("Failed to add custom CA certificate: {e}")))?;
         }
         debug!("Using custom CA certificate for verification");
         Ok(ClientConfig::builder_with_provider(provider)

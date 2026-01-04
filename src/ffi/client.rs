@@ -1327,7 +1327,10 @@ async fn authenticate(
                 log_msg(
                     callbacks,
                     2,
-                    &format!("[RUST] Failed to create UDP accel: {}, continuing without it", e),
+                    &format!(
+                        "[RUST] Failed to create UDP accel: {}, continuing without it",
+                        e
+                    ),
                 );
                 None
             }
@@ -1467,8 +1470,10 @@ async fn authenticate(
                     let remote_ip = resolve_server_ip(&config.server)
                         .map(|ip| std::net::IpAddr::V4(ip))
                         .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
-                    
-                    if let Some(udp_response) = AuthResult::parse_udp_accel_response(&pack, remote_ip) {
+
+                    if let Some(udp_response) =
+                        AuthResult::parse_udp_accel_response(&pack, remote_ip)
+                    {
                         log_msg(
                             callbacks,
                             1,
