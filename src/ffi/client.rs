@@ -1302,11 +1302,44 @@ async fn authenticate(
         max_connections: config.max_connections,
         use_encrypt: config.use_encrypt,
         use_compress: config.use_compress,
-        udp_accel: false,
+        udp_accel: config.udp_accel,
         bridge_mode: false,
-        monitor_mode: false,
-        qos: true,
+        monitor_mode: config.monitor_mode,
+        qos: config.qos,
     };
+
+    // Setup UDP acceleration if enabled
+    let udp_accel = if config.udp_accel {
+        log_msg(callbacks, 1, "[RUST] Creating UDP acceleration socket...");
+        match crate::net::UdpAccel::new(None, true, false) {
+            Ok(accel) => {
+                log_msg(
+                    callbacks,
+                    1,
+                    &format!(
+                        "[RUST] UDP accel created: port={}, version={}",
+                        accel.my_port, accel.version
+                    ),
+                );
+                Some(accel)
+            }
+            Err(e) => {
+                log_msg(
+                    callbacks,
+                    2,
+                    &format!("[RUST] Failed to create UDP accel: {}, continuing without it", e),
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Build UDP accel params if we have a socket
+    let udp_accel_params = udp_accel
+        .as_ref()
+        .map(crate::net::UdpAccelAuthParams::from_udp_accel);
 
     log_msg(
         callbacks,
@@ -1351,7 +1384,7 @@ async fn authenticate(
         auth_type,
         &hello.random,
         &options,
-        None,
+        udp_accel_params.as_ref(),
     );
 
     let request = HttpRequest::post(VPN_TARGET)
@@ -1426,6 +1459,33 @@ async fn authenticate(
                         "Authentication error code: {}",
                         result.error
                     )));
+                }
+
+                // Check if server supports UDP acceleration
+                if config.udp_accel {
+                    // Try to get remote IP for UDP accel parsing
+                    let remote_ip = resolve_server_ip(&config.server)
+                        .map(|ip| std::net::IpAddr::V4(ip))
+                        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+                    
+                    if let Some(udp_response) = AuthResult::parse_udp_accel_response(&pack, remote_ip) {
+                        log_msg(
+                            callbacks,
+                            1,
+                            &format!(
+                                "[RUST] Server supports UDP accel: version={}, port={}, encryption={}",
+                                udp_response.version, udp_response.server_port, udp_response.use_encryption
+                            ),
+                        );
+                        // TODO: Initialize UDP accel with server params and integrate with tunnel runner
+                        // For now, we just log that the server supports it
+                    } else {
+                        log_msg(
+                            callbacks,
+                            2,
+                            "[RUST] Server does not support UDP acceleration",
+                        );
+                    }
                 }
 
                 log_msg(
