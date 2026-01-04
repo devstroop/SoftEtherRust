@@ -140,20 +140,44 @@ class SoftEtherBridge {
         val hub: String,
         val username: String,
         val passwordHash: String,
-        val useTLS: Boolean = true,
+        // TLS Settings
+        val skipTlsVerify: Boolean = false,
+        // Connection Settings
         val maxConnections: Int = 1,
+        val timeoutSeconds: Int = 30,
+        val mtu: Int = 1400,
+        // Protocol Features
+        val useEncrypt: Boolean = true,
         val useCompress: Boolean = false,
-        val connectTimeoutSecs: Int = 30,
-        val keepaliveIntervalSecs: Int = 5
+        val udpAccel: Boolean = false,
+        val qos: Boolean = false,
+        // Session Mode
+        val natTraversal: Boolean = true,
+        val monitorMode: Boolean = false,
+        // Routing
+        val defaultRoute: Boolean = true,
+        val acceptPushedRoutes: Boolean = true,
+        val ipv4Include: String? = null,
+        val ipv4Exclude: String? = null
     )
     
     // MARK: - Callbacks
+    
+    enum class LogLevel(val value: Int) {
+        ERROR(0), WARN(1), INFO(2), DEBUG(3), TRACE(4);
+        
+        companion object {
+            fun fromInt(value: Int): LogLevel = values().find { it.value == value } ?: INFO
+        }
+    }
     
     interface Listener {
         fun onStateChanged(state: ConnectionState)
         fun onConnected(session: Session)
         fun onDisconnected(error: Throwable?)
         fun onPacketsReceived(packets: List<ByteArray>)
+        fun onLog(level: LogLevel, message: String) {}
+        fun onProtectSocket(fd: Int): Boolean = false
     }
     
     var listener: Listener? = null
