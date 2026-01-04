@@ -20,10 +20,12 @@ _All Android issues resolved._
 
 ## 4. Protocol
 
-### 4.1 UDP Acceleration Not Integrated
-- Code exists in `src/net/udp_accel.rs` but not wired into:
-  - Auth flow: UDP accel params not sent during authentication
-  - Tunnel runner: No fallback/upgrade to UDP when available
+### 4.1 UDP Acceleration Data Path Not Integrated
+- ✅ UDP accel params now sent during authentication (when `udp_accel: true`)
+- ✅ Server UDP accel response is parsed and logged
+- ❌ UDP data path NOT integrated into tunnel runner
+- ❌ No fallback/upgrade to UDP when available
+- Note: Auth negotiation is complete, but actual UDP send/recv requires tunnel runner changes
 - Official C: `UdpAccel` integrated with `SessionMain()`, parallel send/recv paths
 
 ---
@@ -70,3 +72,4 @@ _All Android issues resolved._
 - ✅ Tokio worker threads reduced to 1 for mobile battery
 - ✅ Certificate pinning implemented (custom CA PEM and SHA-256 fingerprint verification)
 - ✅ Packet queue backpressure implemented (QueueFull result code, dropped packet stats)
+- ✅ UDP acceleration auth flow wired (params sent, server response parsed)
