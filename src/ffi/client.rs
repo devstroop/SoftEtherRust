@@ -1800,6 +1800,7 @@ impl Clone for SoftEtherStats {
             uptime_secs: self.uptime_secs,
             active_connections: self.active_connections,
             reconnect_count: self.reconnect_count,
+            packets_dropped: self.packets_dropped,
         }
     }
 }
