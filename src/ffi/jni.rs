@@ -307,6 +307,8 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
             .as_ref()
             .map(|s| s.as_ptr())
             .unwrap_or(std::ptr::null()),
+        cert_fingerprint_sha256: std::ptr::null(),
+        custom_ca_pem: std::ptr::null(),
     };
 
     // Get JVM for callbacks
