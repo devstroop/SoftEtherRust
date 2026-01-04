@@ -4,9 +4,12 @@
 //! - SHA-0 implementation (required for SoftEther legacy compatibility)
 //! - Password hashing functions
 //! - Secure password computation
+//! - RC4 stream cipher for tunnel encryption
 
+mod rc4;
 mod sha0;
 
+pub use rc4::{Rc4, Rc4KeyPair, RC4_KEY_SIZE};
 pub use sha0::Sha0;
 
 /// SHA-0 digest length in bytes.
