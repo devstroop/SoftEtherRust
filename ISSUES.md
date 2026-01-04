@@ -14,13 +14,6 @@ _All iOS integration issues resolved._
 
 ## 3. Android
 
-### 3.1 Example Kotlin Bridge Missing Options
-- `nativeCreate` accepts all config but `SoftEtherBridge.kt` doesn't expose: MTU, routing options
-- File: `examples/android/SoftEtherBridge.kt`
-
-### 3.2 Hardcoded MAC Address
-- `SoftEtherVpnService.kt` uses hardcoded `srcMAC` instead of session MAC from callback
-
 ### 3.3 Packet Queue No Backpressure
 - Fixed 256 queue size, packets silently dropped when full
 - Location: `src/ffi/client.rs:20`
@@ -89,3 +82,7 @@ _All iOS integration issues resolved._
 - ✅ Swift bridge missing fields added (useEncrypt, udpAccel, qos, natTraversal, routing)
 - ✅ Swift Session mac_address and gateway_mac added
 - ✅ Swift log callback wired (on_log)
+- ✅ Kotlin bridge all config options exposed (MTU, encrypt, udpAccel, qos, routing)
+- ✅ Kotlin Session now includes macAddress from session
+- ✅ VpnService uses session MAC instead of hardcoded
+- ✅ Kotlin log callback and socket protection callback added
