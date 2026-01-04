@@ -86,11 +86,11 @@ impl HttpRequest {
         writeln!(request, "{} {} HTTP/1.1\r", self.method, self.path).unwrap();
 
         // Host header
-        writeln!(request, "Host: {}\r", host).unwrap();
+        writeln!(request, "Host: {host}\r").unwrap();
 
         // Content-Type if present
         if let Some(ct) = self.headers.get("Content-Type") {
-            writeln!(request, "Content-Type: {}\r", ct).unwrap();
+            writeln!(request, "Content-Type: {ct}\r").unwrap();
         }
 
         // Connection header
@@ -99,12 +99,12 @@ impl HttpRequest {
             .get("Connection")
             .map(|s| s.as_str())
             .unwrap_or("Keep-Alive");
-        writeln!(request, "Connection: {}\r", connection).unwrap();
+        writeln!(request, "Connection: {connection}\r").unwrap();
 
         // Other headers
         for (key, value) in &self.headers {
             if key != "Content-Type" && key != "Connection" && key != "Content-Length" {
-                writeln!(request, "{}: {}\r", key, value).unwrap();
+                writeln!(request, "{key}: {value}\r").unwrap();
             }
         }
 

@@ -340,7 +340,7 @@ impl VpnClient {
             .header("Connection", "Keep-Alive")
             .body(auth_pack.to_bytes());
 
-        let host = format!("{}:{}", redirect_server, redirect_port);
+        let host = format!("{redirect_server}:{redirect_port}");
         let request_bytes = request.build(&host);
 
         debug!("Sending ticket authentication");
@@ -484,7 +484,7 @@ impl VpnClient {
 
         // Decode password hash from hex string
         let password_hash_vec = hex::decode(&self.config.password_hash)
-            .map_err(|e| Error::Config(format!("Invalid password_hash hex: {}", e)))?;
+            .map_err(|e| Error::Config(format!("Invalid password_hash hex: {e}")))?;
         if password_hash_vec.len() != 20 {
             return Err(Error::Config(format!(
                 "password_hash must be 20 bytes (40 hex chars), got {} bytes",
@@ -611,7 +611,7 @@ impl VpnClient {
             .header("Connection", "Keep-Alive")
             .body(pack.to_bytes());
 
-        let host = format!("{}:{}", server, port);
+        let host = format!("{server}:{port}");
         let request_bytes = request.build(&host);
         conn.write_all(&request_bytes).await?;
 
@@ -770,7 +770,7 @@ impl VpnClient {
 
         // Resolve hostname using DNS
         use std::net::ToSocketAddrs;
-        let addr_str = format!("{}:443", server);
+        let addr_str = format!("{server}:443");
         match addr_str.to_socket_addrs() {
             Ok(mut addrs) => {
                 // Find first IPv4 address
@@ -780,13 +780,11 @@ impl VpnClient {
                     }
                 }
                 Err(Error::ConnectionFailed(format!(
-                    "No IPv4 address found for {}",
-                    server
+                    "No IPv4 address found for {server}"
                 )))
             }
             Err(e) => Err(Error::ConnectionFailed(format!(
-                "Failed to resolve {}: {}",
-                server, e
+                "Failed to resolve {server}: {e}"
             ))),
         }
     }

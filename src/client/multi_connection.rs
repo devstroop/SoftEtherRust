@@ -339,8 +339,7 @@ impl ConnectionManager {
                     if let Some(error) = pack.get_int("error") {
                         if error != 0 {
                             return Err(Error::AuthenticationFailed(format!(
-                                "Additional connection error: {}",
-                                error
+                                "Additional connection error: {error}"
                             )));
                         }
                     }

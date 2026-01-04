@@ -74,7 +74,7 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
     let mut decompressed = Vec::with_capacity(data.len() * 2);
     decoder
         .read_to_end(&mut decompressed)
-        .map_err(|e| Error::Protocol(format!("Decompression failed: {}", e)))?;
+        .map_err(|e| Error::Protocol(format!("Decompression failed: {e}")))?;
     Ok(decompressed)
 }
 
@@ -86,7 +86,7 @@ pub fn decompress_into(data: &[u8], buffer: &mut [u8]) -> Result<usize> {
     let mut decoder = ZlibDecoder::new(data);
     let mut cursor = Cursor::new(buffer);
     std::io::copy(&mut decoder, &mut cursor)
-        .map_err(|e| Error::Protocol(format!("Decompression failed: {}", e)))?;
+        .map_err(|e| Error::Protocol(format!("Decompression failed: {e}")))?;
     Ok(cursor.position() as usize)
 }
 
@@ -95,10 +95,10 @@ pub fn compress(data: &[u8]) -> Result<Vec<u8>> {
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     encoder
         .write_all(data)
-        .map_err(|e| Error::Protocol(format!("Compression failed: {}", e)))?;
+        .map_err(|e| Error::Protocol(format!("Compression failed: {e}")))?;
     encoder
         .finish()
-        .map_err(|e| Error::Protocol(format!("Compression finish failed: {}", e)))
+        .map_err(|e| Error::Protocol(format!("Compression finish failed: {e}")))
 }
 
 /// Tunnel frame type.
@@ -273,7 +273,7 @@ impl TunnelCodec {
                         frames.push(TunnelFrame::Data(Vec::new()));
                         continue;
                     } else if header as usize > TunnelConstants::MAX_BLOCKS {
-                        return Err(Error::protocol(format!("Too many blocks: {}", header)));
+                        return Err(Error::protocol(format!("Too many blocks: {header}")));
                     } else {
                         // Data frame
                         self.remaining_blocks = header as usize;
@@ -299,8 +299,7 @@ impl TunnelCodec {
 
                         if block_size > TunnelConstants::MAX_PACKET_SIZE * 2 {
                             return Err(Error::protocol(format!(
-                                "Packet too large: {}",
-                                block_size
+                                "Packet too large: {block_size}"
                             )));
                         }
 
@@ -556,7 +555,7 @@ impl TunnelCodec {
                     } else if header == 0 {
                         continue;
                     } else if header as usize > TunnelConstants::MAX_BLOCKS {
-                        return Err(Error::protocol(format!("Too many blocks: {}", header)));
+                        return Err(Error::protocol(format!("Too many blocks: {header}")));
                     } else {
                         self.remaining_blocks = header as usize;
                         self.state = DecodeState::DataBlocks;
@@ -579,8 +578,7 @@ impl TunnelCodec {
 
                         if block_size > TunnelConstants::MAX_PACKET_SIZE * 2 {
                             return Err(Error::protocol(format!(
-                                "Packet too large: {}",
-                                block_size
+                                "Packet too large: {block_size}"
                             )));
                         }
 
