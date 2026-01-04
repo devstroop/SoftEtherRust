@@ -1123,15 +1123,34 @@ async fn perform_dhcp(
             }
             Ok(Err(e)) => {
                 let err_str = e.to_string();
+                let err_debug = format!("{:?}", e);
                 log_msg(
                     callbacks,
                     2,
                     &format!("[RUST] Read error during DHCP: {}", e),
                 );
-                // If connection was closed, don't keep retrying
-                if err_str.contains("close_notify") || err_str.contains("closed") || err_str.contains("eof") {
+                log_msg(
+                    callbacks,
+                    2,
+                    &format!("[RUST] Error debug: {}", err_debug),
+                );
+                
+                // Check for fatal TLS errors that indicate the connection is broken
+                if err_str.contains("InvalidContentType") 
+                    || err_str.contains("corrupt message")
+                    || err_str.contains("AlertReceived")
+                    || err_str.contains("close_notify") 
+                    || err_str.contains("closed") 
+                    || err_str.contains("eof") 
+                    || err_str.contains("ConnectionReset")
+                {
+                    log_msg(
+                        callbacks,
+                        3,
+                        "[RUST] Fatal TLS error - connection is broken",
+                    );
                     return Err(crate::error::Error::ConnectionClosed(
-                        "Connection closed during DHCP".into(),
+                        format!("TLS connection broken during DHCP: {}", e),
                     ));
                 }
                 // Small delay to avoid tight loop on transient errors
