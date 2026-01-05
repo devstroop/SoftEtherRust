@@ -361,8 +361,30 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeDestroy(
         return;
     }
 
+    // The callback context pointer is stored in the callbacks.context field.
+    // We need to extract it before destroying the handle so we can free it.
+    // The safest approach is to get the context pointer directly from the raw handle.
+    let callback_ctx_ptr: *mut std::ffi::c_void = unsafe {
+        // Access the handle directly to get the callback context
+        // The handle is Arc<Mutex<FfiClient>>
+        let client = &*(handle as *const std::sync::Mutex<crate::ffi::client::FfiClientInternal>);
+        if let Ok(guard) = client.lock() {
+            guard.get_callback_context()
+        } else {
+            std::ptr::null_mut()
+        }
+    };
+
+    // Destroy the native handle
     unsafe {
         softether_destroy(handle as SoftEtherHandle);
+    }
+
+    // Free the JNI callback context
+    if !callback_ctx_ptr.is_null() {
+        unsafe {
+            let _ = Box::from_raw(callback_ctx_ptr as *mut JniCallbackContext);
+        }
     }
 }
 
@@ -412,7 +434,7 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetState(
 /// Returns [ip_address, subnet_mask, gateway, dns1, dns2, server_version, server_build]
 #[no_mangle]
 pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetSession<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) -> jlongArray {
@@ -450,7 +472,7 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetSession
 /// Get session server IP as string.
 #[no_mangle]
 pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetSessionServerIP<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) -> JString<'local> {
@@ -479,7 +501,7 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetSession
 /// Returns [bytes_sent, bytes_received, packets_sent, packets_received, uptime_secs, active_connections, reconnect_count]
 #[no_mangle]
 pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetStats<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) -> jlongArray {
@@ -544,7 +566,7 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeSendPacket
 /// Receive packets from VPN server (polling mode).
 #[no_mangle]
 pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeReceivePackets(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     handle: jlong,
     buffer: JByteArray,
@@ -629,7 +651,7 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_hashPassword<'lo
 /// Get library version.
 #[no_mangle]
 pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_getVersion<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> JString<'local> {
     let version = unsafe {

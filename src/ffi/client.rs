@@ -25,7 +25,7 @@ use crate::protocol::{
 const PACKET_QUEUE_SIZE: usize = 256;
 
 /// Internal client state.
-struct FfiClient {
+pub(crate) struct FfiClient {
     /// Configuration
     config: crate::config::VpnConfig,
     /// Callbacks
@@ -45,6 +45,12 @@ struct FfiClient {
     /// Channel to send packets TO the VPN
     tx_sender: Option<mpsc::Sender<Vec<u8>>>,
 }
+
+// Thread-safe wrapper
+type ClientHandle = Arc<Mutex<FfiClient>>;
+
+/// Type alias for external access (used by JNI layer)
+pub(crate) type FfiClientInternal = FfiClient;
 
 /// Thread-safe statistics
 struct FfiStats {
@@ -68,6 +74,11 @@ impl Default for FfiStats {
 }
 
 impl FfiClient {
+    /// Get the callback context pointer (for cleanup)
+    pub fn get_callback_context(&self) -> *mut std::ffi::c_void {
+        self.callbacks.context
+    }
+
     fn new(config: crate::config::VpnConfig, callbacks: SoftEtherCallbacks) -> Self {
         Self {
             config,
@@ -143,9 +154,6 @@ impl FfiClient {
         }
     }
 }
-
-// Thread-safe wrapper
-type ClientHandle = Arc<Mutex<FfiClient>>;
 
 /// Convert a C string to a Rust string.
 unsafe fn cstr_to_string(ptr: *const c_char) -> Option<String> {
