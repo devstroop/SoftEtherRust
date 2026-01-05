@@ -281,6 +281,8 @@ public class SoftEtherBridge {
         cCallbacks.on_disconnected = disconnectedCallback
         cCallbacks.on_packets_received = packetsReceivedCallback
         cCallbacks.on_log = logCallback
+        cCallbacks.protect_socket = nil  // iOS uses NEPacketTunnelProvider
+        cCallbacks.exclude_ip = nil      // Set if cluster redirect support needed
         
         // Create client
         handle = softether_create(&cConfig, &cCallbacks)
@@ -333,8 +335,6 @@ public class SoftEtherBridge {
             serverBuild: cSession.server_build,
             macAddress: Array(withUnsafeBytes(of: cSession.mac_address) { Array($0) }),
             gatewayMac: Array(withUnsafeBytes(of: cSession.gateway_mac) { Array($0) })
-        )
-    }
         )
     }
     
