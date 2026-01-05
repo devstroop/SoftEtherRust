@@ -1303,7 +1303,8 @@ async fn run_packet_loop(
     }
 
     let mut tunnel_codec = TunnelCodec::new();
-    let mut read_buf = vec![0u8; 131072]; // 128KB read buffer
+    // Match Android: 64KB buffer for efficiency
+    let mut read_buf = vec![0u8; 65536];
     let keepalive_interval_secs = 5u64;
 
     log_msg(&callbacks, 1, "[RUST] Packet loop started");
@@ -1315,45 +1316,8 @@ async fn run_packet_loop(
         .await
         .map_err(crate::error::Error::Io)?;
     let mut last_keepalive = std::time::Instant::now();
-    
-    // Stats tracking
-    let mut rx_bytes: u64 = 0;
-    let mut rx_frames: u64 = 0;
-    let mut tx_frames: u64 = 0;
-    let mut last_stats = std::time::Instant::now();
-    
-    // Create bounded channel for RX packets - using sync_channel for backpressure
-    // 256 batches * ~64KB each = ~16MB max buffer
-    let (rx_sender, rx_receiver) = std::sync::mpsc::sync_channel::<(Vec<u8>, u32)>(256);
-    
-    // Spawn dedicated consumer thread for callbacks
-    let cb_context = callbacks.context as usize;
-    let cb_fn = callbacks.on_packets_received.map(|f| f as usize);
-    let consumer_running = running.clone();
-    
-    let consumer_thread = std::thread::spawn(move || {
-        while consumer_running.load(Ordering::SeqCst) {
-            match rx_receiver.recv_timeout(Duration::from_millis(100)) {
-                Ok((buffer, count)) => {
-                    if let Some(cb_ptr) = cb_fn {
-                        let callback: extern "C" fn(*mut std::ffi::c_void, *const u8, usize, u32) = 
-                            unsafe { std::mem::transmute(cb_ptr) };
-                        callback(cb_context as *mut std::ffi::c_void, buffer.as_ptr(), buffer.len(), count);
-                    }
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-    });
 
     while running.load(Ordering::SeqCst) {
-        // Log stats periodically
-        if last_stats.elapsed() >= Duration::from_secs(5) {
-            log_msg(&callbacks, 1, &format!("[RUST-STATS] TX: {} frames | RX: {} frames, {} bytes", tx_frames, rx_frames, rx_bytes));
-            last_stats = std::time::Instant::now();
-        }
-        
         // Check if we need to send keepalive
         if last_keepalive.elapsed() >= Duration::from_secs(keepalive_interval_secs) {
             let keepalive = tunnel_codec.encode_keepalive();
@@ -1371,21 +1335,18 @@ async fn run_packet_loop(
             Some(frame_data) = tx_recv.recv() => {
                 let frames = parse_length_prefixed_packets(&frame_data);
                 if !frames.is_empty() {
-                    tx_frames += frames.len() as u64;
                     let encoded = tunnel_codec.encode(&frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
                     conn_mgr.write_all(&encoded).await.map_err(crate::error::Error::Io)?;
                 }
             }
 
-            // Data from VPN - send to consumer thread via channel
-            result = tokio::time::timeout(Duration::from_millis(50), conn_mgr.read_any(&mut read_buf)) => {
+            // Data from VPN to send to iOS
+            result = tokio::time::timeout(Duration::from_millis(500), conn_mgr.read_any(&mut read_buf)) => {
                 match result {
                     Ok(Ok((_conn_idx, n))) if n > 0 => {
-                        rx_bytes += n as u64;
                         if let Ok(frames) = tunnel_codec.decode(&read_buf[..n]) {
                             if !frames.is_empty() {
-                                rx_frames += frames.len() as u64;
-                                // Build length-prefixed buffer
+                                // Build length-prefixed buffer for callback
                                 let mut buffer = Vec::with_capacity(n + frames.len() * 2);
                                 for frame in &frames {
                                     let frame_data: Vec<u8> = if is_compressed(frame) {
@@ -1397,8 +1358,9 @@ async fn run_packet_loop(
                                     buffer.extend_from_slice(&len.to_be_bytes());
                                     buffer.extend_from_slice(&frame_data);
                                 }
-                                // Send to consumer thread - blocks if channel full (backpressure)
-                                let _ = rx_sender.send((buffer, frames.len() as u32));
+                                if let Some(cb) = callbacks.on_packets_received {
+                                    cb(callbacks.context, buffer.as_ptr(), buffer.len(), frames.len() as u32);
+                                }
                             }
                         }
                     }
@@ -1415,10 +1377,6 @@ async fn run_packet_loop(
             }
         }
     }
-
-    // Cleanup
-    drop(rx_sender);
-    let _ = consumer_thread.join();
 
     log_msg(&callbacks, 1, "[RUST] Packet loop ended");
     Ok(())

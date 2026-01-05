@@ -64,6 +64,9 @@ build_ios() {
     log_info "Building for iOS (device only)..."
     log_info "  Note: Simulator builds skipped - Network Extension not supported"
     
+    # Set minimum iOS deployment target to match Xcode project (15.0)
+    export IPHONEOS_DEPLOYMENT_TARGET=15.0
+    
     # Device (arm64)
     log_info "  Building aarch64-apple-ios..."
     cargo build --release --target aarch64-apple-ios --features ffi
