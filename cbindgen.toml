@@ -1,6 +1,8 @@
 # cbindgen configuration for generating C headers
 # Run: cbindgen --config cbindgen.toml --crate softether --output include/SoftEtherVPN_generated.h
 
+language = "C"
+
 [defines]
 "feature = ffi" = "SOFTETHER_FFI"
 
@@ -31,12 +33,3 @@ crates = ["softether"]
 all_features = false
 default_features = false
 features = ["ffi"]
-
-[output]
-style = "Both"
-
-[language]
-cpp = false
-
-[header]
-# Using the handwritten header instead
