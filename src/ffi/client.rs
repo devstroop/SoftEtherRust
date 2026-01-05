@@ -1303,7 +1303,7 @@ async fn run_packet_loop(
     }
 
     let mut tunnel_codec = TunnelCodec::new();
-    let mut read_buf = vec![0u8; 131072]; // Increased to 128KB for better throughput
+    let mut read_buf = vec![0u8; 131072]; // 128KB read buffer
     let keepalive_interval_secs = 5u64;
 
     log_msg(&callbacks, 1, "[RUST] Packet loop started");
@@ -1322,35 +1322,23 @@ async fn run_packet_loop(
     let mut tx_frames: u64 = 0;
     let mut last_stats = std::time::Instant::now();
     
-    // RX queue for async callback invocation - prevents blocking the read loop
-    // Use bounded channel with reasonable size to provide backpressure
-    let (rx_queue_tx, rx_queue_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(32);
+    // Create bounded channel for RX packets - using sync_channel for backpressure
+    // 256 batches * ~64KB each = ~16MB max buffer
+    let (rx_sender, rx_receiver) = std::sync::mpsc::sync_channel::<(Vec<u8>, u32)>(256);
     
-    // Convert raw pointers to usize for thread safety (usize is Send)
-    // SAFETY: The context pointer is managed by Swift and remains valid for the session duration
-    let cb_context_addr = callbacks.context as usize;
-    let cb_fn: Option<extern "C" fn(*mut std::ffi::c_void, *const u8, usize, u32)> = callbacks.on_packets_received;
-    let cb_running = running.clone();
+    // Spawn dedicated consumer thread for callbacks
+    let cb_context = callbacks.context as usize;
+    let cb_fn = callbacks.on_packets_received.map(|f| f as usize);
+    let consumer_running = running.clone();
     
-    // Spawn a dedicated thread for RX callbacks - avoids blocking the TCP read loop
-    let _rx_handler = std::thread::spawn(move || {
-        // Convert back to pointer on the callback thread
-        let cb_context = cb_context_addr as *mut std::ffi::c_void;
-        
-        while cb_running.load(Ordering::SeqCst) {
-            match rx_queue_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                Ok(buffer) => {
-                    if let Some(cb) = cb_fn {
-                        // Count packets in buffer
-                        let mut count = 0u32;
-                        let mut offset = 0;
-                        while offset + 2 <= buffer.len() {
-                            let len = u16::from_be_bytes([buffer[offset], buffer[offset + 1]]) as usize;
-                            if offset + 2 + len > buffer.len() { break; }
-                            offset += 2 + len;
-                            count += 1;
-                        }
-                        cb(cb_context, buffer.as_ptr(), buffer.len(), count);
+    let consumer_thread = std::thread::spawn(move || {
+        while consumer_running.load(Ordering::SeqCst) {
+            match rx_receiver.recv_timeout(Duration::from_millis(100)) {
+                Ok((buffer, count)) => {
+                    if let Some(cb_ptr) = cb_fn {
+                        let callback: extern "C" fn(*mut std::ffi::c_void, *const u8, usize, u32) = 
+                            unsafe { std::mem::transmute(cb_ptr) };
+                        callback(cb_context as *mut std::ffi::c_void, buffer.as_ptr(), buffer.len(), count);
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
@@ -1379,7 +1367,7 @@ async fn run_packet_loop(
         tokio::select! {
             biased;
 
-            // Packets from Android to send to VPN
+            // Packets from iOS to send to VPN
             Some(frame_data) = tx_recv.recv() => {
                 let frames = parse_length_prefixed_packets(&frame_data);
                 if !frames.is_empty() {
@@ -1389,15 +1377,15 @@ async fn run_packet_loop(
                 }
             }
 
-            // Data from VPN to send to iOS - non-blocking via queue
-            result = tokio::time::timeout(Duration::from_millis(100), conn_mgr.read_any(&mut read_buf)) => {
+            // Data from VPN - send to consumer thread via channel
+            result = tokio::time::timeout(Duration::from_millis(50), conn_mgr.read_any(&mut read_buf)) => {
                 match result {
                     Ok(Ok((_conn_idx, n))) if n > 0 => {
                         rx_bytes += n as u64;
                         if let Ok(frames) = tunnel_codec.decode(&read_buf[..n]) {
                             if !frames.is_empty() {
                                 rx_frames += frames.len() as u64;
-                                // Build length-prefixed buffer for callback
+                                // Build length-prefixed buffer
                                 let mut buffer = Vec::with_capacity(n + frames.len() * 2);
                                 for frame in &frames {
                                     let frame_data: Vec<u8> = if is_compressed(frame) {
@@ -1409,9 +1397,8 @@ async fn run_packet_loop(
                                     buffer.extend_from_slice(&len.to_be_bytes());
                                     buffer.extend_from_slice(&frame_data);
                                 }
-                                // Send to queue - non-blocking with try_send
-                                // If queue is full, packet is dropped (backpressure)
-                                let _ = rx_queue_tx.try_send(buffer);
+                                // Send to consumer thread - blocks if channel full (backpressure)
+                                let _ = rx_sender.send((buffer, frames.len() as u32));
                             }
                         }
                     }
@@ -1423,11 +1410,15 @@ async fn run_packet_loop(
                         log_msg(&callbacks, 3, &format!("[RUST] Read error: {e}"));
                         return Err(crate::error::Error::Io(e));
                     }
-                    Err(_) => {} // Timeout - fine, loop to check keepalive
+                    Err(_) => {} // Timeout - check keepalive
                 }
             }
         }
     }
+
+    // Cleanup
+    drop(rx_sender);
+    let _ = consumer_thread.join();
 
     log_msg(&callbacks, 1, "[RUST] Packet loop ended");
     Ok(())
