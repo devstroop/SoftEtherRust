@@ -85,6 +85,12 @@ pub struct DhcpConfig {
     pub server_id: Option<Ipv4Addr>,
     /// Lease time in seconds.
     pub lease_time: u32,
+    /// Renewal time (T1) in seconds - time to renew with original server.
+    /// Default: lease_time / 2
+    pub renewal_time: u32,
+    /// Rebinding time (T2) in seconds - time to rebind with any server.
+    /// Default: lease_time * 7 / 8
+    pub rebinding_time: u32,
     /// Domain name.
     pub domain_name: String,
 }
@@ -99,6 +105,8 @@ impl Default for DhcpConfig {
             dns2: None,
             server_id: None,
             lease_time: 0,
+            renewal_time: 0,
+            rebinding_time: 0,
             domain_name: String::new(),
         }
     }
@@ -123,6 +131,10 @@ pub enum DhcpState {
     RequestSent,
     /// Successfully bound to an IP.
     Bound,
+    /// Renewing lease (unicast to server).
+    Renewing,
+    /// Rebinding lease (broadcast to any server).
+    Rebinding,
     /// DHCP failed.
     Failed,
 }
@@ -188,6 +200,34 @@ impl DhcpClient {
             Some(self.offered_ip),
             Some(self.server_id),
         ))
+    }
+
+    /// Build a DHCP renewal REQUEST packet (unicast to server).
+    /// For renewal, we use our current IP as source and send directly to server.
+    pub fn build_renewal_request(
+        &self,
+        client_ip: Ipv4Addr,
+        server_ip: Ipv4Addr,
+        gateway_mac: [u8; 6],
+    ) -> Bytes {
+        self.build_dhcp_packet_unicast(
+            DhcpMessageType::Request,
+            client_ip,
+            server_ip,
+            gateway_mac,
+        )
+    }
+
+    /// Build a DHCP rebinding REQUEST packet (broadcast).
+    /// For rebinding, we broadcast to any server.
+    pub fn build_rebinding_request(&self, client_ip: Ipv4Addr) -> Bytes {
+        // Rebinding uses broadcast like initial request, but ciaddr is set
+        self.build_dhcp_packet_rebind(DhcpMessageType::Request, client_ip)
+    }
+
+    /// Build a DHCP RELEASE packet to release the lease.
+    pub fn build_release(&self, client_ip: Ipv4Addr, server_ip: Ipv4Addr, gateway_mac: [u8; 6]) -> Bytes {
+        self.build_dhcp_packet_unicast(DhcpMessageType::Release, client_ip, server_ip, gateway_mac)
     }
 
     /// Process a DHCP response packet.
@@ -330,6 +370,14 @@ impl DhcpClient {
                     config.lease_time =
                         u32::from_be_bytes([opt_data[0], opt_data[1], opt_data[2], opt_data[3]]);
                 }
+                c if c == DhcpOption::RenewalTime as u8 && opt_len >= 4 => {
+                    config.renewal_time =
+                        u32::from_be_bytes([opt_data[0], opt_data[1], opt_data[2], opt_data[3]]);
+                }
+                c if c == DhcpOption::RebindingTime as u8 && opt_len >= 4 => {
+                    config.rebinding_time =
+                        u32::from_be_bytes([opt_data[0], opt_data[1], opt_data[2], opt_data[3]]);
+                }
                 c if c == DhcpOption::DomainName as u8 => {
                     config.domain_name = String::from_utf8_lossy(opt_data).into_owned();
                 }
@@ -347,11 +395,19 @@ impl DhcpClient {
                 false
             }
             Some(DhcpMessageType::Ack) => {
+                // Compute default T1/T2 if not provided by server
+                if config.renewal_time == 0 && config.lease_time > 0 {
+                    config.renewal_time = config.lease_time / 2;
+                }
+                if config.rebinding_time == 0 && config.lease_time > 0 {
+                    config.rebinding_time = config.lease_time * 7 / 8;
+                }
                 self.config = config;
                 self.state = DhcpState::Bound;
                 info!(
-                    "DHCP ACK: IP={}, Gateway={:?}, DNS={:?}",
-                    self.config.ip, self.config.gateway, self.config.dns1
+                    "DHCP ACK: IP={}, Gateway={:?}, DNS={:?}, Lease={}s, T1={}s, T2={}s",
+                    self.config.ip, self.config.gateway, self.config.dns1,
+                    self.config.lease_time, self.config.renewal_time, self.config.rebinding_time
                 );
                 true
             }
@@ -489,6 +545,168 @@ impl DhcpClient {
         payload.freeze()
     }
 
+    /// Build a unicast DHCP packet (for renewal/release to server).
+    fn build_dhcp_packet_unicast(
+        &self,
+        msg_type: DhcpMessageType,
+        client_ip: Ipv4Addr,
+        server_ip: Ipv4Addr,
+        gateway_mac: [u8; 6],
+    ) -> Bytes {
+        let dhcp_payload = self.build_dhcp_payload_renewal(msg_type, client_ip, Some(server_ip));
+        let udp_len = 8 + dhcp_payload.len();
+        let ip_len = 20 + udp_len;
+
+        let mut packet = BytesMut::with_capacity(14 + ip_len);
+
+        // === Ethernet Header (14 bytes) ===
+        // For unicast, send to gateway MAC (server is on different subnet)
+        packet.put_slice(&gateway_mac); // Destination: gateway MAC
+        packet.put_slice(&self.mac); // Source: our MAC
+        packet.put_u16(0x0800); // EtherType: IPv4
+
+        // === IPv4 Header (20 bytes) ===
+        packet.put_u8(0x45); // Version 4, IHL 5
+        packet.put_u8(0x00); // DSCP/ECN
+        packet.put_u16(ip_len as u16);
+        packet.put_u32(0x00000000); // ID, flags, fragment
+        packet.put_u8(64); // TTL
+        packet.put_u8(17); // Protocol: UDP
+        packet.put_u16(0x0000); // Checksum placeholder
+        packet.put_slice(&client_ip.octets()); // Source: our IP
+        packet.put_slice(&server_ip.octets()); // Dest: server IP
+
+        // Calculate IP checksum
+        let ip_start = 14;
+        let checksum = Self::calculate_ip_checksum(&packet[ip_start..ip_start + 20]);
+        packet[ip_start + 10] = (checksum >> 8) as u8;
+        packet[ip_start + 11] = checksum as u8;
+
+        // === UDP Header (8 bytes) ===
+        packet.put_u16(68); // Source port: DHCP client
+        packet.put_u16(67); // Dest port: DHCP server
+        packet.put_u16(udp_len as u16);
+        packet.put_u16(0x0000); // Checksum (optional)
+
+        // === DHCP Payload ===
+        packet.put_slice(&dhcp_payload);
+
+        packet.freeze()
+    }
+
+    /// Build a broadcast DHCP packet for rebinding.
+    fn build_dhcp_packet_rebind(&self, msg_type: DhcpMessageType, client_ip: Ipv4Addr) -> Bytes {
+        let dhcp_payload = self.build_dhcp_payload_renewal(msg_type, client_ip, None);
+        let udp_len = 8 + dhcp_payload.len();
+        let ip_len = 20 + udp_len;
+
+        let mut packet = BytesMut::with_capacity(14 + ip_len);
+
+        // === Ethernet Header (14 bytes) ===
+        packet.put_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]); // Destination: broadcast
+        packet.put_slice(&self.mac); // Source: our MAC
+        packet.put_u16(0x0800); // EtherType: IPv4
+
+        // === IPv4 Header (20 bytes) ===
+        packet.put_u8(0x45); // Version 4, IHL 5
+        packet.put_u8(0x00); // DSCP/ECN
+        packet.put_u16(ip_len as u16);
+        packet.put_u32(0x00000000); // ID, flags, fragment
+        packet.put_u8(64); // TTL
+        packet.put_u8(17); // Protocol: UDP
+        packet.put_u16(0x0000); // Checksum placeholder
+        packet.put_slice(&client_ip.octets()); // Source: our IP
+        packet.put_u32(0xFFFFFFFF); // Dest: broadcast
+
+        // Calculate IP checksum
+        let ip_start = 14;
+        let checksum = Self::calculate_ip_checksum(&packet[ip_start..ip_start + 20]);
+        packet[ip_start + 10] = (checksum >> 8) as u8;
+        packet[ip_start + 11] = checksum as u8;
+
+        // === UDP Header (8 bytes) ===
+        packet.put_u16(68); // Source port: DHCP client
+        packet.put_u16(67); // Dest port: DHCP server
+        packet.put_u16(udp_len as u16);
+        packet.put_u16(0x0000); // Checksum (optional)
+
+        // === DHCP Payload ===
+        packet.put_slice(&dhcp_payload);
+
+        packet.freeze()
+    }
+
+    /// Build DHCP payload for renewal/rebinding/release.
+    /// For renewal, ciaddr is set to our current IP.
+    fn build_dhcp_payload_renewal(
+        &self,
+        msg_type: DhcpMessageType,
+        client_ip: Ipv4Addr,
+        server_id: Option<Ipv4Addr>,
+    ) -> Bytes {
+        let mut payload = BytesMut::with_capacity(300);
+
+        // DHCP fixed header (236 bytes)
+        payload.put_u8(0x01); // op: BOOTREQUEST
+        payload.put_u8(0x01); // htype: Ethernet
+        payload.put_u8(0x06); // hlen: 6
+        payload.put_u8(0x00); // hops: 0
+
+        // Transaction ID
+        payload.put_u32(self.xid);
+
+        // secs (2 bytes) + flags (2 bytes)
+        // For renewal, don't set BROADCAST flag - we want unicast reply
+        payload.put_u16(0x0000); // secs: 0
+        payload.put_u16(0x0000); // flags: 0 (unicast)
+
+        // ciaddr: our current IP (required for renewal)
+        payload.put_slice(&client_ip.octets());
+        // yiaddr, siaddr, giaddr (zeros)
+        payload.put_slice(&[0u8; 12]);
+
+        // chaddr (client hardware address) - 16 bytes
+        payload.put_slice(&self.mac);
+        payload.put_slice(&[0u8; 10]); // padding
+
+        // sname (64 bytes) + file (128 bytes) - zeros
+        payload.put_slice(&[0u8; 192]);
+
+        // Magic cookie
+        payload.put_u32(DHCP_MAGIC);
+
+        // Options
+        // Message type
+        payload.put_u8(DhcpOption::MessageType as u8);
+        payload.put_u8(1);
+        payload.put_u8(msg_type as u8);
+
+        // Server ID (for renewal, not for rebinding)
+        if let Some(ip) = server_id {
+            payload.put_u8(DhcpOption::ServerIdentifier as u8);
+            payload.put_u8(4);
+            payload.put_slice(&ip.octets());
+        }
+
+        // Parameter request list
+        payload.put_u8(DhcpOption::ParameterRequest as u8);
+        payload.put_u8(4);
+        payload.put_u8(DhcpOption::SubnetMask as u8);
+        payload.put_u8(DhcpOption::Router as u8);
+        payload.put_u8(DhcpOption::DnsServer as u8);
+        payload.put_u8(DhcpOption::DomainName as u8);
+
+        // End option
+        payload.put_u8(DhcpOption::End as u8);
+
+        // Pad to minimum size
+        while payload.len() < 300 - 14 - 20 - 8 {
+            payload.put_u8(0x00);
+        }
+
+        payload.freeze()
+    }
+
     /// Calculate IP header checksum.
     fn calculate_ip_checksum(header: &[u8]) -> u16 {
         let mut sum: u32 = 0;
@@ -537,6 +755,8 @@ pub struct DhcpHandler {
     offered_ip: Option<Ipv4Addr>,
     /// Server ID (from OFFER).
     server_id: Option<Ipv4Addr>,
+    /// Time when lease was obtained (for renewal timing).
+    lease_obtained_at: Option<Instant>,
 }
 
 impl Default for DhcpHandler {
@@ -556,6 +776,7 @@ impl DhcpHandler {
             config: None,
             offered_ip: None,
             server_id: None,
+            lease_obtained_at: None,
         }
     }
 
@@ -581,7 +802,63 @@ impl DhcpHandler {
 
     /// Check if DHCP is in progress.
     pub fn is_in_progress(&self) -> bool {
-        matches!(self.state, DhcpState::DiscoverSent | DhcpState::RequestSent)
+        matches!(
+            self.state,
+            DhcpState::DiscoverSent | DhcpState::RequestSent | DhcpState::Renewing | DhcpState::Rebinding
+        )
+    }
+
+    /// Check if lease needs renewal (T1 elapsed).
+    /// Returns true if we're in Bound state and T1 time has elapsed.
+    pub fn needs_renewal(&self) -> bool {
+        if self.state != DhcpState::Bound {
+            return false;
+        }
+        if let (Some(config), Some(obtained_at)) = (&self.config, self.lease_obtained_at) {
+            if config.renewal_time > 0 {
+                let elapsed = obtained_at.elapsed().as_secs() as u32;
+                return elapsed >= config.renewal_time;
+            }
+        }
+        false
+    }
+
+    /// Check if lease needs rebinding (T2 elapsed).
+    /// Returns true if we're in Bound or Renewing state and T2 time has elapsed.
+    pub fn needs_rebinding(&self) -> bool {
+        if !matches!(self.state, DhcpState::Bound | DhcpState::Renewing) {
+            return false;
+        }
+        if let (Some(config), Some(obtained_at)) = (&self.config, self.lease_obtained_at) {
+            if config.rebinding_time > 0 {
+                let elapsed = obtained_at.elapsed().as_secs() as u32;
+                return elapsed >= config.rebinding_time;
+            }
+        }
+        false
+    }
+
+    /// Check if lease has expired.
+    /// Returns true if lease_time has fully elapsed.
+    pub fn is_lease_expired(&self) -> bool {
+        if let (Some(config), Some(obtained_at)) = (&self.config, self.lease_obtained_at) {
+            if config.lease_time > 0 {
+                let elapsed = obtained_at.elapsed().as_secs() as u32;
+                return elapsed >= config.lease_time;
+            }
+        }
+        false
+    }
+
+    /// Get time remaining until renewal (T1) in seconds.
+    pub fn time_until_renewal(&self) -> Option<u32> {
+        if let (Some(config), Some(obtained_at)) = (&self.config, self.lease_obtained_at) {
+            if config.renewal_time > 0 {
+                let elapsed = obtained_at.elapsed().as_secs() as u32;
+                return Some(config.renewal_time.saturating_sub(elapsed));
+            }
+        }
+        None
     }
 
     /// Check if we should send/retry DHCP discover.
@@ -653,6 +930,77 @@ impl DhcpHandler {
     pub fn mark_configured(&mut self, config: DhcpConfig) {
         self.state = DhcpState::Bound;
         self.config = Some(config);
+        self.lease_obtained_at = Some(Instant::now());
+    }
+
+    /// Start renewal process (unicast to original server).
+    pub fn start_renewal(&mut self) {
+        if self.state == DhcpState::Bound {
+            self.state = DhcpState::Renewing;
+            self.retry_count = 0;
+            self.last_send_time = None;
+            // Generate new XID for renewal
+            self.xid = generate_transaction_id();
+            info!("Starting DHCP lease renewal");
+        }
+    }
+
+    /// Start rebinding process (broadcast to any server).
+    pub fn start_rebinding(&mut self) {
+        if matches!(self.state, DhcpState::Bound | DhcpState::Renewing) {
+            self.state = DhcpState::Rebinding;
+            self.retry_count = 0;
+            self.last_send_time = None;
+            // Generate new XID for rebinding
+            self.xid = generate_transaction_id();
+            info!("Starting DHCP lease rebinding");
+        }
+    }
+
+    /// Check if we should send renewal request (unicast).
+    pub fn should_send_renewal(&self) -> bool {
+        if self.state != DhcpState::Renewing {
+            return false;
+        }
+        if self.retry_count >= MAX_DHCP_RETRIES {
+            return false;
+        }
+        match self.last_send_time {
+            Some(last) => last.elapsed().as_millis() as u64 >= DHCP_RETRY_INTERVAL_MS,
+            None => true,
+        }
+    }
+
+    /// Check if we should send rebinding request (broadcast).
+    pub fn should_send_rebinding(&self) -> bool {
+        if self.state != DhcpState::Rebinding {
+            return false;
+        }
+        if self.retry_count >= MAX_DHCP_RETRIES {
+            return false;
+        }
+        match self.last_send_time {
+            Some(last) => last.elapsed().as_millis() as u64 >= DHCP_RETRY_INTERVAL_MS,
+            None => true,
+        }
+    }
+
+    /// Mark that renewal/rebind REQUEST was sent.
+    pub fn mark_renewal_sent(&mut self) {
+        self.retry_count += 1;
+        self.last_send_time = Some(Instant::now());
+    }
+
+    /// Handle renewal ACK - reset lease timers.
+    pub fn handle_renewal_ack(&mut self, config: DhcpConfig) {
+        info!(
+            "DHCP renewal ACK: Lease renewed for {}s (T1={}s, T2={}s)",
+            config.lease_time, config.renewal_time, config.rebinding_time
+        );
+        self.state = DhcpState::Bound;
+        self.config = Some(config);
+        self.lease_obtained_at = Some(Instant::now());
+        self.retry_count = 0;
     }
 
     /// Mark that DHCP failed.
@@ -668,6 +1016,7 @@ impl DhcpHandler {
         self.config = None;
         self.offered_ip = None;
         self.server_id = None;
+        self.lease_obtained_at = None;
         // Generate new XID for next attempt
         self.xid = generate_transaction_id();
     }
