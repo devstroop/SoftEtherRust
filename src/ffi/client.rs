@@ -6,17 +6,8 @@
 use std::ffi::{c_char, c_int, CStr};
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-/// Install panic handler once
-static PANIC_HANDLER_INIT: Once = Once::new();
-
-/// Global callback for panic logging (set when client is created)
-static mut PANIC_LOG_CALLBACK: Option<(
-    *mut std::ffi::c_void,
-    extern "C" fn(*mut std::ffi::c_void, i32, *const c_char),
-)> = None;
 
 use tokio::sync::mpsc;
 
@@ -61,6 +52,7 @@ struct FfiStats {
     bytes_received: AtomicU64,
     packets_sent: AtomicU64,
     packets_received: AtomicU64,
+    packets_dropped: AtomicU64,
     uptime_start: AtomicU64,
 }
 
@@ -71,6 +63,7 @@ impl Default for FfiStats {
             bytes_received: AtomicU64::new(0),
             packets_sent: AtomicU64::new(0),
             packets_received: AtomicU64::new(0),
+            packets_dropped: AtomicU64::new(0),
             uptime_start: AtomicU64::new(0),
         }
     }
@@ -149,6 +142,7 @@ impl FfiClient {
             uptime_secs: uptime,
             active_connections: 1,
             reconnect_count: 0,
+            packets_dropped: self.stats.packets_dropped.load(Ordering::Relaxed),
         }
     }
 }
@@ -168,41 +162,6 @@ unsafe fn cstr_to_string(ptr: *const c_char) -> Option<String> {
 // FFI Functions - C ABI
 // =============================================================================
 
-/// Install a panic handler that logs to the Swift/mobile callback
-fn install_panic_handler() {
-    PANIC_HANDLER_INIT.call_once(|| {
-        std::panic::set_hook(Box::new(|panic_info| {
-            let msg = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
-                format!("[RUST PANIC] {}", s)
-            } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
-                format!("[RUST PANIC] {}", s)
-            } else {
-                "[RUST PANIC] Unknown panic".to_string()
-            };
-
-            let location = if let Some(loc) = panic_info.location() {
-                format!(" at {}:{}", loc.file(), loc.line())
-            } else {
-                String::new()
-            };
-
-            let full_msg = format!("{}{}", msg, location);
-
-            // Try to log via the stored callback
-            unsafe {
-                if let Some((ctx, cb)) = PANIC_LOG_CALLBACK {
-                    if let Ok(cstr) = std::ffi::CString::new(full_msg.clone()) {
-                        cb(ctx, 4, cstr.as_ptr()); // Level 4 = critical/panic
-                    }
-                }
-            }
-
-            // Also write to stderr as backup
-            eprintln!("{}", full_msg);
-        }));
-    });
-}
-
 /// Create a new SoftEther VPN client.
 ///
 /// # Safety
@@ -214,17 +173,6 @@ pub unsafe extern "C" fn softether_create(
     config: *const SoftEtherConfig,
     callbacks: *const SoftEtherCallbacks,
 ) -> SoftEtherHandle {
-    // Install panic handler to log panics before crashing
-    install_panic_handler();
-
-    // Store callback for panic logging
-    if !callbacks.is_null() {
-        let cbs = &*callbacks;
-        if let Some(log_cb) = cbs.on_log {
-            PANIC_LOG_CALLBACK = Some((cbs.context, log_cb));
-        }
-    }
-
     if config.is_null() {
         return SOFTETHER_HANDLE_NULL;
     }
@@ -276,15 +224,43 @@ pub unsafe extern "C" fn softether_create(
             .collect()
     };
 
+    // Parse optional certificate pinning fields
+    let custom_ca_pem = if config.custom_ca_pem.is_null() {
+        None
+    } else {
+        let pem = CStr::from_ptr(config.custom_ca_pem)
+            .to_string_lossy()
+            .into_owned();
+        if pem.is_empty() {
+            None
+        } else {
+            Some(pem)
+        }
+    };
+
+    let cert_fingerprint_sha256 = if config.cert_fingerprint_sha256.is_null() {
+        None
+    } else {
+        let fp = CStr::from_ptr(config.cert_fingerprint_sha256)
+            .to_string_lossy()
+            .into_owned();
+        if fp.is_empty() {
+            None
+        } else {
+            Some(fp)
+        }
+    };
+
     // Create VPN config with all options
     let vpn_config = crate::config::VpnConfig {
         server,
         port: config.port as u16,
-        sni_hostname: None, // Will be set during redirect if needed
         hub,
         username,
         password_hash,
         skip_tls_verify: config.skip_tls_verify != 0,
+        custom_ca_pem,
+        cert_fingerprint_sha256,
         max_connections: config.max_connections.clamp(1, 32) as u8,
         timeout_seconds: config.timeout_seconds.max(5) as u64,
         mtu: config.mtu.clamp(576, 1500) as u16,
@@ -294,6 +270,7 @@ pub unsafe extern "C" fn softether_create(
         qos: config.qos != 0,
         nat_traversal: config.nat_traversal != 0,
         monitor_mode: config.monitor_mode != 0,
+        sni_hostname: None,
         routing: crate::config::RoutingConfig {
             default_route: config.default_route != 0,
             accept_pushed_routes: config.accept_pushed_routes != 0,
@@ -370,8 +347,9 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
     }
 
     // Create tokio runtime
+    // Use single thread for mobile battery efficiency - VPN workload is I/O bound
     let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
+        .worker_threads(1)
         .enable_all()
         .build()
     {
@@ -422,13 +400,6 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
         )
         .await;
 
-        // Log immediately when connect_and_run returns
-        if let Some(cb) = callbacks.on_log {
-            if let Ok(cstr) = std::ffi::CString::new("[RUST] connect_and_run RETURNED, processing result...") {
-                cb(callbacks.context, 1, cstr.as_ptr());
-            }
-        }
-
         // Notify disconnection
         running.store(false, Ordering::SeqCst);
 
@@ -442,12 +413,8 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
                 SoftEtherResult::Ok
             }
             Err(ref e) => {
-                // Log the FULL error details
                 if let Some(cb) = callbacks.on_log {
-                    if let Ok(cstr) = std::ffi::CString::new(format!("[RUST] CONNECTION ERROR: {}", e)) {
-                        cb(callbacks.context, 3, cstr.as_ptr());
-                    }
-                    if let Ok(cstr) = std::ffi::CString::new(format!("[RUST] Error debug: {:?}", e)) {
+                    if let Ok(cstr) = std::ffi::CString::new(format!("Connection error: {e}")) {
                         cb(callbacks.context, 3, cstr.as_ptr());
                     }
                 }
@@ -525,15 +492,11 @@ async fn connect_and_run(
     log_message(&callbacks, 1, "[RUST] Resolving server IP...");
     let server_ip = match resolve_server_ip(&config.server) {
         Ok(ip) => {
-            log_message(&callbacks, 1, &format!("[RUST] Resolved server IP: {}", ip));
+            log_message(&callbacks, 1, &format!("[RUST] Resolved server IP: {ip}"));
             ip
         }
         Err(e) => {
-            log_message(
-                &callbacks,
-                3,
-                &format!("[RUST] DNS resolution failed: {}", e),
-            );
+            log_message(&callbacks, 3, &format!("[RUST] DNS resolution failed: {e}"));
             return Err(e);
         }
     };
@@ -553,10 +516,6 @@ async fn connect_and_run(
         true // No protection needed if callback not set
     };
 
-    // Log that we're using Apple socket options
-    #[cfg(target_vendor = "apple")]
-    log_message(&callbacks, 1, "[RUST] Apple: Using SO_NET_SERVICE_TYPE=VPN for socket bypass");
-
     let mut conn = match VpnConnection::connect_with_protect(&config, protect_fn).await {
         Ok(c) => {
             log_message(
@@ -570,7 +529,7 @@ async fn connect_and_run(
             log_message(
                 &callbacks,
                 3,
-                &format!("[RUST] TCP/TLS connection failed: {}", e),
+                &format!("[RUST] TCP/TLS connection failed: {e}"),
             );
             return Err(e);
         }
@@ -581,7 +540,7 @@ async fn connect_and_run(
     update_state(&atomic_state, &callbacks, SoftEtherState::Handshaking);
 
     // HTTP handshake
-    let hello = match perform_handshake(&mut conn, &config, None).await {
+    let hello = match perform_handshake(&mut conn, &config).await {
         Ok(h) => {
             log_message(
                 &callbacks,
@@ -594,7 +553,7 @@ async fn connect_and_run(
             h
         }
         Err(e) => {
-            log_message(&callbacks, 3, &format!("[RUST] Handshake failed: {}", e));
+            log_message(&callbacks, 3, &format!("[RUST] Handshake failed: {e}"));
             return Err(e);
         }
     };
@@ -611,11 +570,7 @@ async fn connect_and_run(
             r
         }
         Err(e) => {
-            log_message(
-                &callbacks,
-                3,
-                &format!("[RUST] Authentication failed: {}", e),
-            );
+            log_message(&callbacks, 3, &format!("[RUST] Authentication failed: {e}"));
             return Err(e);
         }
     };
@@ -642,35 +597,24 @@ async fn connect_and_run(
                 &callbacks,
                 1,
                 &format!(
-                    "[RUST] Cluster redirect to {}:{}, ticket={:02X?}",
-                    redirect_ip, redirect.port, &redirect.ticket[..8]
+                    "[RUST] Cluster redirect to {}:{}",
+                    redirect_ip, redirect.port
                 ),
             );
 
-            // CRITICAL: Send redirect acknowledgment BEFORE closing connection (like Swift does)
-            // This tells the controller we received the redirect info
-            log_message(&callbacks, 1, "[RUST] Sending redirect acknowledgment...");
-            let empty_pack = Pack::new();
-            let ack_request = HttpRequest::post(VPN_TARGET)
+            // Send empty Pack acknowledgment before closing connection
+            let ack_pack = Pack::new();
+            let request = HttpRequest::post(VPN_TARGET)
                 .header("Content-Type", CONTENT_TYPE_PACK)
                 .header("Connection", "Keep-Alive")
-                .body(empty_pack.to_bytes());
+                .body(ack_pack.to_bytes());
             let host = format!("{}:{}", config.server, config.port);
-            let ack_bytes = ack_request.build(&host);
-            if let Err(e) = conn.write_all(&ack_bytes).await {
-                log_message(&callbacks, 2, &format!("[RUST] Warning: ack write failed: {}", e));
-            }
-            if let Err(e) = conn.flush().await {
-                log_message(&callbacks, 2, &format!("[RUST] Warning: ack flush failed: {}", e));
-            }
-            
-            // Small delay for server to process (like Swift's 100ms)
+            let request_bytes = request.build(&host);
+            let _ = conn.write_all(&request_bytes).await;
+
+            // Small delay before closing
             tokio::time::sleep(Duration::from_millis(100)).await;
-            
-            // TESTING: Keep original connection alive while connecting to redirect
-            // Maybe iOS doesn't like when we drop connection before redirect completes
-            log_message(&callbacks, 1, "[RUST] Keeping original connection open (not dropping yet)...");
-            let _old_conn = conn; // Keep it alive but don't use it
+            drop(conn);
 
             // Connect to redirect server
             match connect_redirect(&config, &redirect, &callbacks).await {
@@ -688,7 +632,7 @@ async fn connect_and_run(
                     )
                 }
                 Err(e) => {
-                    log_message(&callbacks, 3, &format!("[RUST] Redirect failed: {}", e));
+                    log_message(&callbacks, 3, &format!("[RUST] Redirect failed: {e}"));
                     return Err(e);
                 }
             }
@@ -739,18 +683,6 @@ async fn connect_and_run(
         &actual_server_addr,
         actual_server_port,
     );
-    
-    // Log connection manager settings
-    log_message(
-        &callbacks,
-        1,
-        &format!(
-            "[RUST] ConnectionManager: half_conn={}, max_conn={}, needs_more={}",
-            conn_mgr.is_half_connection(),
-            config.max_connections,
-            conn_mgr.needs_more_connections()
-        ),
-    );
 
     // Generate MAC address for DHCP
     let mut mac = [0u8; 6];
@@ -765,10 +697,6 @@ async fn connect_and_run(
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
         ),
     );
-
-    // Small delay before DHCP to let iOS/connection stabilize
-    log_message(&callbacks, 1, "[RUST] Waiting 100ms before DHCP...");
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Perform DHCP to get IP configuration
     log_message(&callbacks, 1, "[RUST] Starting DHCP...");
@@ -792,7 +720,7 @@ async fn connect_and_run(
             config
         }
         Err(e) => {
-            log_message(&callbacks, 3, &format!("[RUST] DHCP failed: {}", e));
+            log_message(&callbacks, 3, &format!("[RUST] DHCP failed: {e}"));
             return Err(e);
         }
     };
@@ -836,7 +764,7 @@ fn create_session_from_dhcp(
     mac: [u8; 6],
 ) -> SoftEtherSession {
     let mut server_ip_str = [0 as std::ffi::c_char; 64];
-    let ip_string = format!("{}", server_ip);
+    let ip_string = format!("{server_ip}");
     for (i, b) in ip_string.bytes().enumerate() {
         if i < 63 {
             server_ip_str[i] = b as std::ffi::c_char;
@@ -885,10 +813,7 @@ async fn connect_redirect(
     log_msg(
         callbacks,
         1,
-        &format!(
-            "[RUST] Connecting to cluster server {}:{}",
-            redirect_server, redirect_port
-        ),
+        &format!("[RUST] Connecting to cluster server {redirect_server}:{redirect_port}"),
     );
 
     // Request iOS to exclude the redirect server IP from VPN routing
@@ -901,7 +826,7 @@ async fn connect_redirect(
             if excluded {
                 log_msg(callbacks, 1, "[RUST] Route exclusion applied successfully");
                 // Give iOS time to apply the route change
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             } else {
                 log_msg(callbacks, 2, "[RUST] Warning: Route exclusion failed or not supported - continuing anyway");
             }
@@ -932,25 +857,15 @@ async fn connect_redirect(
     let protect_ctx = callbacks.context as usize; // Convert to usize (Send-safe)
     let protect_fn = move |fd: i32| -> bool {
         if let Some(cb) = protect_cb {
-            // Can't log here since we don't have callbacks in the closure
-            // The protection result is what matters
             return cb(protect_ctx as *mut std::ffi::c_void, fd);
         }
         true
     };
 
-    // Log that we're using Apple socket options for redirect
-    #[cfg(target_vendor = "apple")]
-    log_msg(callbacks, 1, "[RUST] Apple: Using SO_NET_SERVICE_TYPE=VPN for redirect socket");
-    
-    log_msg(callbacks, 1, &format!("[RUST] protect_socket callback present: {}", protect_cb.is_some()));
-
     let mut conn = VpnConnection::connect_with_protect(&redirect_config, protect_fn).await?;
-    
-    log_msg(callbacks, 1, "[RUST] Redirect connection established successfully");
 
-    // Perform handshake - use ORIGINAL hostname for Host header (like Swift)
-    let hello = perform_handshake(&mut conn, &redirect_config, Some(&config.server)).await?;
+    // Perform handshake
+    let hello = perform_handshake(&mut conn, &redirect_config).await?;
     log_msg(
         callbacks,
         1,
@@ -960,39 +875,18 @@ async fn connect_redirect(
         ),
     );
 
-    // Build connection options - must match initial auth options
+    // Build connection options
     let options = ConnectionOptions {
         max_connections: config.max_connections,
         use_encrypt: config.use_encrypt,
         use_compress: config.use_compress,
-        udp_accel: config.udp_accel,
-        bridge_mode: !config.nat_traversal, // Match working client/mod.rs
-        monitor_mode: config.monitor_mode,
+        udp_accel: false,
+        bridge_mode: false,
+        monitor_mode: false,
         qos: config.qos,
     };
 
-    // Log connection mode settings
-    log_msg(
-        callbacks,
-        1,
-        &format!(
-            "[RUST] Client requesting: max_connections={}, half_connection={}",
-            options.max_connections,
-            options.max_connections >= 2
-        ),
-    );
-
     // Build ticket auth pack
-    log_msg(
-        callbacks,
-        1,
-        &format!(
-            "[RUST] Building ticket auth: hub={}, user={}, ticket={:02X?}",
-            config.hub,
-            config.username,
-            &redirect.ticket[..8]
-        ),
-    );
     let auth_pack = AuthPack::new_ticket(
         &config.hub,
         &config.username,
@@ -1007,177 +901,59 @@ async fn connect_redirect(
         .header("Connection", "Keep-Alive")
         .body(auth_pack.to_bytes());
 
-    // Use ORIGINAL server hostname for Host header (like Swift does)
-    // This is important for cluster redirect - server expects original hostname
-    let host = format!("{}:{}", config.server, config.port);
+    let host = format!("{redirect_server}:{redirect_port}");
     let request_bytes = request.build(&host);
 
-    log_msg(
-        callbacks,
-        1,
-        &format!(
-            "[RUST] Sending ticket authentication ({} bytes)",
-            request_bytes.len()
-        ),
-    );
-    
-    // Log first few bytes of the request for debugging
-    let preview_len = std::cmp::min(100, request_bytes.len());
-    let preview: Vec<u8> = request_bytes[..preview_len].to_vec();
-    // Try to show as string if it's HTTP
-    if let Ok(preview_str) = std::str::from_utf8(&preview) {
-        log_msg(
-            callbacks,
-            1,
-            &format!("[RUST] Request preview (string): {}", preview_str.replace('\r', "\\r").replace('\n', "\\n")),
-        );
-    } else {
-        log_msg(
-            callbacks,
-            1,
-            &format!("[RUST] Request preview (hex): {:02X?}", preview),
-        );
-    }
-    
+    log_msg(callbacks, 1, "[RUST] Sending ticket authentication");
     conn.write_all(&request_bytes).await?;
-    conn.flush().await?;
-    log_msg(callbacks, 1, "[RUST] Ticket auth sent and flushed");
 
-    // Don't wait - read immediately (some servers don't like delays)
-    log_msg(callbacks, 1, "[RUST] Preparing to read auth response...");
-
-    // Create buffer
-    let mut buf = vec![0u8; 8192];
-    
-    log_msg(callbacks, 1, "[RUST] About to call async read with 30s timeout...");
-    
-    // Use std::panic::catch_unwind to catch any panics during read
-    log_msg(callbacks, 1, "[RUST] Starting read via timeout...");
-    
-    // Use timeout to prevent hanging forever
-    let read_result = tokio::time::timeout(
-        Duration::from_secs(30),
-        conn.read(&mut buf)
-    ).await;
-    
-    log_msg(callbacks, 1, "[RUST] Read returned from timeout block");
-    
-    let n = match read_result {
-        Ok(Ok(n)) => {
-            log_msg(callbacks, 1, &format!("[RUST] Read succeeded: {} bytes", n));
-            n
-        }
-        Ok(Err(e)) => {
-            log_msg(callbacks, 3, &format!("[RUST] Read IO error: {}", e));
-            log_msg(callbacks, 3, &format!("[RUST] Error kind: {:?}", e.kind()));
-            return Err(crate::error::Error::Io(e));
-        }
-        Err(_) => {
-            log_msg(callbacks, 3, "[RUST] Read timed out after 30 seconds");
-            return Err(crate::error::Error::Timeout);
-        }
-    };
-    
-    if n == 0 {
-        log_msg(callbacks, 3, "[RUST] Connection closed (0 bytes read)");
-        return Err(crate::error::Error::ConnectionFailed(
-            "Connection closed during redirect auth".into(),
-        ));
-    }
-    
-    log_msg(callbacks, 1, &format!("[RUST] Got {} bytes, parsing...", n));
-    
-    // Parse response
+    // Read response
     let mut codec = HttpCodec::new();
-    if let Some(response) = codec.feed(&buf[..n])? {
-        // Check for remaining data after HTTP response
-        let remaining = codec.remaining_len();
-        if remaining > 0 {
-            log_msg(
-                callbacks,
-                2,
-                &format!("[RUST] WARNING: {} bytes remaining after HTTP response!", remaining),
-            );
-            let remaining_preview = codec.take_remaining();
-            let preview_len = std::cmp::min(32, remaining_preview.len());
-            log_msg(
-                callbacks,
-                2,
-                &format!(
-                    "[RUST] Remaining bytes (first {}): {:02X?}",
-                    preview_len,
-                    &remaining_preview[..preview_len]
-                ),
-            );
-        }
-        
-        if response.status_code != 200 {
-            return Err(crate::error::Error::AuthenticationFailed(format!(
-                "Redirect server returned status {}",
-                response.status_code
-            )));
+    let mut buf = vec![0u8; 8192];
+
+    loop {
+        let n = conn.read(&mut buf).await?;
+        if n == 0 {
+            return Err(crate::error::Error::ConnectionFailed(
+                "Connection closed during redirect auth".into(),
+            ));
         }
 
-        if !response.body.is_empty() {
-            let pack = Pack::deserialize(&response.body)?;
-            
-            // Debug: log all keys in response
-            let keys: Vec<_> = pack.keys().collect();
-            log_msg(
-                callbacks,
-                1,
-                &format!("[RUST] Redirect response keys: {:?}", keys),
-            );
-            
-            // Log critical connection mode values from server
-            let server_half_conn = pack.get_int("half_connection").unwrap_or(0);
-            let server_max_conn = pack.get_int("max_connection").unwrap_or(0);
-            let server_direction = pack.get_int("direction").unwrap_or(0);
-            log_msg(
-                callbacks,
-                1,
-                &format!(
-                    "[RUST] Server response: half_connection={}, max_connection={}, direction={}",
-                    server_half_conn, server_max_conn, server_direction
-                ),
-            );
-            
-            let result = AuthResult::from_pack(&pack)?;
-
-            if result.error > 0 {
-                // Log error message if present
-                if let Some(msg) = &result.error_message {
-                    log_msg(
-                        callbacks,
-                        3,
-                        &format!("[RUST] Redirect auth error message: {}", msg),
-                    );
-                }
+        if let Some(response) = codec.feed(&buf[..n])? {
+            if response.status_code != 200 {
                 return Err(crate::error::Error::AuthenticationFailed(format!(
-                    "Redirect auth error: {}",
-                    result.error
+                    "Redirect server returned status {}",
+                    response.status_code
                 )));
             }
 
-            log_msg(
-                callbacks,
-                1,
-                &format!(
-                    "[RUST] Redirect auth success, session key: {} bytes",
-                    result.session_key.len()
-                ),
-            );
-            return Ok((conn, result));
-        } else {
-            return Err(crate::error::Error::ServerError(
-                "Empty redirect auth response".into(),
-            ));
+            if !response.body.is_empty() {
+                let pack = Pack::deserialize(&response.body)?;
+                let result = AuthResult::from_pack(&pack)?;
+
+                if result.error > 0 {
+                    return Err(crate::error::Error::AuthenticationFailed(format!(
+                        "Redirect auth error: {}",
+                        result.error
+                    )));
+                }
+
+                log_msg(
+                    callbacks,
+                    1,
+                    &format!(
+                        "[RUST] Redirect auth success, session key: {} bytes",
+                        result.session_key.len()
+                    ),
+                );
+                return Ok((conn, result));
+            } else {
+                return Err(crate::error::Error::ServerError(
+                    "Empty redirect auth response".into(),
+                ));
+            }
         }
     }
-    
-    Err(crate::error::Error::ServerError(
-        "Incomplete redirect auth response".into(),
-    ))
 }
 
 /// Perform DHCP through the tunnel to get IP configuration
@@ -1204,11 +980,6 @@ async fn perform_dhcp(
 
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
 
-    // Skip pre-DHCP read check - go straight to DHCP
-    // The server may have closed the TLS session, so any read attempt will fail
-    // Swift doesn't do this check either - it just sends DHCP immediately
-    log_msg(callbacks, 1, "[RUST] Skipping pre-DHCP check, sending DHCP immediately...");
-
     // Send DHCP DISCOVER
     let discover = dhcp.build_discover();
     log_msg(
@@ -1219,7 +990,6 @@ async fn perform_dhcp(
     send_frame(conn_mgr, &discover, &mut send_buf, use_compress).await?;
 
     // Wait for OFFER/ACK
-    let mut read_attempts = 0u32;
     loop {
         if std::time::Instant::now() > deadline {
             return Err(crate::error::Error::TimeoutMessage(
@@ -1227,13 +997,6 @@ async fn perform_dhcp(
             ));
         }
 
-        read_attempts += 1;
-        log_msg(
-            callbacks,
-            1,
-            &format!("[RUST] DHCP read attempt {} (state: {:?})", read_attempts, dhcp.state()),
-        );
-        
         match timeout(Duration::from_secs(3), conn_mgr.read_any(&mut buf)).await {
             Ok(Ok((_conn_idx, n))) if n > 0 => {
                 // Decode tunnel frames
@@ -1277,49 +1040,7 @@ async fn perform_dhcp(
                 // Zero bytes - continue
             }
             Ok(Err(e)) => {
-                let err_str = e.to_string();
-                let err_debug = format!("{:?}", e);
-                let err_kind = format!("{:?}", e.kind());
-                log_msg(
-                    callbacks,
-                    2,
-                    &format!("[RUST] Read error during DHCP: {}", e),
-                );
-                log_msg(
-                    callbacks,
-                    2,
-                    &format!("[RUST] Error kind: {}, debug: {}", err_kind, err_debug),
-                );
-                
-                // Try to get the raw error source
-                if let Some(source) = e.get_ref() {
-                    log_msg(
-                        callbacks,
-                        2,
-                        &format!("[RUST] Error source: {:?}", source),
-                    );
-                }
-                
-                // Check for fatal TLS errors that indicate the connection is broken
-                if err_str.contains("InvalidContentType") 
-                    || err_str.contains("corrupt message")
-                    || err_str.contains("AlertReceived")
-                    || err_str.contains("close_notify") 
-                    || err_str.contains("closed") 
-                    || err_str.contains("eof") 
-                    || err_str.contains("ConnectionReset")
-                {
-                    log_msg(
-                        callbacks,
-                        3,
-                        "[RUST] Fatal TLS error - connection is broken",
-                    );
-                    return Err(crate::error::Error::ConnectionClosed(
-                        format!("TLS connection broken during DHCP: {}", e),
-                    ));
-                }
-                // Small delay to avoid tight loop on transient errors
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                log_msg(callbacks, 2, &format!("[RUST] Read error during DHCP: {e}"));
             }
             Err(_) => {
                 // Timeout, retry
@@ -1390,10 +1111,6 @@ async fn send_frame(
         .write_all(&buf[..total_len])
         .await
         .map_err(crate::error::Error::Io)?;
-    conn_mgr
-        .flush()
-        .await
-        .map_err(crate::error::Error::Io)?;
     Ok(())
 }
 
@@ -1455,32 +1172,23 @@ async fn run_packet_loop(
             result = tokio::time::timeout(Duration::from_millis(500), conn_mgr.read_any(&mut read_buf)) => {
                 match result {
                     Ok(Ok((_conn_idx, n))) if n > 0 => {
-                        match tunnel_codec.decode(&read_buf[..n]) {
-                            Ok(frames) => {
-                                if !frames.is_empty() {
-                                    // Build length-prefixed buffer for callback
-                                    let mut buffer = Vec::with_capacity(n + frames.len() * 2);
-                                    for frame in &frames {
-                                        let frame_data: Vec<u8> = if is_compressed(frame) {
-                                            decompress(frame).unwrap_or_else(|_| frame.to_vec())
-                                        } else {
-                                            frame.to_vec()
-                                        };
-                                        // Safety: cap frame length to u16::MAX to prevent overflow
-                                        let len = std::cmp::min(frame_data.len(), u16::MAX as usize) as u16;
-                                        if len as usize != frame_data.len() {
-                                            log_msg(&callbacks, 2, &format!("[RUST] Frame truncated: {} -> {}", frame_data.len(), len));
-                                        }
-                                        buffer.extend_from_slice(&len.to_be_bytes());
-                                        buffer.extend_from_slice(&frame_data[..len as usize]);
-                                    }
-                                    if let Some(cb) = callbacks.on_packets_received {
-                                        cb(callbacks.context, buffer.as_ptr(), buffer.len(), frames.len() as u32);
-                                    }
+                        if let Ok(frames) = tunnel_codec.decode(&read_buf[..n]) {
+                            if !frames.is_empty() {
+                                // Build length-prefixed buffer for callback
+                                let mut buffer = Vec::with_capacity(n + frames.len() * 2);
+                                for frame in &frames {
+                                    let frame_data: Vec<u8> = if is_compressed(frame) {
+                                        decompress(frame).unwrap_or_else(|_| frame.to_vec())
+                                    } else {
+                                        frame.to_vec()
+                                    };
+                                    let len = frame_data.len() as u16;
+                                    buffer.extend_from_slice(&len.to_be_bytes());
+                                    buffer.extend_from_slice(&frame_data);
                                 }
-                            }
-                            Err(e) => {
-                                log_msg(&callbacks, 2, &format!("[RUST] Decode error: {}, bytes: {:02X?}...", e, &read_buf[..std::cmp::min(32, n)]));
+                                if let Some(cb) = callbacks.on_packets_received {
+                                    cb(callbacks.context, buffer.as_ptr(), buffer.len(), frames.len() as u32);
+                                }
                             }
                         }
                     }
@@ -1489,7 +1197,7 @@ async fn run_packet_loop(
                         break;
                     }
                     Ok(Err(e)) => {
-                        log_msg(&callbacks, 3, &format!("[RUST] Read error: {}", e));
+                        log_msg(&callbacks, 3, &format!("[RUST] Read error: {e}"));
                         return Err(crate::error::Error::Io(e));
                     }
                     Err(_) => {} // Timeout - fine, loop to check keepalive
@@ -1526,17 +1234,13 @@ fn parse_length_prefixed_packets(data: &[u8]) -> Vec<Vec<u8>> {
 async fn perform_handshake(
     conn: &mut VpnConnection,
     config: &crate::config::VpnConfig,
-    original_hostname: Option<&str>,
 ) -> crate::error::Result<HelloResponse> {
     let request = HttpRequest::post(SIGNATURE_TARGET)
         .header("Content-Type", CONTENT_TYPE_SIGNATURE)
         .header("Connection", "Keep-Alive")
         .body(VPN_SIGNATURE);
 
-    // Use original hostname if provided (for cluster redirect)
-    // Otherwise use config.server
-    let host_name = original_hostname.unwrap_or(&config.server);
-    let host = format!("{}:{}", host_name, config.port);
+    let host = format!("{}:{}", config.server, config.port);
     let request_bytes = request.build(&host);
 
     conn.write_all(&request_bytes).await?;
@@ -1553,14 +1257,6 @@ async fn perform_handshake(
         }
 
         if let Some(response) = codec.feed(&buf[..n])? {
-            // CRITICAL: Check if there's remaining data after HTTP response
-            // If so, it means the server sent more data that we shouldn't lose
-            // Note: This is rare but could happen with pipelining
-            if codec.remaining_len() > 0 {
-                // In production, we'd want to preserve these bytes
-                // For now, just continue and hope the next read gets the rest
-            }
-            
             if response.status_code != 200 {
                 return Err(crate::error::Error::ServerError(format!(
                     "Server returned status {}",
@@ -1624,10 +1320,43 @@ async fn authenticate(
         use_encrypt: config.use_encrypt,
         use_compress: config.use_compress,
         udp_accel: config.udp_accel,
-        bridge_mode: !config.nat_traversal, // Match working client/mod.rs
+        bridge_mode: false,
         monitor_mode: config.monitor_mode,
         qos: config.qos,
     };
+
+    // Setup UDP acceleration if enabled
+    let udp_accel = if config.udp_accel {
+        log_msg(callbacks, 1, "[RUST] Creating UDP acceleration socket...");
+        match crate::net::UdpAccel::new(None, true, false) {
+            Ok(accel) => {
+                log_msg(
+                    callbacks,
+                    1,
+                    &format!(
+                        "[RUST] UDP accel created: port={}, version={}",
+                        accel.my_port, accel.version
+                    ),
+                );
+                Some(accel)
+            }
+            Err(e) => {
+                log_msg(
+                    callbacks,
+                    2,
+                    &format!("[RUST] Failed to create UDP accel: {e}, continuing without it"),
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Build UDP accel params if we have a socket
+    let udp_accel_params = udp_accel
+        .as_ref()
+        .map(crate::net::UdpAccelAuthParams::from_udp_accel);
 
     log_msg(
         callbacks,
@@ -1657,8 +1386,8 @@ async fn authenticate(
     log_msg(callbacks, 1, "[RUST] Decoding hex password hash");
     let password_hash_bytes: [u8; 20] = hex::decode(&config.password_hash)
         .map_err(|e| {
-            log_msg(callbacks, 3, &format!("[RUST] Hex decode error: {}", e));
-            crate::error::Error::Config(format!("Invalid hex password hash: {}", e))
+            log_msg(callbacks, 3, &format!("[RUST] Hex decode error: {e}"));
+            crate::error::Error::Config(format!("Invalid hex password hash: {e}"))
         })?
         .try_into()
         .map_err(|_| crate::error::Error::Config("Hash decode produced wrong length".into()))?;
@@ -1672,7 +1401,7 @@ async fn authenticate(
         auth_type,
         &hello.random,
         &options,
-        None,
+        udp_accel_params.as_ref(),
     );
 
     let request = HttpRequest::post(VPN_TARGET)
@@ -1699,7 +1428,7 @@ async fn authenticate(
     log_msg(callbacks, 1, "[RUST] Waiting for auth response...");
     loop {
         let n = conn.read(&mut buf).await?;
-        log_msg(callbacks, 1, &format!("[RUST] Received {} bytes", n));
+        log_msg(callbacks, 1, &format!("[RUST] Received {n} bytes"));
         if n == 0 {
             log_msg(callbacks, 3, "[RUST] Connection closed during auth");
             return Err(crate::error::Error::ConnectionFailed(
@@ -1749,6 +1478,35 @@ async fn authenticate(
                     )));
                 }
 
+                // Check if server supports UDP acceleration
+                if config.udp_accel {
+                    // Try to get remote IP for UDP accel parsing
+                    let remote_ip = resolve_server_ip(&config.server)
+                        .map(std::net::IpAddr::V4)
+                        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+
+                    if let Some(udp_response) =
+                        AuthResult::parse_udp_accel_response(&pack, remote_ip)
+                    {
+                        log_msg(
+                            callbacks,
+                            1,
+                            &format!(
+                                "[RUST] Server supports UDP accel: version={}, port={}, encryption={}",
+                                udp_response.version, udp_response.server_port, udp_response.use_encryption
+                            ),
+                        );
+                        // TODO: Initialize UDP accel with server params and integrate with tunnel runner
+                        // For now, we just log that the server supports it
+                    } else {
+                        log_msg(
+                            callbacks,
+                            2,
+                            "[RUST] Server does not support UDP acceleration",
+                        );
+                    }
+                }
+
                 log_msg(
                     callbacks,
                     1,
@@ -1775,7 +1533,7 @@ fn resolve_server_ip(server: &str) -> crate::error::Result<Ipv4Addr> {
     }
 
     use std::net::ToSocketAddrs;
-    let addr_str = format!("{}:443", server);
+    let addr_str = format!("{server}:443");
     match addr_str.to_socket_addrs() {
         Ok(mut addrs) => {
             for addr in addrs.by_ref() {
@@ -1784,13 +1542,11 @@ fn resolve_server_ip(server: &str) -> crate::error::Result<Ipv4Addr> {
                 }
             }
             Err(crate::error::Error::ConnectionFailed(format!(
-                "No IPv4 address found for {}",
-                server
+                "No IPv4 address found for {server}"
             )))
         }
         Err(e) => Err(crate::error::Error::ConnectionFailed(format!(
-            "Failed to resolve {}: {}",
-            server, e
+            "Failed to resolve {server}: {e}"
         ))),
     }
 }
@@ -1933,9 +1689,23 @@ pub unsafe extern "C" fn softether_send_packets(
     if let Some(tx) = &guard.tx_sender {
         match tx.try_send(packet_data) {
             Ok(()) => count,
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                // Queue full, drop packets
-                0
+            Err(mpsc::error::TrySendError::Full(dropped_data)) => {
+                // Queue full - backpressure signal
+                // Count packets in the dropped data for stats
+                let mut dropped_count = 0u64;
+                let mut offset = 0;
+                while offset + 2 <= dropped_data.len() {
+                    let len = u16::from_be_bytes([dropped_data[offset], dropped_data[offset + 1]])
+                        as usize;
+                    dropped_count += 1;
+                    offset += 2 + len;
+                }
+                guard
+                    .stats
+                    .packets_dropped
+                    .fetch_add(dropped_count, Ordering::Relaxed);
+                // Return QueueFull to signal caller should retry/backoff
+                SoftEtherResult::QueueFull as c_int
             }
             Err(mpsc::error::TrySendError::Closed(_)) => SoftEtherResult::NotConnected as c_int,
         }
@@ -2062,6 +1832,7 @@ impl Clone for SoftEtherStats {
             uptime_secs: self.uptime_secs,
             active_connections: self.active_connections,
             reconnect_count: self.reconnect_count,
+            packets_dropped: self.packets_dropped,
         }
     }
 }

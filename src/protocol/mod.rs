@@ -17,5 +17,6 @@ pub use constants::*;
 pub use http::{HttpCodec, HttpRequest, HttpResponse};
 pub use pack::{Pack, PackValue};
 pub use tunnel::{
-    compress, decompress, decompress_into, is_compressed, TunnelCodec, TunnelConstants, TunnelFrame,
+    compress, compress_into, decompress, decompress_into, is_compressed, TunnelCodec,
+    TunnelConstants, TunnelFrame,
 };

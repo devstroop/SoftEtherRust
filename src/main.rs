@@ -103,8 +103,8 @@ fn init_logging(verbose: bool, debug: bool) {
 
     // Filter out wintun's "Element not found" errors which are expected
     // when checking for existing adapters
-    let filter = EnvFilter::try_new(format!("{},wintun=off", level))
-        .unwrap_or_else(|_| EnvFilter::new(level));
+    let filter =
+        EnvFilter::try_new(format!("{level},wintun=off")).unwrap_or_else(|_| EnvFilter::new(level));
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -179,11 +179,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let hash = crypto::hash_password(&password, &username);
             let hash_hex = hex::encode(hash);
 
-            println!("Password hash for user '{}':", username);
-            println!("{}", hash_hex);
+            println!("Password hash for user '{username}':");
+            println!("{hash_hex}");
             println!();
             println!("Add this to your config.json:");
-            println!("  \"password_hash\": \"{}\"", hash_hex);
+            println!("  \"password_hash\": \"{hash_hex}\"");
         }
 
         Commands::Connect {
@@ -213,7 +213,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(h) = password_hash {
                     // Validate it's valid hex
                     let bytes = hex::decode(&h).map_err(|e| {
-                        format!("Invalid password hash (must be 40 hex chars): {}", e)
+                        format!("Invalid password hash (must be 40 hex chars): {e}")
                     })?;
                     if bytes.len() != 20 {
                         return Err(format!(
@@ -238,7 +238,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 )?;
                 // Validate it's valid hex
                 let password_hash_bytes = hex::decode(&password_hash_str)
-                    .map_err(|e| format!("Invalid password hash (must be 40 hex chars): {}", e))?;
+                    .map_err(|e| format!("Invalid password hash (must be 40 hex chars): {e}"))?;
                 if password_hash_bytes.len() != 20 {
                     return Err(format!(
                         "Password hash must be 20 bytes (40 hex chars), got {} bytes",
@@ -302,7 +302,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
             let json = serde_json::to_string_pretty(&sample_config)?;
             std::fs::write(&output, json)?;
-            println!("Sample configuration written to {:?}", output);
+            println!("Sample configuration written to {output:?}");
             println!();
             println!("To generate your password hash, run:");
             println!("  vpnclient hash -u your_username -p your_password");

@@ -45,5 +45,9 @@ pub const MAX_RECV_BLOCKS: usize = 512;
 /// Keepalive magic number.
 pub const KEEPALIVE_MAGIC: u32 = 0xFFFFFFFF;
 
+/// UDP NAT-T port signature embedded in keepalive padding.
+/// Format: [signature][port:u16 BE] at start of padding data.
+pub const UDP_NAT_T_PORT_SIGNATURE: &[u8] = b"NATT_MY_PORT";
+
 /// Connection signature.
 pub const VPN_SIGNATURE: &[u8] = b"VPNCONNECT";

@@ -47,6 +47,17 @@ pub struct VpnConfig {
     /// Most SoftEther servers use self-signed certificates.
     pub skip_tls_verify: bool,
 
+    /// Custom CA certificate in PEM format (optional).
+    /// When set, this CA is used to verify the server certificate instead of system roots.
+    #[serde(default)]
+    pub custom_ca_pem: Option<String>,
+
+    /// Server certificate SHA-256 fingerprint for pinning (optional).
+    /// Format: hex-encoded 64 characters (e.g., "a1b2c3...").
+    /// When set, the server certificate must match this fingerprint exactly.
+    #[serde(default)]
+    pub cert_fingerprint_sha256: Option<String>,
+
     // ─────────────────────────────────────────────────────────────────────────
     // Tunnel Features
     // ─────────────────────────────────────────────────────────────────────────
@@ -177,6 +188,8 @@ impl Default for VpnConfig {
             password_hash: String::new(),
             // TLS
             skip_tls_verify: true, // SoftEther often uses self-signed certs
+            custom_ca_pem: None,
+            cert_fingerprint_sha256: None,
             // Tunnel Features
             use_encrypt: true,
             use_compress: false,
@@ -209,27 +222,27 @@ impl VpnConfig {
     /// Load configuration from a JSON file.
     pub fn from_file<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
         let content = std::fs::read_to_string(path)
-            .map_err(|e| crate::Error::Config(format!("Failed to read config file: {}", e)))?;
+            .map_err(|e| crate::Error::Config(format!("Failed to read config file: {e}")))?;
         Self::from_json(&content)
     }
 
     /// Parse configuration from JSON string.
     pub fn from_json(json: &str) -> crate::Result<Self> {
         serde_json::from_str(json)
-            .map_err(|e| crate::Error::Config(format!("Failed to parse config JSON: {}", e)))
+            .map_err(|e| crate::Error::Config(format!("Failed to parse config JSON: {e}")))
     }
 
     /// Serialize configuration to JSON.
     pub fn to_json(&self) -> crate::Result<String> {
         serde_json::to_string_pretty(self)
-            .map_err(|e| crate::Error::Config(format!("Failed to serialize config: {}", e)))
+            .map_err(|e| crate::Error::Config(format!("Failed to serialize config: {e}")))
     }
 
     /// Save configuration to a JSON file.
     pub fn to_file<P: AsRef<Path>>(&self, path: P) -> crate::Result<()> {
         let json = self.to_json()?;
         std::fs::write(path, json)
-            .map_err(|e| crate::Error::Config(format!("Failed to write config file: {}", e)))
+            .map_err(|e| crate::Error::Config(format!("Failed to write config file: {e}")))
     }
 
     /// Get the connection timeout as a Duration.

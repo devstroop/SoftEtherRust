@@ -27,6 +27,8 @@ pub enum SoftEtherResult {
     IoError = -7,
     /// Already connected.
     AlreadyConnected = -8,
+    /// Queue full - backpressure, caller should retry.
+    QueueFull = -9,
     /// Internal error.
     InternalError = -99,
 }
@@ -62,6 +64,12 @@ pub struct SoftEtherConfig {
     // TLS Settings
     /// Skip TLS certificate verification (1 = true, 0 = false).
     pub skip_tls_verify: c_int,
+    /// Custom CA certificate in PEM format (null-terminated UTF-8, can be null).
+    /// When set, this CA is used to verify the server certificate.
+    pub custom_ca_pem: *const c_char,
+    /// Server certificate SHA-256 fingerprint for pinning (null-terminated UTF-8, can be null).
+    /// Format: 64 hex characters (e.g., "a1b2c3d4...").
+    pub cert_fingerprint_sha256: *const c_char,
 
     // Connection Settings
     /// Maximum TCP connections (1-32).
@@ -158,6 +166,8 @@ pub struct SoftEtherStats {
     pub active_connections: c_uint,
     /// Number of reconnections.
     pub reconnect_count: c_uint,
+    /// Packets dropped due to queue full (backpressure).
+    pub packets_dropped: u64,
 }
 
 /// Opaque handle to a SoftEther client instance.

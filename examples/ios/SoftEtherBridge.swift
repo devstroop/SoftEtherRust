@@ -43,6 +43,8 @@ public class SoftEtherBridge {
         public let connectedServerIP: String
         public let serverVersion: UInt32
         public let serverBuild: UInt32
+        public let macAddress: [UInt8]
+        public let gatewayMac: [UInt8]
         
         public var ipAddressString: String {
             formatIPv4(ipAddress)
@@ -61,6 +63,14 @@ public class SoftEtherBridge {
             if dns1 != 0 { servers.append(formatIPv4(dns1)) }
             if dns2 != 0 { servers.append(formatIPv4(dns2)) }
             return servers
+        }
+        
+        public var macAddressString: String {
+            macAddress.map { String(format: "%02x", $0) }.joined(separator: ":")
+        }
+        
+        public var gatewayMacString: String {
+            gatewayMac.map { String(format: "%02x", $0) }.joined(separator: ":")
         }
         
         private func formatIPv4(_ ip: UInt32) -> String {
@@ -88,11 +98,34 @@ public class SoftEtherBridge {
         public let hub: String
         public let username: String
         public let passwordHash: String
-        public let useTLS: Bool
+        
+        // TLS Settings
+        public let skipTlsVerify: Bool
+        /// Custom CA certificate in PEM format for server verification.
+        public let customCaPem: String?
+        /// Server certificate SHA-256 fingerprint for pinning (64 hex chars).
+        public let certFingerprintSha256: String?
+        
+        // Connection Settings
         public let maxConnections: UInt8
+        public let timeoutSeconds: UInt32
+        public let mtu: UInt32
+        
+        // Protocol Features
+        public let useEncrypt: Bool
         public let useCompress: Bool
-        public let connectTimeoutSecs: UInt32
-        public let keepaliveIntervalSecs: UInt32
+        public let udpAccel: Bool
+        public let qos: Bool
+        
+        // Session Mode
+        public let natTraversal: Bool
+        public let monitorMode: Bool
+        
+        // Routing
+        public let defaultRoute: Bool
+        public let acceptPushedRoutes: Bool
+        public let ipv4Include: String?
+        public let ipv4Exclude: String?
         
         public init(
             server: String,
@@ -100,22 +133,44 @@ public class SoftEtherBridge {
             hub: String,
             username: String,
             passwordHash: String,
-            useTLS: Bool = true,
+            skipTlsVerify: Bool = false,
+            customCaPem: String? = nil,
+            certFingerprintSha256: String? = nil,
             maxConnections: UInt8 = 1,
+            timeoutSeconds: UInt32 = 30,
+            mtu: UInt32 = 1400,
+            useEncrypt: Bool = true,
             useCompress: Bool = false,
-            connectTimeoutSecs: UInt32 = 30,
-            keepaliveIntervalSecs: UInt32 = 5
+            udpAccel: Bool = false,
+            qos: Bool = false,
+            natTraversal: Bool = true,
+            monitorMode: Bool = false,
+            defaultRoute: Bool = true,
+            acceptPushedRoutes: Bool = true,
+            ipv4Include: String? = nil,
+            ipv4Exclude: String? = nil
         ) {
             self.server = server
             self.port = port
             self.hub = hub
             self.username = username
             self.passwordHash = passwordHash
-            self.useTLS = useTLS
+            self.skipTlsVerify = skipTlsVerify
+            self.customCaPem = customCaPem
+            self.certFingerprintSha256 = certFingerprintSha256
             self.maxConnections = maxConnections
+            self.timeoutSeconds = timeoutSeconds
+            self.mtu = mtu
+            self.useEncrypt = useEncrypt
             self.useCompress = useCompress
-            self.connectTimeoutSecs = connectTimeoutSecs
-            self.keepaliveIntervalSecs = keepaliveIntervalSecs
+            self.udpAccel = udpAccel
+            self.qos = qos
+            self.natTraversal = natTraversal
+            self.monitorMode = monitorMode
+            self.defaultRoute = defaultRoute
+            self.acceptPushedRoutes = acceptPushedRoutes
+            self.ipv4Include = ipv4Include
+            self.ipv4Exclude = ipv4Exclude
         }
     }
     
@@ -125,6 +180,15 @@ public class SoftEtherBridge {
     public var onConnected: ((Session) -> Void)?
     public var onDisconnected: ((Error?) -> Void)?
     public var onPacketsReceived: (([Data]) -> Void)?
+    public var onLog: ((LogLevel, String) -> Void)?
+    
+    public enum LogLevel: Int {
+        case error = 0
+        case warn = 1
+        case info = 2
+        case debug = 3
+        case trace = 4
+    }
     
     // MARK: - Private
     
@@ -161,12 +225,20 @@ public class SoftEtherBridge {
         let hubCString = config.hub.withCString { strdup($0) }!
         let usernameCString = config.username.withCString { strdup($0) }!
         let passwordHashCString = config.passwordHash.withCString { strdup($0) }!
+        let ipv4IncludeCString = config.ipv4Include?.withCString { strdup($0) }
+        let ipv4ExcludeCString = config.ipv4Exclude?.withCString { strdup($0) }
+        let customCaPemCString = config.customCaPem?.withCString { strdup($0) }
+        let certFingerprintCString = config.certFingerprintSha256?.withCString { strdup($0) }
         
         defer {
             free(serverCString)
             free(hubCString)
             free(usernameCString)
             free(passwordHashCString)
+            if let ptr = ipv4IncludeCString { free(ptr) }
+            if let ptr = ipv4ExcludeCString { free(ptr) }
+            if let ptr = customCaPemCString { free(ptr) }
+            if let ptr = certFingerprintCString { free(ptr) }
         }
         
         cConfig.server = UnsafePointer(serverCString)
@@ -174,11 +246,32 @@ public class SoftEtherBridge {
         cConfig.hub = UnsafePointer(hubCString)
         cConfig.username = UnsafePointer(usernameCString)
         cConfig.password_hash = UnsafePointer(passwordHashCString)
-        cConfig.use_tls = config.useTLS ? 1 : 0
+        
+        // TLS Settings
+        cConfig.skip_tls_verify = config.skipTlsVerify ? 1 : 0
+        cConfig.custom_ca_pem = customCaPemCString.map { UnsafePointer($0) }
+        cConfig.cert_fingerprint_sha256 = certFingerprintCString.map { UnsafePointer($0) }
+        
+        // Connection Settings
         cConfig.max_connections = UInt32(config.maxConnections)
+        cConfig.timeout_seconds = config.timeoutSeconds
+        cConfig.mtu = config.mtu
+        
+        // Protocol Features
+        cConfig.use_encrypt = config.useEncrypt ? 1 : 0
         cConfig.use_compress = config.useCompress ? 1 : 0
-        cConfig.connect_timeout_secs = config.connectTimeoutSecs
-        cConfig.keepalive_interval_secs = config.keepaliveIntervalSecs
+        cConfig.udp_accel = config.udpAccel ? 1 : 0
+        cConfig.qos = config.qos ? 1 : 0
+        
+        // Session Mode
+        cConfig.nat_traversal = config.natTraversal ? 1 : 0
+        cConfig.monitor_mode = config.monitorMode ? 1 : 0
+        
+        // Routing
+        cConfig.default_route = config.defaultRoute ? 1 : 0
+        cConfig.accept_pushed_routes = config.acceptPushedRoutes ? 1 : 0
+        cConfig.ipv4_include = ipv4IncludeCString.map { UnsafePointer($0) }
+        cConfig.ipv4_exclude = ipv4ExcludeCString.map { UnsafePointer($0) }
         
         // Create C callbacks
         var cCallbacks = SoftEtherCallbacks()
@@ -187,6 +280,7 @@ public class SoftEtherBridge {
         cCallbacks.on_connected = connectedCallback
         cCallbacks.on_disconnected = disconnectedCallback
         cCallbacks.on_packets_received = packetsReceivedCallback
+        cCallbacks.on_log = logCallback
         
         // Create client
         handle = softether_create(&cConfig, &cCallbacks)
@@ -236,7 +330,11 @@ public class SoftEtherBridge {
                 }
             },
             serverVersion: cSession.server_version,
-            serverBuild: cSession.server_build
+            serverBuild: cSession.server_build,
+            macAddress: Array(withUnsafeBytes(of: cSession.mac_address) { Array($0) }),
+            gatewayMac: Array(withUnsafeBytes(of: cSession.gateway_mac) { Array($0) })
+        )
+    }
         )
     }
     
@@ -258,6 +356,7 @@ public class SoftEtherBridge {
     
     /// Send packets to VPN server.
     /// Each packet should be a complete Ethernet frame (L2).
+    /// Throws `queueFull` if backpressure is detected - caller should retry.
     public func sendPackets(_ packets: [Data]) throws {
         guard !packets.isEmpty else { return }
         
@@ -286,7 +385,9 @@ public class SoftEtherBridge {
             )
         }
         
-        if result < 0 {
+        if result == Int32(SOFTETHER_QUEUE_FULL.rawValue) {
+            throw BridgeError.queueFull
+        } else if result < 0 {
             throw BridgeError.sendFailed(code: Int(result))
         }
     }
@@ -338,7 +439,9 @@ private func connectedCallback(context: UnsafeMutableRawPointer?, session: Unsaf
             }
         },
         serverVersion: s.server_version,
-        serverBuild: s.server_build
+        serverBuild: s.server_build,
+        macAddress: Array(withUnsafeBytes(of: s.mac_address) { Array($0) }),
+        gatewayMac: Array(withUnsafeBytes(of: s.gateway_mac) { Array($0) })
     )
     
     ctx.bridge?.onConnected?(swiftSession)
@@ -382,6 +485,15 @@ private func packetsReceivedCallback(
     ctx.bridge?.onPacketsReceived?(parsedPackets)
 }
 
+private func logCallback(context: UnsafeMutableRawPointer?, level: Int32, message: UnsafePointer<CChar>?) {
+    guard let context = context, let message = message else { return }
+    let ctx = Unmanaged<CallbackContext>.fromOpaque(context).takeUnretainedValue()
+    
+    let logLevel = SoftEtherBridge.LogLevel(rawValue: Int(level)) ?? .info
+    let logMessage = String(cString: message)
+    ctx.bridge?.onLog?(logLevel, logMessage)
+}
+
 // MARK: - Errors
 
 public enum BridgeError: Error {
@@ -390,4 +502,5 @@ public enum BridgeError: Error {
     case connectFailed(code: Int)
     case sendFailed(code: Int)
     case disconnected(code: Int)
+    case queueFull  // Backpressure - caller should retry
 }

@@ -74,7 +74,7 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
     let mut decompressed = Vec::with_capacity(data.len() * 2);
     decoder
         .read_to_end(&mut decompressed)
-        .map_err(|e| Error::Protocol(format!("Decompression failed: {}", e)))?;
+        .map_err(|e| Error::Protocol(format!("Decompression failed: {e}")))?;
     Ok(decompressed)
 }
 
@@ -86,19 +86,36 @@ pub fn decompress_into(data: &[u8], buffer: &mut [u8]) -> Result<usize> {
     let mut decoder = ZlibDecoder::new(data);
     let mut cursor = Cursor::new(buffer);
     std::io::copy(&mut decoder, &mut cursor)
-        .map_err(|e| Error::Protocol(format!("Decompression failed: {}", e)))?;
+        .map_err(|e| Error::Protocol(format!("Decompression failed: {e}")))?;
     Ok(cursor.position() as usize)
 }
 
 /// Compress data with zlib.
 pub fn compress(data: &[u8]) -> Result<Vec<u8>> {
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    // Use fast compression for low latency - optimal for real-time VPN traffic
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
     encoder
         .write_all(data)
-        .map_err(|e| Error::Protocol(format!("Compression failed: {}", e)))?;
+        .map_err(|e| Error::Protocol(format!("Compression failed: {e}")))?;
     encoder
         .finish()
-        .map_err(|e| Error::Protocol(format!("Compression finish failed: {}", e)))
+        .map_err(|e| Error::Protocol(format!("Compression finish failed: {e}")))
+}
+
+/// Compress data into a pre-allocated buffer (zero-allocation hot path).
+/// Returns the number of bytes written to the output buffer.
+/// If the output buffer is too small, returns an error.
+pub fn compress_into(data: &[u8], output: &mut [u8]) -> Result<usize> {
+    use std::io::Cursor;
+    let cursor = Cursor::new(output);
+    let mut encoder = ZlibEncoder::new(cursor, Compression::fast());
+    encoder
+        .write_all(data)
+        .map_err(|e| Error::Protocol(format!("Compression failed: {e}")))?;
+    let cursor = encoder
+        .finish()
+        .map_err(|e| Error::Protocol(format!("Compression finish failed: {e}")))?;
+    Ok(cursor.position() as usize)
 }
 
 /// Tunnel frame type.
@@ -273,7 +290,7 @@ impl TunnelCodec {
                         frames.push(TunnelFrame::Data(Vec::new()));
                         continue;
                     } else if header as usize > TunnelConstants::MAX_BLOCKS {
-                        return Err(Error::protocol(format!("Too many blocks: {}", header)));
+                        return Err(Error::protocol(format!("Too many blocks: {header}")));
                     } else {
                         // Data frame
                         self.remaining_blocks = header as usize;
@@ -298,10 +315,7 @@ impl TunnelCodec {
                         }
 
                         if block_size > TunnelConstants::MAX_PACKET_SIZE * 2 {
-                            return Err(Error::protocol(format!(
-                                "Packet too large: {}",
-                                block_size
-                            )));
+                            return Err(Error::protocol(format!("Packet too large: {block_size}")));
                         }
 
                         if self.buffer.remaining() < 4 + block_size {
@@ -519,6 +533,55 @@ impl TunnelCodec {
         Some(&buffer[..total_size])
     }
 
+    /// Encode a keep-alive packet with NAT-T port signaling.
+    ///
+    /// Embeds the UDP acceleration port in the keepalive padding so the server
+    /// can discover the client's NAT-mapped UDP port.
+    ///
+    /// # Arguments
+    /// * `udp_port` - Local UDP port for acceleration (None = no signaling)
+    /// * `buffer` - Pre-allocated buffer (at least 8 + signature + 2 + padding)
+    #[inline]
+    pub fn encode_keepalive_with_nat_t(udp_port: Option<u16>, buffer: &mut [u8]) -> Option<&[u8]> {
+        use crate::protocol::constants::UDP_NAT_T_PORT_SIGNATURE;
+
+        // Calculate sizes
+        let signature_len = UDP_NAT_T_PORT_SIGNATURE.len();
+        let port_len = 2; // u16
+        let base_padding = 32; // Minimum random padding
+        let total_padding = if udp_port.is_some() {
+            signature_len + port_len + base_padding
+        } else {
+            base_padding
+        };
+        let total_size = 8 + total_padding;
+
+        if buffer.len() < total_size {
+            return None;
+        }
+
+        // KEEP_ALIVE_MAGIC
+        buffer[0..4].copy_from_slice(&TunnelConstants::KEEPALIVE_MAGIC.to_be_bytes());
+
+        // Padding size
+        buffer[4..8].copy_from_slice(&(total_padding as u32).to_be_bytes());
+
+        let mut offset = 8;
+
+        // Embed NAT-T port signature if UDP acceleration is active
+        if let Some(port) = udp_port {
+            buffer[offset..offset + signature_len].copy_from_slice(UDP_NAT_T_PORT_SIGNATURE);
+            offset += signature_len;
+            buffer[offset..offset + port_len].copy_from_slice(&port.to_be_bytes());
+            offset += port_len;
+        }
+
+        // Fill remaining with random padding
+        crate::crypto::fill_random(&mut buffer[offset..8 + total_padding]);
+
+        Some(&buffer[..total_size])
+    }
+
     /// Decode blocks from a buffer without allocation.
     ///
     /// Uses a callback to process each block, avoiding the need to collect into a Vec.
@@ -556,7 +619,7 @@ impl TunnelCodec {
                     } else if header == 0 {
                         continue;
                     } else if header as usize > TunnelConstants::MAX_BLOCKS {
-                        return Err(Error::protocol(format!("Too many blocks: {}", header)));
+                        return Err(Error::protocol(format!("Too many blocks: {header}")));
                     } else {
                         self.remaining_blocks = header as usize;
                         self.state = DecodeState::DataBlocks;
@@ -578,10 +641,7 @@ impl TunnelCodec {
                         }
 
                         if block_size > TunnelConstants::MAX_PACKET_SIZE * 2 {
-                            return Err(Error::protocol(format!(
-                                "Packet too large: {}",
-                                block_size
-                            )));
+                            return Err(Error::protocol(format!("Packet too large: {block_size}")));
                         }
 
                         if self.buffer.remaining() < 4 + block_size {

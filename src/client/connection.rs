@@ -8,15 +8,16 @@ use std::time::Duration;
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 
+use ring::digest::{digest, SHA256};
 use rustls;
-use socket2::{Domain, Protocol, SockRef, Socket, TcpKeepalive, Type};
+use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::config::VpnConfig;
 use crate::error::{Error, Result};
@@ -81,6 +82,171 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for NoVerifier {
     }
 }
 
+/// Certificate fingerprint verifier for pinning.
+/// Validates that the server certificate matches an expected SHA-256 fingerprint.
+#[derive(Debug)]
+struct FingerprintVerifier {
+    expected_fingerprint: [u8; 32],
+}
+
+impl FingerprintVerifier {
+    /// Create a new fingerprint verifier from a hex-encoded SHA-256 fingerprint.
+    fn from_hex(hex: &str) -> Option<Self> {
+        let hex = hex.replace([':', ' '], ""); // Allow colons or spaces in fingerprint
+        if hex.len() != 64 {
+            return None;
+        }
+        let mut fingerprint = [0u8; 32];
+        for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+            let s = std::str::from_utf8(chunk).ok()?;
+            fingerprint[i] = u8::from_str_radix(s, 16).ok()?;
+        }
+        Some(Self {
+            expected_fingerprint: fingerprint,
+        })
+    }
+}
+
+impl tokio_rustls::rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[tokio_rustls::rustls::pki_types::CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: tokio_rustls::rustls::pki_types::UnixTime,
+    ) -> std::result::Result<
+        tokio_rustls::rustls::client::danger::ServerCertVerified,
+        tokio_rustls::rustls::Error,
+    > {
+        // Compute SHA-256 of the certificate
+        let actual_fingerprint = digest(&SHA256, end_entity.as_ref());
+        let actual_bytes = actual_fingerprint.as_ref();
+
+        if actual_bytes == &self.expected_fingerprint[..] {
+            debug!("Certificate fingerprint verified");
+            Ok(tokio_rustls::rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            let actual_hex: String = actual_bytes.iter().map(|b| format!("{b:02x}")).collect();
+            let expected_hex: String = self
+                .expected_fingerprint
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            warn!(
+                "Certificate fingerprint mismatch! Expected: {}, Got: {}",
+                expected_hex, actual_hex
+            );
+            Err(tokio_rustls::rustls::Error::InvalidCertificate(
+                tokio_rustls::rustls::CertificateError::BadSignature,
+            ))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _dss: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> std::result::Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
+        // We trust the certificate based on fingerprint, so signatures are assumed valid
+        Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _dss: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> std::result::Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
+        Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<tokio_rustls::rustls::SignatureScheme> {
+        vec![
+            tokio_rustls::rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            tokio_rustls::rustls::SignatureScheme::RSA_PKCS1_SHA384,
+            tokio_rustls::rustls::SignatureScheme::RSA_PKCS1_SHA512,
+            tokio_rustls::rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            tokio_rustls::rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            tokio_rustls::rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+            tokio_rustls::rustls::SignatureScheme::RSA_PSS_SHA256,
+            tokio_rustls::rustls::SignatureScheme::RSA_PSS_SHA384,
+            tokio_rustls::rustls::SignatureScheme::RSA_PSS_SHA512,
+            tokio_rustls::rustls::SignatureScheme::ED25519,
+        ]
+    }
+}
+
+/// Build TLS client configuration based on VpnConfig settings.
+fn build_tls_config(config: &VpnConfig) -> Result<ClientConfig> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+
+    // Priority: fingerprint pinning > custom CA > skip verify > system roots
+    if let Some(ref fingerprint) = config.cert_fingerprint_sha256 {
+        // Certificate fingerprint pinning
+        let verifier = FingerprintVerifier::from_hex(fingerprint).ok_or_else(|| {
+            Error::Tls(format!(
+                "Invalid certificate fingerprint: {fingerprint} (expected 64 hex chars)"
+            ))
+        })?;
+        debug!("Using certificate fingerprint pinning");
+        Ok(ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(verifier))
+            .with_no_client_auth())
+    } else if let Some(ref ca_pem) = config.custom_ca_pem {
+        // Custom CA certificate
+        let mut root_store = RootCertStore::empty();
+        let certs = rustls_pemfile::certs(&mut ca_pem.as_bytes())
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>();
+        if certs.is_empty() {
+            return Err(Error::Tls(
+                "No valid certificates found in custom_ca_pem".to_string(),
+            ));
+        }
+        for cert in certs {
+            root_store
+                .add(cert)
+                .map_err(|e| Error::Tls(format!("Failed to add custom CA certificate: {e}")))?;
+        }
+        debug!("Using custom CA certificate for verification");
+        Ok(ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(root_store)
+            .with_no_client_auth())
+    } else if config.skip_tls_verify {
+        // Accept any certificate (needed for self-signed certs)
+        debug!("TLS verification disabled (skip_tls_verify=true)");
+        Ok(ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoVerifier))
+            .with_no_client_auth())
+    } else {
+        // Use system root certificates
+        debug!("Using system root certificates for verification");
+        let root_store = RootCertStore::empty();
+        // In production, you'd load system certs here
+        Ok(ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(root_store)
+            .with_no_client_auth())
+    }
+}
+
 /// VPN connection wrapper that handles both plain and TLS connections.
 pub enum VpnConnection {
     /// Plain TCP connection.
@@ -97,9 +263,9 @@ impl VpnConnection {
         // Resolve address
         let socket_addr = addr
             .to_socket_addrs()
-            .map_err(|e| Error::ConnectionFailed(format!("Failed to resolve {}: {}", addr, e)))?
+            .map_err(|e| Error::ConnectionFailed(format!("Failed to resolve {addr}: {e}")))?
             .next()
-            .ok_or_else(|| Error::ConnectionFailed(format!("No addresses found for {}", addr)))?;
+            .ok_or_else(|| Error::ConnectionFailed(format!("No addresses found for {addr}")))?;
 
         debug!("Connecting to {}", socket_addr);
 
@@ -108,7 +274,7 @@ impl VpnConnection {
         let stream = tokio::time::timeout(timeout, TcpStream::connect(socket_addr))
             .await
             .map_err(|_| Error::Timeout)?
-            .map_err(|e| Error::ConnectionFailed(format!("TCP connect failed: {}", e)))?;
+            .map_err(|e| Error::ConnectionFailed(format!("TCP connect failed: {e}")))?;
 
         // Set TCP options
         stream.set_nodelay(true)?;
@@ -125,46 +291,20 @@ impl VpnConnection {
             debug!("TCP keepalive enabled (time=10s, interval=5s)");
         }
 
-        // SoftEther always uses TLS/HTTPS
-        // Get the ring crypto provider
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-
-        // Build TLS config - Force TLS 1.3 only (like Swift's NWProtocolTLS)
-        let tls_versions: &[&rustls::SupportedProtocolVersion] = &[&rustls::version::TLS13];
-        
-        let tls_config = if config.skip_tls_verify {
-            // Accept any certificate (needed for self-signed certs)
-            ClientConfig::builder_with_provider(provider)
-                .with_protocol_versions(&tls_versions)
-                .unwrap()
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(NoVerifier))
-                .with_no_client_auth()
-        } else {
-            // Use system root certificates
-            let root_store = RootCertStore::empty();
-            // In production, you'd load system certs here
-            ClientConfig::builder_with_provider(provider)
-                .with_protocol_versions(&tls_versions)
-                .unwrap()
-                .with_root_certificates(root_store)
-                .with_no_client_auth()
-        };
+        // SoftEther always uses TLS/HTTPS - build TLS config based on settings
+        let tls_config = build_tls_config(config)?;
 
         let connector = TlsConnector::from(Arc::new(tls_config));
 
-        // Determine SNI hostname: use sni_hostname if provided, otherwise server
-        // This is important for cluster redirect where we connect to IP but need original hostname for TLS
-        let sni_name = config.sni_hostname.as_ref().unwrap_or(&config.server);
-        
-        let server_name = if sni_name.parse::<std::net::IpAddr>().is_ok() {
-            // SNI name is also an IP, use placeholder
+        // Handle both hostname and IP address for SNI
+        let server_name = if config.server.parse::<std::net::IpAddr>().is_ok() {
+            // For IP addresses, use a dummy hostname for SNI
+            // SoftEther servers typically accept any SNI or no SNI for IP connections
             ServerName::try_from("softether")
                 .map_err(|_| Error::Tls("Failed to create server name".to_string()))?
         } else {
-            // Use the hostname for SNI
-            ServerName::try_from(sni_name.clone())
-                .map_err(|_| Error::Tls(format!("Invalid server name: {}", sni_name)))?
+            ServerName::try_from(config.server.clone())
+                .map_err(|_| Error::Tls(format!("Invalid server name: {}", config.server)))?
         };
 
         debug!("TLS connecting with SNI: {:?}", server_name);
@@ -172,7 +312,7 @@ impl VpnConnection {
         let tls_stream = connector
             .connect(server_name, stream)
             .await
-            .map_err(|e| Error::Tls(format!("TLS handshake failed: {}", e)))?;
+            .map_err(|e| Error::Tls(format!("TLS handshake failed: {e}")))?;
 
         info!("TLS connection established");
         Ok(VpnConnection::Tls(Box::new(tls_stream)))
@@ -181,7 +321,6 @@ impl VpnConnection {
     /// Connect to the VPN server with socket protection callback.
     /// The protect_socket callback is called with the raw socket fd before TLS handshake.
     /// On Android, this should call VpnService.protect() to exclude the socket from VPN routing.
-    /// On iOS, we set SO_NET_SERVICE_TYPE to NET_SERVICE_TYPE_VPN to mark the socket as VPN control.
     #[cfg(unix)]
     pub async fn connect_with_protect<F>(config: &VpnConfig, protect_socket: F) -> Result<Self>
     where
@@ -192,36 +331,33 @@ impl VpnConnection {
         // Resolve address
         let socket_addr = addr
             .to_socket_addrs()
-            .map_err(|e| Error::ConnectionFailed(format!("Failed to resolve {}: {}", addr, e)))?
+            .map_err(|e| Error::ConnectionFailed(format!("Failed to resolve {addr}: {e}")))?
             .next()
-            .ok_or_else(|| Error::ConnectionFailed(format!("No addresses found for {}", addr)))?;
+            .ok_or_else(|| Error::ConnectionFailed(format!("No addresses found for {addr}")))?;
 
         debug!("Connecting to {} (with socket protection)", socket_addr);
 
-        // Determine socket domain based on address type
-        let domain = if socket_addr.is_ipv4() {
-            Domain::IPV4
-        } else {
-            Domain::IPV6
-        };
+        // Connect with timeout
+        let timeout = Duration::from_secs(config.timeout_seconds);
+        let stream = tokio::time::timeout(timeout, TcpStream::connect(socket_addr))
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(|e| Error::ConnectionFailed(format!("TCP connect failed: {e}")))?;
 
-        // Create socket with socket2 for better control
-        let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))
-            .map_err(|e| Error::ConnectionFailed(format!("Failed to create socket: {}", e)))?;
+        // CRITICAL: Protect the socket BEFORE TLS and BEFORE VPN tunnel is established
+        let fd = stream.as_raw_fd();
 
         // Apple platforms (iOS/macOS): Set SO_NET_SERVICE_TYPE to NET_SERVICE_TYPE_VPN
         // This marks the socket as VPN control traffic, which should bypass the VPN tunnel
         // in Network Extension context.
         #[cfg(target_vendor = "apple")]
         {
-            // SO_NET_SERVICE_TYPE = 0x1016 (4118 decimal)
-            // NET_SERVICE_TYPE_VPN = 6
             const SO_NET_SERVICE_TYPE: libc::c_int = 0x1016;
             const NET_SERVICE_TYPE_VPN: libc::c_int = 6;
             
             let result = unsafe {
                 libc::setsockopt(
-                    socket.as_raw_fd(),
+                    fd,
                     libc::SOL_SOCKET,
                     SO_NET_SERVICE_TYPE,
                     &NET_SERVICE_TYPE_VPN as *const libc::c_int as *const libc::c_void,
@@ -229,56 +365,12 @@ impl VpnConnection {
                 )
             };
             if result == 0 {
-                info!("Apple: Set SO_NET_SERVICE_TYPE to NET_SERVICE_TYPE_VPN (6) on fd {}", socket.as_raw_fd());
+                info!("Apple: Set SO_NET_SERVICE_TYPE to NET_SERVICE_TYPE_VPN (6) on fd {fd}");
             } else {
-                info!("Apple: Failed to set SO_NET_SERVICE_TYPE on fd {}, errno={}", 
-                       socket.as_raw_fd(), std::io::Error::last_os_error());
+                warn!("Apple: Failed to set SO_NET_SERVICE_TYPE on fd {fd}, errno={}", 
+                       std::io::Error::last_os_error());
             }
         }
-
-        // Set socket to non-blocking for async connect
-        socket.set_nonblocking(true)
-            .map_err(|e| Error::ConnectionFailed(format!("Failed to set non-blocking: {}", e)))?;
-
-        // Start connection (non-blocking)
-        match socket.connect(&socket_addr.into()) {
-            Ok(()) => {}
-            Err(e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {
-                // Connection in progress - this is expected for non-blocking
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Also normal for non-blocking
-            }
-            Err(e) => {
-                return Err(Error::ConnectionFailed(format!("Connect failed: {}", e)));
-            }
-        }
-
-        // Convert to std TcpStream then to tokio TcpStream
-        let std_stream: std::net::TcpStream = socket.into();
-        let stream = TcpStream::from_std(std_stream)
-            .map_err(|e| Error::ConnectionFailed(format!("Failed to convert to async: {}", e)))?;
-
-        // Wait for connection to complete with timeout
-        let timeout_dur = Duration::from_secs(config.timeout_seconds);
-        let connect_result = tokio::time::timeout(timeout_dur, stream.writable()).await;
-        match connect_result {
-            Ok(Ok(())) => {
-                // Check if connection actually succeeded
-                if let Err(e) = stream.peer_addr() {
-                    return Err(Error::ConnectionFailed(format!("Connection failed: {}", e)));
-                }
-            }
-            Ok(Err(e)) => {
-                return Err(Error::ConnectionFailed(format!("Connection failed: {}", e)));
-            }
-            Err(_) => {
-                return Err(Error::Timeout);
-            }
-        }
-
-        // CRITICAL: Protect the socket BEFORE TLS and BEFORE VPN tunnel is established
-        let fd = stream.as_raw_fd();
         if !protect_socket(fd) {
             return Err(Error::ConnectionFailed(
                 "Failed to protect socket".to_string(),
@@ -301,35 +393,15 @@ impl VpnConnection {
             debug!("TCP keepalive enabled (time=10s, interval=5s)");
         }
 
-        // SoftEther always uses TLS/HTTPS
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-
-        // Build TLS config - Force TLS 1.3 only (like Swift's NWProtocolTLS)
-        // This is critical for compatibility with SoftEther cluster servers
-        let tls_versions: &[&rustls::SupportedProtocolVersion] = &[&rustls::version::TLS13];
-        
-        let tls_config = if config.skip_tls_verify {
-            ClientConfig::builder_with_provider(provider)
-                .with_protocol_versions(tls_versions)
-                .unwrap()
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(NoVerifier))
-                .with_no_client_auth()
-        } else {
-            let root_store = RootCertStore::empty();
-            ClientConfig::builder_with_provider(provider)
-                .with_protocol_versions(tls_versions)
-                .unwrap()
-                .with_root_certificates(root_store)
-                .with_no_client_auth()
-        };
+        // SoftEther always uses TLS/HTTPS - build TLS config based on settings
+        let tls_config = build_tls_config(config)?;
 
         let connector = TlsConnector::from(Arc::new(tls_config));
 
         // Determine SNI hostname: use sni_hostname if provided, otherwise server
         // This is important for cluster redirect where we connect to IP but need original hostname for TLS
         let sni_name = config.sni_hostname.as_ref().unwrap_or(&config.server);
-        
+
         let server_name = if sni_name.parse::<std::net::IpAddr>().is_ok() {
             // SNI name is also an IP, use placeholder
             ServerName::try_from("softether")
@@ -337,7 +409,7 @@ impl VpnConnection {
         } else {
             // Use the hostname for SNI
             ServerName::try_from(sni_name.clone())
-                .map_err(|_| Error::Tls(format!("Invalid server name: {}", sni_name)))?
+                .map_err(|_| Error::Tls(format!("Invalid server name: {sni_name}")))?
         };
 
         debug!("TLS connecting with SNI: {:?}", server_name);
@@ -345,7 +417,7 @@ impl VpnConnection {
         let tls_stream = connector
             .connect(server_name, stream)
             .await
-            .map_err(|e| Error::Tls(format!("TLS handshake failed: {}", e)))?;
+            .map_err(|e| Error::Tls(format!("TLS handshake failed: {e}")))?;
 
         info!("TLS connection established (protected)");
         Ok(VpnConnection::Tls(Box::new(tls_stream)))

@@ -32,6 +32,7 @@ class SoftEtherBridge {
         const val RESULT_TIMEOUT = -6
         const val RESULT_IO_ERROR = -7
         const val RESULT_ALREADY_CONNECTED = -8
+        const val RESULT_QUEUE_FULL = -9      // Backpressure - caller should retry
         const val RESULT_INTERNAL_ERROR = -99
         
         /**
@@ -79,7 +80,8 @@ class SoftEtherBridge {
         val dns2: Int,
         val connectedServerIP: String,
         val serverVersion: Int,
-        val serverBuild: Int
+        val serverBuild: Int,
+        val macAddress: ByteArray = ByteArray(6)
     ) {
         val ipAddressString: String get() = formatIPv4(ipAddress)
         val subnetMaskString: String get() = formatIPv4(subnetMask)
@@ -91,8 +93,35 @@ class SoftEtherBridge {
                 if (dns2 != 0) formatIPv4(dns2) else null
             )
         
+        val macAddressString: String
+            get() = macAddress.joinToString(":") { String.format("%02x", it) }
+        
         private fun formatIPv4(ip: Int): String {
             return "${(ip shr 24) and 0xFF}.${(ip shr 16) and 0xFF}.${(ip shr 8) and 0xFF}.${ip and 0xFF}"
+        }
+        
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (javaClass != other?.javaClass) return false
+            other as Session
+            return ipAddress == other.ipAddress && subnetMask == other.subnetMask &&
+                   gateway == other.gateway && dns1 == other.dns1 && dns2 == other.dns2 &&
+                   connectedServerIP == other.connectedServerIP &&
+                   serverVersion == other.serverVersion && serverBuild == other.serverBuild &&
+                   macAddress.contentEquals(other.macAddress)
+        }
+        
+        override fun hashCode(): Int {
+            var result = ipAddress
+            result = 31 * result + subnetMask
+            result = 31 * result + gateway
+            result = 31 * result + dns1
+            result = 31 * result + dns2
+            result = 31 * result + connectedServerIP.hashCode()
+            result = 31 * result + serverVersion
+            result = 31 * result + serverBuild
+            result = 31 * result + macAddress.contentHashCode()
+            return result
         }
     }
     
@@ -112,20 +141,48 @@ class SoftEtherBridge {
         val hub: String,
         val username: String,
         val passwordHash: String,
-        val useTLS: Boolean = true,
+        // TLS Settings
+        val skipTlsVerify: Boolean = false,
+        /** Custom CA certificate in PEM format for server verification. */
+        val customCaPem: String? = null,
+        /** Server certificate SHA-256 fingerprint for pinning (64 hex chars). */
+        val certFingerprintSha256: String? = null,
+        // Connection Settings
         val maxConnections: Int = 1,
+        val timeoutSeconds: Int = 30,
+        val mtu: Int = 1400,
+        // Protocol Features
+        val useEncrypt: Boolean = true,
         val useCompress: Boolean = false,
-        val connectTimeoutSecs: Int = 30,
-        val keepaliveIntervalSecs: Int = 5
+        val udpAccel: Boolean = false,
+        val qos: Boolean = false,
+        // Session Mode
+        val natTraversal: Boolean = true,
+        val monitorMode: Boolean = false,
+        // Routing
+        val defaultRoute: Boolean = true,
+        val acceptPushedRoutes: Boolean = true,
+        val ipv4Include: String? = null,
+        val ipv4Exclude: String? = null
     )
     
     // MARK: - Callbacks
+    
+    enum class LogLevel(val value: Int) {
+        ERROR(0), WARN(1), INFO(2), DEBUG(3), TRACE(4);
+        
+        companion object {
+            fun fromInt(value: Int): LogLevel = values().find { it.value == value } ?: INFO
+        }
+    }
     
     interface Listener {
         fun onStateChanged(state: ConnectionState)
         fun onConnected(session: Session)
         fun onDisconnected(error: Throwable?)
         fun onPacketsReceived(packets: List<ByteArray>)
+        fun onLog(level: LogLevel, message: String) {}
+        fun onProtectSocket(fd: Int): Boolean = false
     }
     
     var listener: Listener? = null
@@ -142,19 +199,36 @@ class SoftEtherBridge {
         hub: String,
         username: String,
         passwordHash: String,
-        useTLS: Boolean,
+        // TLS Settings
+        skipTlsVerify: Boolean,
+        customCaPem: String?,
+        certFingerprintSha256: String?,
+        // Connection Settings
         maxConnections: Int,
+        timeoutSeconds: Int,
+        mtu: Int,
+        // Protocol Features
+        useEncrypt: Boolean,
         useCompress: Boolean,
-        connectTimeoutSecs: Int,
-        keepaliveIntervalSecs: Int
+        udpAccel: Boolean,
+        qos: Boolean,
+        // Session Mode
+        natTraversal: Boolean,
+        monitorMode: Boolean,
+        // Routing
+        defaultRoute: Boolean,
+        acceptPushedRoutes: Boolean,
+        ipv4Include: String?,
+        ipv4Exclude: String?
     ): Long
     
     private external fun nativeDestroy(handle: Long)
     private external fun nativeConnect(handle: Long): Int
     private external fun nativeDisconnect(handle: Long): Int
     private external fun nativeGetState(handle: Long): Int
-    private external fun nativeGetSession(handle: Long): IntArray?
+    private external fun nativeGetSession(handle: Long): LongArray?
     private external fun nativeGetSessionServerIP(handle: Long): String?
+    private external fun nativeGetSessionMAC(handle: Long): ByteArray?
     private external fun nativeGetStats(handle: Long): LongArray?
     private external fun nativeSendPackets(handle: Long, data: ByteArray, count: Int): Int
     private external fun nativeReceivePackets(handle: Long, buffer: ByteArray): Int
@@ -175,11 +249,22 @@ class SoftEtherBridge {
             config.hub,
             config.username,
             config.passwordHash,
-            config.useTLS,
+            config.skipTlsVerify,
+            config.customCaPem,
+            config.certFingerprintSha256,
             config.maxConnections,
+            config.timeoutSeconds,
+            config.mtu,
+            config.useEncrypt,
             config.useCompress,
-            config.connectTimeoutSecs,
-            config.keepaliveIntervalSecs
+            config.udpAccel,
+            config.qos,
+            config.natTraversal,
+            config.monitorMode,
+            config.defaultRoute,
+            config.acceptPushedRoutes,
+            config.ipv4Include,
+            config.ipv4Exclude
         )
         
         if (nativeHandle == 0L) {
@@ -224,15 +309,18 @@ class SoftEtherBridge {
             val data = nativeGetSession(nativeHandle) ?: return null
             if (data.size < 7) return null
             
+            val macAddress = nativeGetSessionMAC(nativeHandle) ?: ByteArray(6)
+            
             return Session(
-                ipAddress = data[0],
-                subnetMask = data[1],
-                gateway = data[2],
-                dns1 = data[3],
-                dns2 = data[4],
+                ipAddress = data[0].toInt(),
+                subnetMask = data[1].toInt(),
+                gateway = data[2].toInt(),
+                dns1 = data[3].toInt(),
+                dns2 = data[4].toInt(),
                 connectedServerIP = nativeGetSessionServerIP(nativeHandle) ?: "",
-                serverVersion = data[5],
-                serverBuild = data[6]
+                serverVersion = data[5].toInt(),
+                serverBuild = data[6].toInt(),
+                macAddress = macAddress
             )
         }
     
@@ -260,6 +348,7 @@ class SoftEtherBridge {
     /**
      * Send packets to VPN server.
      * Each packet should be a complete Ethernet frame (L2).
+     * @throws QueueFullException if backpressure is detected - caller should retry.
      */
     fun sendPackets(packets: List<ByteArray>) {
         if (nativeHandle == 0L || packets.isEmpty()) return
@@ -280,10 +369,15 @@ class SoftEtherBridge {
         }
         
         val result = nativeSendPackets(nativeHandle, buffer.array(), packets.size)
-        if (result < 0) {
+        if (result == RESULT_QUEUE_FULL) {
+            throw QueueFullException("Queue full - backpressure, retry later")
+        } else if (result < 0) {
             throw RuntimeException("Send failed: $result")
         }
     }
+    
+    /** Exception thrown when the packet queue is full (backpressure). */
+    class QueueFullException(message: String) : Exception(message)
     
     /**
      * Receive packets from VPN server.
@@ -330,11 +424,12 @@ class SoftEtherBridge {
         dns2: Int,
         connectedServerIP: String,
         serverVersion: Int,
-        serverBuild: Int
+        serverBuild: Int,
+        macAddress: ByteArray
     ) {
         listener?.onConnected(Session(
             ipAddress, subnetMask, gateway, dns1, dns2,
-            connectedServerIP, serverVersion, serverBuild
+            connectedServerIP, serverVersion, serverBuild, macAddress
         ))
     }
     
@@ -364,6 +459,16 @@ class SoftEtherBridge {
         }
         
         listener?.onPacketsReceived(packets)
+    }
+    
+    @Suppress("unused")  // Called from JNI
+    private fun onNativeLog(level: Int, message: String) {
+        listener?.onLog(LogLevel.fromInt(level), message)
+    }
+    
+    @Suppress("unused")  // Called from JNI
+    private fun onProtectSocket(fd: Int): Boolean {
+        return listener?.onProtectSocket(fd) ?: false
     }
     
     // MARK: - Cleanup

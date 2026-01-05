@@ -307,6 +307,8 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
             .as_ref()
             .map(|s| s.as_ptr())
             .unwrap_or(std::ptr::null()),
+        cert_fingerprint_sha256: std::ptr::null(),
+        custom_ca_pem: std::ptr::null(),
     };
 
     // Get JVM for callbacks
@@ -473,6 +475,31 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetSession
     };
 
     env.new_string(&server_ip).unwrap_or_default()
+}
+
+/// Get session MAC address as byte array.
+#[no_mangle]
+pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetSessionMAC<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jbyteArray {
+    if handle == 0 {
+        return std::ptr::null_mut();
+    }
+
+    let mut session = SoftEtherSession::default();
+    let result =
+        unsafe { softether_get_session(handle as SoftEtherHandle, &mut session as *mut _) };
+
+    if result != SoftEtherResult::Ok {
+        return std::ptr::null_mut();
+    }
+
+    match env.byte_array_from_slice(&session.mac_address) {
+        Ok(arr) => arr.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 /// Get connection statistics as long array.

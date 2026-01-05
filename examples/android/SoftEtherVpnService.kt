@@ -46,7 +46,8 @@ class SoftEtherVpnService : VpnService(), SoftEtherBridge.Listener {
     
     // Gateway MAC for outbound frames (learned from ARP or broadcast)
     private var gatewayMAC = byteArrayOf(0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte())
-    private val srcMAC = byteArrayOf(0x5E, 0x00, 0x00, 0x00, 0x00, 0x01)
+    // Source MAC from session (set on connection)
+    private var srcMAC = byteArrayOf(0x5E, 0x00, 0x00, 0x00, 0x00, 0x01)
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -241,7 +242,9 @@ class SoftEtherVpnService : VpnService(), SoftEtherBridge.Listener {
     }
     
     override fun onConnected(session: SoftEtherBridge.Session) {
-        Log.i(TAG, "Connected! IP=${session.ipAddressString}")
+        Log.i(TAG, "Connected! IP=${session.ipAddressString}, MAC=${session.macAddressString}")
+        // Use session MAC address for outbound frames
+        srcMAC = session.macAddress
         configureTunnel(session)
     }
     

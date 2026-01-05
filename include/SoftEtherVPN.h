@@ -10,7 +10,6 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,6 +29,7 @@ typedef enum {
     SOFTETHER_TIMEOUT = -6,
     SOFTETHER_IO_ERROR = -7,
     SOFTETHER_ALREADY_CONNECTED = -8,
+    SOFTETHER_QUEUE_FULL = -9,         // Backpressure - caller should retry
     SOFTETHER_INTERNAL_ERROR = -99,
 } SoftEtherResult;
 
@@ -53,36 +53,38 @@ typedef enum {
 // =============================================================================
 
 typedef struct {
-    // Connection Settings
+    // Connection
     const char* server;           // Server hostname or IP (null-terminated UTF-8)
     unsigned int port;            // Server port (default 443)
     const char* hub;              // Virtual hub name
     const char* username;         // Username
     const char* password_hash;    // Hex-encoded SHA0 password hash (40 chars)
-
+    
     // TLS Settings
-    int skip_tls_verify;          // Skip TLS certificate verification (1 = true, 0 = false)
-
+    int skip_tls_verify;          // Skip TLS certificate verification (1 = yes, 0 = no)
+    const char* custom_ca_pem;    // Custom CA certificate in PEM format (nullable)
+    const char* cert_fingerprint_sha256; // Server cert SHA-256 fingerprint (64 hex chars, nullable)
+    
     // Connection Settings
     unsigned int max_connections; // Max TCP connections (1-32, default 1)
     unsigned int timeout_seconds; // Connection timeout in seconds (default 30)
     unsigned int mtu;             // MTU size (576-1500, default 1400)
-
+    
     // Protocol Features
-    int use_encrypt;              // Use RC4 packet encryption within TLS (1 = true, 0 = false)
-    int use_compress;             // Use zlib compression (1 = true, 0 = false)
-    int udp_accel;                // Enable UDP acceleration (1 = true, 0 = false)
-    int qos;                      // Enable QoS/VoIP prioritization (1 = true, 0 = false)
-
+    int use_encrypt;              // Use RC4 encryption within TLS (1 = yes, 0 = no)
+    int use_compress;             // Use zlib compression (1 = yes, 0 = no)
+    int udp_accel;                // Enable UDP acceleration (1 = yes, 0 = no)
+    int qos;                      // Enable QoS/VoIP prioritization (1 = yes, 0 = no)
+    
     // Session Mode
-    int nat_traversal;            // NAT traversal mode (1 = NAT mode, 0 = Bridge mode)
-    int monitor_mode;             // Monitor/packet capture mode (1 = true, 0 = false)
-
+    int nat_traversal;            // NAT traversal mode (1 = NAT, 0 = Bridge)
+    int monitor_mode;             // Monitor/packet capture mode (1 = yes, 0 = no)
+    
     // Routing
-    int default_route;            // Route all traffic through VPN (1 = true, 0 = false)
-    int accept_pushed_routes;     // Accept server-pushed routes (1 = true, 0 = false)
-    const char* ipv4_include;     // Comma-separated CIDRs to include (can be NULL)
-    const char* ipv4_exclude;     // Comma-separated CIDRs to exclude (can be NULL)
+    int default_route;            // Route all traffic through VPN (1 = yes, 0 = no)
+    int accept_pushed_routes;     // Accept server-pushed routes (1 = yes, 0 = no)
+    const char* ipv4_include;     // Comma-separated CIDRs to include (nullable)
+    const char* ipv4_exclude;     // Comma-separated CIDRs to exclude (nullable)
 } SoftEtherConfig;
 
 // =============================================================================
@@ -98,8 +100,8 @@ typedef struct {
     char connected_server_ip[64]; // Actual server IP (for route exclusion)
     uint32_t server_version;      // Server version
     uint32_t server_build;        // Server build number
-    uint8_t mac_address[6];       // MAC address used for this session
-    uint8_t gateway_mac[6];       // Gateway MAC address (0 if unknown)
+    uint8_t mac_address[6];       // MAC address assigned to this session
+    uint8_t gateway_mac[6];       // Gateway MAC address (learned from ARP)
 } SoftEtherSession;
 
 // =============================================================================
@@ -114,6 +116,7 @@ typedef struct {
     uint64_t uptime_secs;
     unsigned int active_connections;
     unsigned int reconnect_count;
+    uint64_t packets_dropped;         // Packets dropped due to queue full (backpressure)
 } SoftEtherStats;
 
 // =============================================================================
@@ -125,18 +128,18 @@ typedef void (*SoftEtherConnectedCallback)(void* context, const SoftEtherSession
 typedef void (*SoftEtherDisconnectedCallback)(void* context, SoftEtherResult result);
 typedef void (*SoftEtherPacketsCallback)(void* context, const uint8_t* packets, size_t total_size, uint32_t count);
 typedef void (*SoftEtherLogCallback)(void* context, int level, const char* message);
-typedef bool (*SoftEtherProtectSocketCallback)(void* context, int fd);
-typedef bool (*SoftEtherExcludeIPCallback)(void* context, const char* ip);
+typedef int (*SoftEtherProtectSocketCallback)(void* context, int socket_fd);  // Returns 1 on success, 0 on failure
+typedef int (*SoftEtherExcludeIPCallback)(void* context, const char* ip);     // iOS: exclude IP from VPN routing
 
 typedef struct {
-    void* context;                              // User context passed to callbacks
-    SoftEtherStateCallback on_state_changed;    // State change callback
-    SoftEtherConnectedCallback on_connected;    // Connection established callback
-    SoftEtherDisconnectedCallback on_disconnected; // Disconnection callback
-    SoftEtherPacketsCallback on_packets_received;  // Packets received callback
-    SoftEtherLogCallback on_log;                // Log message callback
-    SoftEtherProtectSocketCallback protect_socket; // Socket protection callback (Android VPN)
-    SoftEtherExcludeIPCallback exclude_ip;      // IP exclusion callback (iOS - for redirect servers)
+    void* context;                                    // User context passed to callbacks
+    SoftEtherStateCallback on_state_changed;          // State change callback
+    SoftEtherConnectedCallback on_connected;          // Connection established callback
+    SoftEtherDisconnectedCallback on_disconnected;    // Disconnection callback
+    SoftEtherPacketsCallback on_packets_received;     // Packets received callback
+    SoftEtherLogCallback on_log;                      // Log message callback
+    SoftEtherProtectSocketCallback protect_socket;    // Socket protection (Android VPN)
+    SoftEtherExcludeIPCallback exclude_ip;            // IP exclusion (iOS - for cluster redirect)
 } SoftEtherCallbacks;
 
 // =============================================================================
