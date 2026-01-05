@@ -36,4 +36,4 @@ pub use ethernet::{
 };
 
 pub use arp::{ArpHandler, ArpOperation, PendingArpReply};
-pub use dhcp::{DhcpClient, DhcpConfig, DhcpHandler, DhcpState};
+pub use dhcp::{DhcpClient, DhcpConfig, DhcpHandler, DhcpMessageType, DhcpOption, DhcpState};

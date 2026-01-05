@@ -1078,8 +1078,8 @@ async fn run_packet_loop(
     running: Arc<AtomicBool>,
     callbacks: SoftEtherCallbacks,
     tx_recv: &mut mpsc::Receiver<Vec<u8>>,
-    _mac: [u8; 6],
-    _dhcp_config: DhcpConfig,
+    mac: [u8; 6],
+    dhcp_config: DhcpConfig,
 ) -> crate::error::Result<()> {
     fn log_msg(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
         if let Some(cb) = callbacks.on_log {
@@ -1092,6 +1092,26 @@ async fn run_packet_loop(
     let mut tunnel_codec = TunnelCodec::new();
     let mut read_buf = vec![0u8; 65536];
     let keepalive_interval_secs = 5u64;
+
+    // Initialize DHCP handler for lease renewal
+    let mut dhcp_handler = crate::packet::DhcpHandler::new();
+    dhcp_handler.mark_configured(dhcp_config.clone());
+    let dhcp_client = crate::packet::DhcpClient::new(mac);
+
+    // Gateway MAC for unicast renewal (learned from DHCP config or ARP)
+    // For now, we'll use broadcast for rebinding if gateway MAC not available
+    let gateway_mac = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]; // TODO: learn from ARP
+
+    if dhcp_config.lease_time > 0 {
+        log_msg(
+            &callbacks,
+            1,
+            &format!(
+                "[RUST] DHCP lease: {}s, T1={}s, T2={}s",
+                dhcp_config.lease_time, dhcp_config.renewal_time, dhcp_config.rebinding_time
+            ),
+        );
+    }
 
     log_msg(&callbacks, 1, "[RUST] Packet loop started");
 
@@ -1112,6 +1132,46 @@ async fn run_packet_loop(
                 .await
                 .map_err(crate::error::Error::Io)?;
             last_keepalive = std::time::Instant::now();
+        }
+
+        // Check for DHCP lease renewal (T1/T2)
+        if dhcp_handler.is_lease_expired() {
+            log_msg(&callbacks, 3, "[RUST] DHCP lease expired!");
+            // Lease expired - connection is no longer valid
+            return Err(crate::error::Error::ConnectionFailed(
+                "DHCP lease expired".to_string(),
+            ));
+        } else if dhcp_handler.needs_rebinding() && !dhcp_handler.is_in_progress() {
+            // T2 elapsed - try rebinding (broadcast)
+            dhcp_handler.start_rebinding();
+            log_msg(&callbacks, 2, "[RUST] Starting DHCP rebinding (T2 elapsed)");
+        } else if dhcp_handler.needs_renewal() && !dhcp_handler.is_in_progress() {
+            // T1 elapsed - try renewal (unicast to server)
+            dhcp_handler.start_renewal();
+            log_msg(&callbacks, 1, "[RUST] Starting DHCP lease renewal (T1 elapsed)");
+        }
+
+        // Send DHCP renewal/rebinding packets if needed
+        if dhcp_handler.should_send_renewal() {
+            if let Some(config) = dhcp_handler.config() {
+                if let Some(server_id) = config.server_id {
+                    let request = dhcp_client.build_renewal_request(config.ip, server_id, gateway_mac);
+                    let frames = vec![request.to_vec()];
+                    let encoded = tunnel_codec.encode(&frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
+                    conn_mgr.write_all(&encoded).await.map_err(crate::error::Error::Io)?;
+                    dhcp_handler.mark_renewal_sent();
+                    log_msg(&callbacks, 1, "[RUST] Sent DHCP renewal request");
+                }
+            }
+        } else if dhcp_handler.should_send_rebinding() {
+            if let Some(config) = dhcp_handler.config() {
+                let request = dhcp_client.build_rebinding_request(config.ip);
+                let frames = vec![request.to_vec()];
+                let encoded = tunnel_codec.encode(&frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
+                conn_mgr.write_all(&encoded).await.map_err(crate::error::Error::Io)?;
+                dhcp_handler.mark_renewal_sent();
+                log_msg(&callbacks, 1, "[RUST] Sent DHCP rebinding request (broadcast)");
+            }
         }
 
         tokio::select! {
@@ -1140,6 +1200,15 @@ async fn run_packet_loop(
                                     } else {
                                         frame.to_vec()
                                     };
+
+                                    // Check for DHCP response during renewal/rebinding
+                                    if dhcp_handler.is_in_progress() && is_dhcp_response(&frame_data) {
+                                        if let Some(new_config) = process_dhcp_renewal_response(&frame_data, dhcp_handler.xid()) {
+                                            dhcp_handler.handle_renewal_ack(new_config);
+                                            log_msg(&callbacks, 1, "[RUST] DHCP lease renewed successfully");
+                                        }
+                                    }
+
                                     let len = frame_data.len() as u16;
                                     buffer.extend_from_slice(&len.to_be_bytes());
                                     buffer.extend_from_slice(&frame_data);
@@ -1166,6 +1235,120 @@ async fn run_packet_loop(
 
     log_msg(&callbacks, 1, "[RUST] Packet loop ended");
     Ok(())
+}
+
+/// Process a DHCP renewal response
+fn process_dhcp_renewal_response(frame: &[u8], expected_xid: u32) -> Option<DhcpConfig> {
+    use crate::packet::{DhcpConfig, DhcpMessageType, DhcpOption};
+
+    // DHCP starts at offset 42
+    let dhcp_start = 42;
+    if frame.len() < dhcp_start + 240 {
+        return None;
+    }
+
+    // Check transaction ID
+    let xid = u32::from_be_bytes([
+        frame[dhcp_start + 4],
+        frame[dhcp_start + 5],
+        frame[dhcp_start + 6],
+        frame[dhcp_start + 7],
+    ]);
+    if xid != expected_xid {
+        return None;
+    }
+
+    // Check magic cookie
+    let magic = u32::from_be_bytes([
+        frame[dhcp_start + 236],
+        frame[dhcp_start + 237],
+        frame[dhcp_start + 238],
+        frame[dhcp_start + 239],
+    ]);
+    if magic != 0x63825363 {
+        return None;
+    }
+
+    // Get yiaddr (offered IP)
+    let yiaddr = std::net::Ipv4Addr::new(
+        frame[dhcp_start + 16],
+        frame[dhcp_start + 17],
+        frame[dhcp_start + 18],
+        frame[dhcp_start + 19],
+    );
+
+    // Parse options
+    let mut option_start = dhcp_start + 240;
+    let mut message_type = None;
+    let mut config = DhcpConfig {
+        ip: yiaddr,
+        ..Default::default()
+    };
+
+    while option_start < frame.len() {
+        let opt_code = frame[option_start];
+        if opt_code == DhcpOption::End as u8 {
+            break;
+        }
+        if opt_code == DhcpOption::Pad as u8 {
+            option_start += 1;
+            continue;
+        }
+        if option_start + 1 >= frame.len() {
+            break;
+        }
+        let opt_len = frame[option_start + 1] as usize;
+        if option_start + 2 + opt_len > frame.len() {
+            break;
+        }
+        let opt_data = &frame[option_start + 2..option_start + 2 + opt_len];
+
+        match opt_code {
+            c if c == DhcpOption::MessageType as u8 && opt_len >= 1 => {
+                message_type = DhcpMessageType::try_from(opt_data[0]).ok();
+            }
+            c if c == DhcpOption::SubnetMask as u8 && opt_len >= 4 => {
+                config.netmask = std::net::Ipv4Addr::new(opt_data[0], opt_data[1], opt_data[2], opt_data[3]);
+            }
+            c if c == DhcpOption::Router as u8 && opt_len >= 4 => {
+                config.gateway = Some(std::net::Ipv4Addr::new(opt_data[0], opt_data[1], opt_data[2], opt_data[3]));
+            }
+            c if c == DhcpOption::DnsServer as u8 && opt_len >= 4 => {
+                config.dns1 = Some(std::net::Ipv4Addr::new(opt_data[0], opt_data[1], opt_data[2], opt_data[3]));
+                if opt_len >= 8 {
+                    config.dns2 = Some(std::net::Ipv4Addr::new(opt_data[4], opt_data[5], opt_data[6], opt_data[7]));
+                }
+            }
+            c if c == DhcpOption::ServerIdentifier as u8 && opt_len >= 4 => {
+                config.server_id = Some(std::net::Ipv4Addr::new(opt_data[0], opt_data[1], opt_data[2], opt_data[3]));
+            }
+            c if c == DhcpOption::LeaseTime as u8 && opt_len >= 4 => {
+                config.lease_time = u32::from_be_bytes([opt_data[0], opt_data[1], opt_data[2], opt_data[3]]);
+            }
+            c if c == DhcpOption::RenewalTime as u8 && opt_len >= 4 => {
+                config.renewal_time = u32::from_be_bytes([opt_data[0], opt_data[1], opt_data[2], opt_data[3]]);
+            }
+            c if c == DhcpOption::RebindingTime as u8 && opt_len >= 4 => {
+                config.rebinding_time = u32::from_be_bytes([opt_data[0], opt_data[1], opt_data[2], opt_data[3]]);
+            }
+            _ => {}
+        }
+        option_start += 2 + opt_len;
+    }
+
+    // Only return config if we got an ACK
+    if message_type == Some(DhcpMessageType::Ack) {
+        // Compute default T1/T2 if not provided
+        if config.renewal_time == 0 && config.lease_time > 0 {
+            config.renewal_time = config.lease_time / 2;
+        }
+        if config.rebinding_time == 0 && config.lease_time > 0 {
+            config.rebinding_time = config.lease_time * 7 / 8;
+        }
+        Some(config)
+    } else {
+        None
+    }
 }
 
 /// Parse length-prefixed packets from a buffer
