@@ -276,12 +276,16 @@ impl VpnConnection {
             .map_err(|_| Error::Timeout)?
             .map_err(|e| Error::ConnectionFailed(format!("TCP connect failed: {e}")))?;
 
-        // Set TCP options
+        // Set TCP options for high throughput
         stream.set_nodelay(true)?;
+        
+        // Increase TCP buffer sizes for better throughput on high-latency links
+        let sock_ref = SockRef::from(&stream);
+        let _ = sock_ref.set_recv_buffer_size(1024 * 1024); // 1MB receive buffer
+        let _ = sock_ref.set_send_buffer_size(1024 * 1024); // 1MB send buffer
 
         // Enable TCP keepalive to prevent NAT timeouts
         // This is critical for mobile networks where NAT mappings can expire quickly
-        let sock_ref = SockRef::from(&stream);
         let keepalive = TcpKeepalive::new()
             .with_time(Duration::from_secs(10)) // Start keepalive probes after 10s idle
             .with_interval(Duration::from_secs(5)); // Send probes every 5s
@@ -378,12 +382,16 @@ impl VpnConnection {
         }
         debug!("Socket fd {} protected", fd);
 
-        // Set TCP options
+        // Set TCP options for high throughput
         stream.set_nodelay(true)?;
+        
+        // Increase TCP buffer sizes for better throughput on high-latency links
+        let sock_ref = SockRef::from(&stream);
+        let _ = sock_ref.set_recv_buffer_size(1024 * 1024); // 1MB receive buffer
+        let _ = sock_ref.set_send_buffer_size(1024 * 1024); // 1MB send buffer
 
         // Enable TCP keepalive to prevent NAT timeouts
         // This is critical for mobile networks where NAT mappings can expire quickly
-        let sock_ref = SockRef::from(&stream);
         let keepalive = TcpKeepalive::new()
             .with_time(Duration::from_secs(10)) // Start keepalive probes after 10s idle
             .with_interval(Duration::from_secs(5)); // Send probes every 5s
