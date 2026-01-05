@@ -3,7 +3,7 @@
 //! This module provides C-callable functions for the VPN client with actual
 //! connection logic wired to the SoftEther protocol implementation.
 
-use std::ffi::{c_char, c_int, CStr};
+use std::ffi::{c_char, c_int, c_void, CStr};
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -342,19 +342,50 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
         Err(_) => return SoftEtherResult::InternalError,
     };
 
+    // Log early to confirm we got this far
+    if let Some(cb) = guard.callbacks.on_log {
+        if let Ok(cstr) = std::ffi::CString::new("[RUST-FFI] softether_connect called, creating runtime...") {
+            cb(guard.callbacks.context, 1, cstr.as_ptr());
+        }
+    }
+
     if guard.state != SoftEtherState::Disconnected {
+        if let Some(cb) = guard.callbacks.on_log {
+            if let Ok(cstr) = std::ffi::CString::new("[RUST-FFI] Already connected, returning") {
+                cb(guard.callbacks.context, 2, cstr.as_ptr());
+            }
+        }
         return SoftEtherResult::AlreadyConnected;
     }
 
     // Create tokio runtime
-    // Use single thread for mobile battery efficiency - VPN workload is I/O bound
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
+    // Use current_thread for iOS Network Extensions (lower memory, more stable)
+    #[cfg(target_os = "ios")]
+    let runtime_result = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build();
+    
+    #[cfg(not(target_os = "ios"))]
+    let runtime_result = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(_) => {
+        .build();
+
+    let runtime = match runtime_result {
+        Ok(rt) => {
+            if let Some(cb) = guard.callbacks.on_log {
+                if let Ok(cstr) = std::ffi::CString::new("[RUST-FFI] Tokio runtime created successfully") {
+                    cb(guard.callbacks.context, 1, cstr.as_ptr());
+                }
+            }
+            rt
+        }
+        Err(e) => {
+            if let Some(cb) = guard.callbacks.on_log {
+                if let Ok(cstr) = std::ffi::CString::new(format!("[RUST-FFI] Failed to create runtime: {e}")) {
+                    cb(guard.callbacks.context, 3, cstr.as_ptr());
+                }
+            }
             return SoftEtherResult::InternalError;
         }
     };
@@ -375,69 +406,146 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
 
     // Log that we're starting the async task
     if let Some(cb) = callbacks.on_log {
-        if let Ok(cstr) = std::ffi::CString::new("Starting async connection task...") {
+        if let Ok(cstr) = std::ffi::CString::new("[RUST-FFI] Starting connection thread...") {
             cb(callbacks.context, 1, cstr.as_ptr());
         }
     }
 
-    // Spawn the connection task
-    runtime.spawn(async move {
-        // Log inside the spawned task
-        if let Some(cb) = callbacks.on_log {
-            if let Ok(cstr) =
-                std::ffi::CString::new("Async task started, calling connect_and_run...")
-            {
-                cb(callbacks.context, 1, cstr.as_ptr());
+    // For iOS with current_thread runtime, we need to run in a background thread
+    // that blocks on the runtime. For other platforms, we can use spawn().
+    #[cfg(target_os = "ios")]
+    {
+        // Wrap context as usize for Send safety
+        let ctx_usize = callbacks.context as usize;
+        let on_log = callbacks.on_log;
+        let on_state_changed = callbacks.on_state_changed;
+        let on_disconnected = callbacks.on_disconnected;
+        
+        std::thread::spawn(move || {
+            // Reconstruct context pointer inside the thread
+            let ctx = ctx_usize as *mut c_void;
+            
+            if let Some(cb) = on_log {
+                if let Ok(cstr) = std::ffi::CString::new("[RUST-FFI] Background thread started, running async task...") {
+                    cb(ctx, 1, cstr.as_ptr());
+                }
             }
-        }
-
-        let result = connect_and_run(
-            config,
-            running.clone(),
-            callbacks.clone(),
-            tx_recv,
-            atomic_state,
-        )
-        .await;
-
-        // Notify disconnection
-        running.store(false, Ordering::SeqCst);
-
-        let disconnect_result = match result {
-            Ok(()) => {
+            
+            runtime.block_on(async move {
                 if let Some(cb) = callbacks.on_log {
-                    if let Ok(cstr) = std::ffi::CString::new("Connection ended normally") {
+                    if let Ok(cstr) = std::ffi::CString::new("[RUST-FFI] Async task started, calling connect_and_run...") {
                         cb(callbacks.context, 1, cstr.as_ptr());
                     }
                 }
-                SoftEtherResult::Ok
+
+                let result = connect_and_run(
+                    config,
+                    running.clone(),
+                    callbacks.clone(),
+                    tx_recv,
+                    atomic_state,
+                )
+                .await;
+
+                // Notify disconnection
+                running.store(false, Ordering::SeqCst);
+
+                let disconnect_result = match result {
+                    Ok(()) => {
+                        if let Some(cb) = callbacks.on_log {
+                            if let Ok(cstr) = std::ffi::CString::new("[RUST-FFI] Connection ended normally") {
+                                cb(callbacks.context, 1, cstr.as_ptr());
+                            }
+                        }
+                        SoftEtherResult::Ok
+                    }
+                    Err(ref e) => {
+                        if let Some(cb) = callbacks.on_log {
+                            if let Ok(cstr) = std::ffi::CString::new(format!("[RUST-FFI] Connection error: {e}")) {
+                                cb(callbacks.context, 3, cstr.as_ptr());
+                            }
+                        }
+                        match e {
+                            crate::error::Error::AuthenticationFailed(_) => SoftEtherResult::AuthFailed,
+                            crate::error::Error::ConnectionFailed(_) => SoftEtherResult::ConnectionFailed,
+                            crate::error::Error::Timeout => SoftEtherResult::Timeout,
+                            crate::error::Error::UserAlreadyLoggedIn => SoftEtherResult::AuthFailed,
+                            _ => SoftEtherResult::InternalError,
+                        }
+                    }
+                };
+
+                if let Some(cb) = callbacks.on_state_changed {
+                    cb(callbacks.context, SoftEtherState::Disconnected);
+                }
+                if let Some(cb) = callbacks.on_disconnected {
+                    cb(callbacks.context, disconnect_result);
+                }
+            });
+        });
+        
+        // Don't store runtime for iOS - it's moved to the thread
+        guard.runtime = None;
+    }
+
+    #[cfg(not(target_os = "ios"))]
+    {
+        // Spawn the connection task (multi-thread runtime drives itself)
+        runtime.spawn(async move {
+            if let Some(cb) = callbacks.on_log {
+                if let Ok(cstr) = std::ffi::CString::new("Async task started, calling connect_and_run...") {
+                    cb(callbacks.context, 1, cstr.as_ptr());
+                }
             }
-            Err(ref e) => {
-                if let Some(cb) = callbacks.on_log {
-                    if let Ok(cstr) = std::ffi::CString::new(format!("Connection error: {e}")) {
-                        cb(callbacks.context, 3, cstr.as_ptr());
+
+            let result = connect_and_run(
+                config,
+                running.clone(),
+                callbacks.clone(),
+                tx_recv,
+                atomic_state,
+            )
+            .await;
+
+            // Notify disconnection
+            running.store(false, Ordering::SeqCst);
+
+            let disconnect_result = match result {
+                Ok(()) => {
+                    if let Some(cb) = callbacks.on_log {
+                        if let Ok(cstr) = std::ffi::CString::new("Connection ended normally") {
+                            cb(callbacks.context, 1, cstr.as_ptr());
+                        }
+                    }
+                    SoftEtherResult::Ok
+                }
+                Err(ref e) => {
+                    if let Some(cb) = callbacks.on_log {
+                        if let Ok(cstr) = std::ffi::CString::new(format!("Connection error: {e}")) {
+                            cb(callbacks.context, 3, cstr.as_ptr());
+                        }
+                    }
+                    match e {
+                        crate::error::Error::AuthenticationFailed(_) => SoftEtherResult::AuthFailed,
+                        crate::error::Error::ConnectionFailed(_) => SoftEtherResult::ConnectionFailed,
+                        crate::error::Error::Timeout => SoftEtherResult::Timeout,
+                        crate::error::Error::UserAlreadyLoggedIn => SoftEtherResult::AuthFailed,
+                        _ => SoftEtherResult::InternalError,
                     }
                 }
-                match e {
-                    crate::error::Error::AuthenticationFailed(_) => SoftEtherResult::AuthFailed,
-                    crate::error::Error::ConnectionFailed(_) => SoftEtherResult::ConnectionFailed,
-                    crate::error::Error::Timeout => SoftEtherResult::Timeout,
-                    crate::error::Error::UserAlreadyLoggedIn => SoftEtherResult::AuthFailed,
-                    _ => SoftEtherResult::InternalError,
-                }
+            };
+
+            if let Some(cb) = callbacks.on_state_changed {
+                cb(callbacks.context, SoftEtherState::Disconnected);
             }
-        };
+            if let Some(cb) = callbacks.on_disconnected {
+                cb(callbacks.context, disconnect_result);
+            }
+        });
 
-        if let Some(cb) = callbacks.on_state_changed {
-            cb(callbacks.context, SoftEtherState::Disconnected);
-        }
-        if let Some(cb) = callbacks.on_disconnected {
-            cb(callbacks.context, disconnect_result);
-        }
-    });
-
-    // Store runtime
-    guard.runtime = Some(runtime);
+        // Store runtime
+        guard.runtime = Some(runtime);
+    }
 
     SoftEtherResult::Ok
 }
@@ -980,6 +1088,55 @@ async fn perform_dhcp(
 
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
 
+    // Check for pending server data before DHCP (keepalive frames, etc.)
+    log_msg(callbacks, 1, "[RUST] Checking for pending server data before DHCP...");
+    
+    // Try a non-blocking read to drain any pending data
+    match tokio::time::timeout(Duration::from_millis(200), conn_mgr.read_any(&mut buf)).await {
+        Ok(Ok((_conn_idx, n))) if n > 0 => {
+            log_msg(callbacks, 1, &format!("[RUST] Pre-DHCP: Received {} bytes from conn {}", n, _conn_idx));
+            
+            // Log first 64 bytes for debugging
+            let preview_len = n.min(64);
+            let preview: Vec<String> = buf[..preview_len].iter().map(|b| format!("{:02X}", b)).collect();
+            log_msg(callbacks, 1, &format!("[RUST] Pre-DHCP data (first {} bytes): [{}]", preview_len, preview.join(", ")));
+            
+            // Try to decode as tunnel frames
+            match codec.feed(&buf[..n]) {
+                Ok(frames) => {
+                    log_msg(callbacks, 1, &format!("[RUST] Pre-DHCP: Decoded {} tunnel frames", frames.len()));
+                    for (i, frame) in frames.iter().enumerate() {
+                        if frame.is_keepalive() {
+                            log_msg(callbacks, 1, &format!("[RUST] Pre-DHCP frame {}: keepalive", i));
+                        }
+                    }
+                }
+                Err(e) => {
+                    log_msg(callbacks, 2, &format!("[RUST] Pre-DHCP: Failed to decode frames: {}", e));
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            let err_msg = e.to_string();
+            log_msg(callbacks, 2, &format!("[RUST] Pre-DHCP: Read error: {}", err_msg));
+            log_msg(callbacks, 2, &format!("[RUST] Pre-DHCP: Error details: {:?}, kind: {:?}", err_msg, e.kind()));
+            
+            // Check for TLS mode mismatch
+            if err_msg.contains("InvalidContentType") || err_msg.contains("corrupt message") {
+                if let Some(source) = e.get_ref() {
+                    log_msg(callbacks, 2, &format!("[RUST] Pre-DHCP: Error source: {:?}", source));
+                }
+                log_msg(callbacks, 3, "[RUST] TLS mode mismatch detected - server may not be using TLS for tunnel data");
+                return Err(crate::error::Error::ConnectionClosed(
+                    format!("TLS mode mismatch: Server sent non-TLS data after authentication: {}", err_msg)
+                ));
+            }
+        }
+        Ok(Ok(_)) | Err(_) => {
+            log_msg(callbacks, 1, "[RUST] Pre-DHCP: No pending data (timeout or 0 bytes)");
+        }
+    }
+
     // Send DHCP DISCOVER
     let discover = dhcp.build_discover();
     log_msg(
@@ -1040,7 +1197,21 @@ async fn perform_dhcp(
                 // Zero bytes - continue
             }
             Ok(Err(e)) => {
+                let err_msg = e.to_string();
                 log_msg(callbacks, 2, &format!("[RUST] Read error during DHCP: {e}"));
+                log_msg(callbacks, 2, &format!("[RUST] Error kind: {:?}, debug: {:?}", e.kind(), e));
+                
+                // Check for TLS mode mismatch (server sending non-TLS data)
+                if err_msg.contains("InvalidContentType") || err_msg.contains("corrupt message") {
+                    if let Some(source) = e.get_ref() {
+                        log_msg(callbacks, 2, &format!("[RUST] Error source: {:?}", source));
+                    }
+                    log_msg(callbacks, 3, "[RUST] Fatal TLS error - connection is broken");
+                    log_msg(callbacks, 3, "[RUST] This may indicate server TLS mode mismatch. Try reconnecting.");
+                    return Err(crate::error::Error::ConnectionClosed(
+                        format!("TLS connection broken during DHCP: {}", err_msg)
+                    ));
+                }
             }
             Err(_) => {
                 // Timeout, retry
