@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 use super::callbacks::*;
 use super::types::*;
 use crate::client::{ConnectionManager, VpnConnection};
+use crate::crypto::{Rc4, Rc4KeyPair};
 use crate::packet::{DhcpClient, DhcpConfig, DhcpState};
 use crate::protocol::{
     decompress, is_compressed, AuthPack, AuthResult, AuthType, ConnectionOptions, HelloResponse,
@@ -743,6 +744,15 @@ async fn connect_and_run(
         ),
     );
 
+    // Log RC4 encryption status
+    if final_auth.rc4_key_pair.is_some() {
+        log_message(&callbacks, 1, "[RUST] RC4 tunnel encryption enabled (UseFastRC4 mode)");
+    } else if config.use_encrypt {
+        log_message(&callbacks, 1, "[RUST] Using TLS-layer encryption (UseSSLDataEncryption mode)");
+    } else {
+        log_message(&callbacks, 1, "[RUST] Encryption disabled");
+    }
+
     // Run the packet loop
     log_message(&callbacks, 1, "[RUST] Starting packet loop...");
     run_packet_loop(
@@ -752,6 +762,7 @@ async fn connect_and_run(
         &mut tx_recv,
         mac,
         dhcp_config,
+        final_auth.rc4_key_pair.as_ref(),
     )
     .await
 }
@@ -1087,6 +1098,35 @@ async fn send_frame(
     Ok(())
 }
 
+/// RC4 encryption state for tunnel data.
+/// 
+/// RC4 is a streaming cipher - each cipher instance maintains state
+/// and MUST NOT be reset between packets. Send and recv use separate ciphers.
+struct TunnelEncryption {
+    send_cipher: Rc4,
+    recv_cipher: Rc4,
+}
+
+impl TunnelEncryption {
+    /// Create from RC4 key pair (client mode).
+    fn new(key_pair: &Rc4KeyPair) -> Self {
+        let (send_cipher, recv_cipher) = key_pair.create_client_ciphers();
+        Self { send_cipher, recv_cipher }
+    }
+
+    /// Encrypt data in-place for sending.
+    #[inline]
+    fn encrypt(&mut self, data: &mut [u8]) {
+        self.send_cipher.process(data);
+    }
+
+    /// Decrypt data in-place after receiving.
+    #[inline]
+    fn decrypt(&mut self, data: &mut [u8]) {
+        self.recv_cipher.process(data);
+    }
+}
+
 /// Run the main packet forwarding loop
 async fn run_packet_loop(
     conn_mgr: &mut ConnectionManager,
@@ -1095,6 +1135,7 @@ async fn run_packet_loop(
     tx_recv: &mut mpsc::Receiver<Vec<u8>>,
     _mac: [u8; 6],
     _dhcp_config: DhcpConfig,
+    rc4_key_pair: Option<&Rc4KeyPair>,
 ) -> crate::error::Result<()> {
     fn log_msg(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
         if let Some(cb) = callbacks.on_log {
@@ -1107,6 +1148,9 @@ async fn run_packet_loop(
     let mut tunnel_codec = TunnelCodec::new();
     let mut read_buf = vec![0u8; 65536];
     let keepalive_interval_secs = 5u64;
+
+    // Create RC4 encryption state if keys are provided
+    let mut encryption = rc4_key_pair.map(TunnelEncryption::new);
 
     log_msg(&callbacks, 1, "[RUST] Packet loop started");
 
@@ -1132,24 +1176,41 @@ async fn run_packet_loop(
         tokio::select! {
             biased;
 
-            // Packets from Android to send to VPN
+            // Packets from mobile app to send to VPN server
             Some(frame_data) = tx_recv.recv() => {
                 let frames = parse_length_prefixed_packets(&frame_data);
                 if !frames.is_empty() {
+                    // Encode frames into tunnel format
                     let encoded = tunnel_codec.encode(&frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
-                    conn_mgr.write_all(&encoded).await.map_err(crate::error::Error::Io)?;
+                    
+                    // Encrypt if RC4 is enabled, otherwise send as-is
+                    let to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
+                        let mut data = encoded.to_vec();
+                        enc.encrypt(&mut data);
+                        data
+                    } else {
+                        encoded.to_vec()
+                    };
+                    
+                    conn_mgr.write_all(&to_send).await.map_err(crate::error::Error::Io)?;
                 }
             }
 
-            // Data from VPN to send to Android
+            // Data from VPN server to send to mobile app
             result = tokio::time::timeout(Duration::from_millis(500), conn_mgr.read_any(&mut read_buf)) => {
                 match result {
                     Ok(Ok((_conn_idx, n))) if n > 0 => {
+                        // Decrypt if RC4 is enabled
+                        if let Some(ref mut enc) = encryption {
+                            enc.decrypt(&mut read_buf[..n]);
+                        }
+                        
                         if let Ok(frames) = tunnel_codec.decode(&read_buf[..n]) {
                             if !frames.is_empty() {
                                 // Build length-prefixed buffer for callback
                                 let mut buffer = Vec::with_capacity(n + frames.len() * 2);
                                 for frame in &frames {
+                                    // Decompress if needed
                                     let frame_data: Vec<u8> = if is_compressed(frame) {
                                         decompress(frame).unwrap_or_else(|_| frame.to_vec())
                                     } else {

@@ -10,7 +10,7 @@
 | **DHCPv6** | ✅ (code exists) | ✅ | ✅ |
 | **Multi-Connection** | ✅ | ❌ | ❌ |
 | **Half-Connection Mode** | ✅ | ❌ | ❌ |
-| **RC4 Encryption** | ✅ | ❌ **MISSING** | ❌ **MISSING** |
+| **RC4 Encryption** | ✅ | ✅ | ✅ |
 | **Compression** | ✅ | ✅ | ✅ |
 | **UDP Acceleration** | ❌ (auth only) | ❌ (auth only) | ❌ (auth only) |
 | **Socket Protection** | N/A | ✅ | ✅ |
@@ -25,7 +25,7 @@
 
 ## Detailed Analysis
 
-### 1. RC4 Tunnel Encryption (CRITICAL GAP)
+### 1. RC4 Tunnel Encryption ✅ COMPLETE
 
 **Desktop (tunnel/runner.rs):**
 - ✅ Parses RC4 keys from server Welcome packet via `AuthResult.rc4_key_pair`
@@ -36,13 +36,11 @@
 **FFI Client (ffi/client.rs):**
 - ✅ Parses `use_encrypt` config flag
 - ✅ Server returns RC4 keys in auth response (parsed in `protocol/auth.rs`)
-- ❌ Does NOT create `TunnelEncryption` instance in packet loop
-- ❌ Does NOT encrypt outgoing frames in `run_packet_loop`
-- ❌ Does NOT decrypt incoming frames
+- ✅ `TunnelEncryption` struct in `run_packet_loop`
+- ✅ Encrypts outgoing frames before send
+- ✅ Decrypts incoming frames after receive
 
-**Impact:** When `use_encrypt=true` and server sends RC4 keys, mobile apps think encryption is enabled but data is sent unencrypted within the TLS tunnel. This is a security gap if the user expects application-layer encryption.
-
-**Fix Required:** Wire `auth_result.rc4_key_pair` into `run_packet_loop` and apply encrypt/decrypt.
+**Implementation:** Both paths share `crate::crypto::{Rc4, Rc4KeyPair}` and apply streaming RC4 cipher to all tunnel data when `use_encrypt=true` and server provides keys.
 
 ---
 
@@ -100,7 +98,7 @@
 
 | Feature | Desktop | FFI/Mobile |
 |---------|---------|------------|
-| RC4 Encryption | `src/tunnel/runner.rs:TunnelEncryption` | **MISSING** |
+| RC4 Encryption | `src/tunnel/runner.rs:TunnelEncryption` | `src/ffi/client.rs:TunnelEncryption` |
 | Compression | `src/protocol/tunnel.rs:compress/decompress` | Same (shared) |
 | Multi-Connection | `src/client/multi_connection.rs` | N/A |
 | DHCP | `src/tunnel/runner.rs` (desktop), `src/ffi/client.rs:perform_dhcp` | Separate impls |
@@ -111,26 +109,18 @@
 
 ## Recommended Fixes
 
-### High Priority
-
-1. **Add RC4 encryption to FFI packet loop**
-   - Pass `auth_result.rc4_key_pair` to `run_packet_loop`
-   - Create `TunnelEncryption` if keys present
-   - Call `encrypt()` before send, `decrypt()` after receive
-   - Files: `src/ffi/client.rs`
-
 ### Medium Priority
 
-2. **Android IP exclusion callback**
+1. **Android IP exclusion callback**
    - Add `exclude_ip` callback for cluster redirect scenarios
    - Currently only iOS has this callback
 
 ### Low Priority
 
-3. **UDP acceleration data path**
+2. **UDP acceleration data path**
    - Requires parallel UDP socket management
    - Deferred until TCP performance issues reported
 
-4. **Multi-connection for mobile**
+3. **Multi-connection for mobile**
    - Single connection is sufficient for mobile use cases
    - Would add complexity with minimal benefit

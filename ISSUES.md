@@ -2,12 +2,7 @@
 
 ## 1. Critical
 
-### 1.1 RC4 Encryption Missing in FFI/Mobile Path
-- Desktop `tunnel/runner.rs` has full RC4 integration via `TunnelEncryption`
-- FFI `ffi/client.rs:run_packet_loop` does NOT apply RC4 encrypt/decrypt
-- Server sends RC4 keys in auth response, but they are not used
-- **Impact:** Mobile apps send data unencrypted within TLS when `use_encrypt=true`
-- **Fix:** Wire `auth_result.rc4_key_pair` into packet loop, create `TunnelEncryption`, apply encrypt/decrypt
+_No critical issues._
 
 ---
 
@@ -73,4 +68,6 @@ _All half-connection mode issues resolved._
 - ✅ Packet queue backpressure implemented (QueueFull result code, dropped packet stats)
 - ✅ UDP acceleration auth flow wired (params sent, server response parsed)
 - ✅ FIFO buffer pre-allocation (compress_into for zero-alloc hot path, pre-alloc comp_buf)
+- ✅ iOS socket protection via setsockopt(SO_NET_SERVICE_TYPE, NET_SERVICE_TYPE_VV)
+- ✅ RC4 encryption in FFI/mobile packet loop (TunnelEncryption with encrypt/decrypt)
 - ✅ Half-connection mode direction verified (TcpDirection 0=Both, 1=ServerToClient, 2=ClientToServer matches official C; primary always ClientToServer; can_send/can_recv filters connections correctly)
