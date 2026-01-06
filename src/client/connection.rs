@@ -392,6 +392,17 @@ impl VpnConnection {
         Ok(VpnConnection::Tls(Box::new(tls_stream)))
     }
 
+    /// Connect to the VPN server with socket protection callback.
+    /// Windows stub - socket protection is only needed on Android/Linux.
+    #[cfg(windows)]
+    pub async fn connect_with_protect<F>(config: &VpnConfig, _protect_socket: F) -> Result<Self>
+    where
+        F: FnOnce(i32) -> bool,
+    {
+        // On Windows, we don't need socket protection - just use regular connect
+        Self::connect(config).await
+    }
+
     /// Read data from the connection.
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {

@@ -789,6 +789,11 @@ fn create_session_from_dhcp(
         server_build: 0,
         mac_address: mac,
         gateway_mac: [0; 6], // Will be learned dynamically
+        ipv6_address: [0; 16],
+        ipv6_prefix_len: 0,
+        _padding: [0; 3],
+        dns1_v6: [0; 16],
+        dns2_v6: [0; 16],
     }
 }
 
@@ -1786,6 +1791,11 @@ impl Clone for SoftEtherSession {
             server_build: self.server_build,
             mac_address: self.mac_address,
             gateway_mac: self.gateway_mac,
+            ipv6_address: self.ipv6_address,
+            ipv6_prefix_len: self.ipv6_prefix_len,
+            _padding: self._padding,
+            dns1_v6: self.dns1_v6,
+            dns2_v6: self.dns2_v6,
         }
     }
 }
