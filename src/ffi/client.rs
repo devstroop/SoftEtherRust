@@ -333,6 +333,13 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
         }
     };
 
+    // Log initial state transition
+    if let Some(cb) = guard.callbacks.on_log {
+        if let Ok(cstr) = std::ffi::CString::new("[RUST STATE] softether_connect: setting state to Connecting") {
+            cb(guard.callbacks.context, 1, cstr.as_ptr());
+        }
+    }
+
     guard.set_state(SoftEtherState::Connecting);
     guard.notify_state(SoftEtherState::Connecting);
     guard.running.store(true, Ordering::SeqCst);
@@ -478,6 +485,13 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
         // Notify disconnection
         running.store(false, Ordering::SeqCst);
 
+        // Log final disconnection state
+        if let Some(log_cb) = callbacks.on_log {
+            if let Ok(cstr) = std::ffi::CString::new("[RUST STATE] Connection loop ended, notifying Disconnected") {
+                log_cb(callbacks.context, 1, cstr.as_ptr());
+            }
+        }
+
         if let Some(cb) = callbacks.on_state_changed {
             cb(callbacks.context, SoftEtherState::Disconnected);
         }
@@ -498,6 +512,23 @@ fn update_state(
     callbacks: &SoftEtherCallbacks,
     state: SoftEtherState,
 ) {
+    // Log state transition for debugging
+    if let Some(log_cb) = callbacks.on_log {
+        let state_name = match state {
+            SoftEtherState::Disconnected => "Disconnected",
+            SoftEtherState::Connecting => "Connecting",
+            SoftEtherState::Handshaking => "Handshaking",
+            SoftEtherState::Authenticating => "Authenticating",
+            SoftEtherState::EstablishingTunnel => "EstablishingTunnel",
+            SoftEtherState::Connected => "Connected",
+            SoftEtherState::Disconnecting => "Disconnecting",
+            SoftEtherState::Error => "Error",
+        };
+        if let Ok(cstr) = std::ffi::CString::new(format!("[RUST STATE] Transitioning to: {}", state_name)) {
+            log_cb(callbacks.context, 1, cstr.as_ptr());
+        }
+    }
+    
     atomic_state.store(state as u8, Ordering::SeqCst);
     if let Some(cb) = callbacks.on_state_changed {
         cb(callbacks.context, state);
