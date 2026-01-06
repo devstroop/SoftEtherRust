@@ -278,7 +278,7 @@ impl VpnConnection {
 
         // Set TCP options for high throughput
         stream.set_nodelay(true)?;
-        
+
         // Increase TCP buffer sizes for better throughput on high-latency links
         let sock_ref = SockRef::from(&stream);
         let _ = sock_ref.set_recv_buffer_size(1024 * 1024); // 1MB receive buffer
@@ -358,7 +358,7 @@ impl VpnConnection {
         {
             const SO_NET_SERVICE_TYPE: libc::c_int = 0x1016;
             const NET_SERVICE_TYPE_VPN: libc::c_int = 6;
-            
+
             let result = unsafe {
                 libc::setsockopt(
                     fd,
@@ -371,8 +371,10 @@ impl VpnConnection {
             if result == 0 {
                 info!("Apple: Set SO_NET_SERVICE_TYPE to NET_SERVICE_TYPE_VPN (6) on fd {fd}");
             } else {
-                warn!("Apple: Failed to set SO_NET_SERVICE_TYPE on fd {fd}, errno={}", 
-                       std::io::Error::last_os_error());
+                warn!(
+                    "Apple: Failed to set SO_NET_SERVICE_TYPE on fd {fd}, errno={}",
+                    std::io::Error::last_os_error()
+                );
             }
         }
         if !protect_socket(fd) {
@@ -384,7 +386,7 @@ impl VpnConnection {
 
         // Set TCP options for high throughput
         stream.set_nodelay(true)?;
-        
+
         // Increase TCP buffer sizes for better throughput on high-latency links
         let sock_ref = SockRef::from(&stream);
         let _ = sock_ref.set_recv_buffer_size(1024 * 1024); // 1MB receive buffer
@@ -429,6 +431,17 @@ impl VpnConnection {
 
         info!("TLS connection established (protected)");
         Ok(VpnConnection::Tls(Box::new(tls_stream)))
+    }
+
+    /// Connect to the VPN server with socket protection callback.
+    /// Windows stub - socket protection is only needed on Android/Linux.
+    #[cfg(windows)]
+    pub async fn connect_with_protect<F>(config: &VpnConfig, _protect_socket: F) -> Result<Self>
+    where
+        F: FnOnce(i32) -> bool,
+    {
+        // On Windows, we don't need socket protection - just use regular connect
+        Self::connect(config).await
     }
 
     /// Read data from the connection.

@@ -87,10 +87,12 @@ pub enum Error {
     /// Connection closed by peer
     #[error("Connection closed: {0}")]
     ConnectionClosed(String),
-    
+
     /// TLS mode mismatch - server not using TLS for tunnel data
     /// This happens when the cluster server is configured differently from expected
-    #[error("TLS mode mismatch: Server not using TLS encryption for tunnel data. Try reconnecting.")]
+    #[error(
+        "TLS mode mismatch: Server not using TLS encryption for tunnel data. Try reconnecting."
+    )]
     TlsModeMismatch,
 }
 
@@ -146,20 +148,24 @@ impl Error {
                 | Self::TlsModeMismatch
         )
     }
-    
+
     /// Check if this error indicates a TLS mode mismatch.
     /// This happens when the server sends non-TLS data on a TLS connection.
     pub fn is_tls_mode_mismatch(&self) -> bool {
-        matches!(self, Self::TlsModeMismatch) ||
-        match self {
-            Self::ConnectionClosed(msg) => msg.contains("InvalidContentType") || msg.contains("corrupt message"),
-            Self::Tls(msg) => msg.contains("InvalidContentType") || msg.contains("corrupt message"),
-            Self::Io(e) => {
-                let msg = e.to_string();
-                msg.contains("InvalidContentType") || msg.contains("corrupt message")
+        matches!(self, Self::TlsModeMismatch)
+            || match self {
+                Self::ConnectionClosed(msg) => {
+                    msg.contains("InvalidContentType") || msg.contains("corrupt message")
+                }
+                Self::Tls(msg) => {
+                    msg.contains("InvalidContentType") || msg.contains("corrupt message")
+                }
+                Self::Io(e) => {
+                    let msg = e.to_string();
+                    msg.contains("InvalidContentType") || msg.contains("corrupt message")
+                }
+                _ => false,
             }
-            _ => false,
-        }
     }
 }
 

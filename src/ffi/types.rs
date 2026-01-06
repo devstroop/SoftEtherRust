@@ -109,7 +109,7 @@ pub struct SoftEtherConfig {
 /// Session information returned after successful connection.
 #[repr(C)]
 pub struct SoftEtherSession {
-    /// Assigned IP address (network byte order).
+    /// Assigned IPv4 address (network byte order).
     pub ip_address: u32,
     /// Subnet mask (network byte order).
     pub subnet_mask: u32,
@@ -130,6 +130,16 @@ pub struct SoftEtherSession {
     pub mac_address: [u8; 6],
     /// Gateway MAC address (6 bytes, 0 if unknown).
     pub gateway_mac: [u8; 6],
+    /// IPv6 address (16 bytes, 0 if not assigned).
+    pub ipv6_address: [u8; 16],
+    /// IPv6 prefix length (e.g., 64 or 128).
+    pub ipv6_prefix_len: u8,
+    /// Padding for alignment.
+    pub _padding: [u8; 3],
+    /// Primary IPv6 DNS server (16 bytes, 0 if not available).
+    pub dns1_v6: [u8; 16],
+    /// Secondary IPv6 DNS server (16 bytes, 0 if not available).
+    pub dns2_v6: [u8; 16],
 }
 
 /// Packet buffer for sending/receiving.
@@ -208,6 +218,11 @@ impl Default for SoftEtherSession {
             server_build: 0,
             mac_address: [0; 6],
             gateway_mac: [0; 6],
+            ipv6_address: [0; 16],
+            ipv6_prefix_len: 0,
+            _padding: [0; 3],
+            dns1_v6: [0; 16],
+            dns2_v6: [0; 16],
         }
     }
 }

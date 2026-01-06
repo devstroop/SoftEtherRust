@@ -77,7 +77,8 @@ pub type ProtectSocketCallback = Option<extern "C" fn(context: *mut c_void, fd: 
 ///
 /// # Returns
 /// true if exclusion succeeded, false otherwise.
-pub type ExcludeIPCallback = Option<extern "C" fn(context: *mut c_void, ip: *const std::ffi::c_char) -> bool>;
+pub type ExcludeIPCallback =
+    Option<extern "C" fn(context: *mut c_void, ip: *const std::ffi::c_char) -> bool>;
 
 /// Collection of all callbacks.
 #[repr(C)]

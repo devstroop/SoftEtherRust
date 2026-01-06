@@ -3,7 +3,7 @@
 //! This module provides C-callable functions for the VPN client with actual
 //! connection logic wired to the SoftEther protocol implementation.
 
-use std::ffi::{c_char, c_int, c_void, CStr};
+use std::ffi::{c_char, c_int, CStr};
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -344,7 +344,9 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
 
     // Log early to confirm we got this far
     if let Some(cb) = guard.callbacks.on_log {
-        if let Ok(cstr) = std::ffi::CString::new("[RUST-FFI] softether_connect called, creating runtime...") {
+        if let Ok(cstr) =
+            std::ffi::CString::new("[RUST-FFI] softether_connect called, creating runtime...")
+        {
             cb(guard.callbacks.context, 1, cstr.as_ptr());
         }
     }
@@ -364,7 +366,7 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
     let runtime_result = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build();
-    
+
     #[cfg(not(target_os = "ios"))]
     let runtime_result = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
@@ -374,7 +376,9 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
     let runtime = match runtime_result {
         Ok(rt) => {
             if let Some(cb) = guard.callbacks.on_log {
-                if let Ok(cstr) = std::ffi::CString::new("[RUST-FFI] Tokio runtime created successfully") {
+                if let Ok(cstr) =
+                    std::ffi::CString::new("[RUST-FFI] Tokio runtime created successfully")
+                {
                     cb(guard.callbacks.context, 1, cstr.as_ptr());
                 }
             }
@@ -382,7 +386,9 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
         }
         Err(e) => {
             if let Some(cb) = guard.callbacks.on_log {
-                if let Ok(cstr) = std::ffi::CString::new(format!("[RUST-FFI] Failed to create runtime: {e}")) {
+                if let Ok(cstr) =
+                    std::ffi::CString::new(format!("[RUST-FFI] Failed to create runtime: {e}"))
+                {
                     cb(guard.callbacks.context, 3, cstr.as_ptr());
                 }
             }
@@ -420,20 +426,24 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
         let on_log = callbacks.on_log;
         let on_state_changed = callbacks.on_state_changed;
         let on_disconnected = callbacks.on_disconnected;
-        
+
         std::thread::spawn(move || {
             // Reconstruct context pointer inside the thread
             let ctx = ctx_usize as *mut c_void;
-            
+
             if let Some(cb) = on_log {
-                if let Ok(cstr) = std::ffi::CString::new("[RUST-FFI] Background thread started, running async task...") {
+                if let Ok(cstr) = std::ffi::CString::new(
+                    "[RUST-FFI] Background thread started, running async task...",
+                ) {
                     cb(ctx, 1, cstr.as_ptr());
                 }
             }
-            
+
             runtime.block_on(async move {
                 if let Some(cb) = callbacks.on_log {
-                    if let Ok(cstr) = std::ffi::CString::new("[RUST-FFI] Async task started, calling connect_and_run...") {
+                    if let Ok(cstr) = std::ffi::CString::new(
+                        "[RUST-FFI] Async task started, calling connect_and_run...",
+                    ) {
                         cb(callbacks.context, 1, cstr.as_ptr());
                     }
                 }
@@ -453,7 +463,9 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
                 let disconnect_result = match result {
                     Ok(()) => {
                         if let Some(cb) = callbacks.on_log {
-                            if let Ok(cstr) = std::ffi::CString::new("[RUST-FFI] Connection ended normally") {
+                            if let Ok(cstr) =
+                                std::ffi::CString::new("[RUST-FFI] Connection ended normally")
+                            {
                                 cb(callbacks.context, 1, cstr.as_ptr());
                             }
                         }
@@ -461,13 +473,19 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
                     }
                     Err(ref e) => {
                         if let Some(cb) = callbacks.on_log {
-                            if let Ok(cstr) = std::ffi::CString::new(format!("[RUST-FFI] Connection error: {e}")) {
+                            if let Ok(cstr) =
+                                std::ffi::CString::new(format!("[RUST-FFI] Connection error: {e}"))
+                            {
                                 cb(callbacks.context, 3, cstr.as_ptr());
                             }
                         }
                         match e {
-                            crate::error::Error::AuthenticationFailed(_) => SoftEtherResult::AuthFailed,
-                            crate::error::Error::ConnectionFailed(_) => SoftEtherResult::ConnectionFailed,
+                            crate::error::Error::AuthenticationFailed(_) => {
+                                SoftEtherResult::AuthFailed
+                            }
+                            crate::error::Error::ConnectionFailed(_) => {
+                                SoftEtherResult::ConnectionFailed
+                            }
                             crate::error::Error::Timeout => SoftEtherResult::Timeout,
                             crate::error::Error::UserAlreadyLoggedIn => SoftEtherResult::AuthFailed,
                             _ => SoftEtherResult::InternalError,
@@ -483,7 +501,7 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
                 }
             });
         });
-        
+
         // Don't store runtime for iOS - it's moved to the thread
         guard.runtime = None;
     }
@@ -493,7 +511,9 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
         // Spawn the connection task (multi-thread runtime drives itself)
         runtime.spawn(async move {
             if let Some(cb) = callbacks.on_log {
-                if let Ok(cstr) = std::ffi::CString::new("Async task started, calling connect_and_run...") {
+                if let Ok(cstr) =
+                    std::ffi::CString::new("Async task started, calling connect_and_run...")
+                {
                     cb(callbacks.context, 1, cstr.as_ptr());
                 }
             }
@@ -527,7 +547,9 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
                     }
                     match e {
                         crate::error::Error::AuthenticationFailed(_) => SoftEtherResult::AuthFailed,
-                        crate::error::Error::ConnectionFailed(_) => SoftEtherResult::ConnectionFailed,
+                        crate::error::Error::ConnectionFailed(_) => {
+                            SoftEtherResult::ConnectionFailed
+                        }
                         crate::error::Error::Timeout => SoftEtherResult::Timeout,
                         crate::error::Error::UserAlreadyLoggedIn => SoftEtherResult::AuthFailed,
                         _ => SoftEtherResult::InternalError,
@@ -898,6 +920,11 @@ fn create_session_from_dhcp(
         server_build: 0,
         mac_address: mac,
         gateway_mac: [0; 6], // Will be learned dynamically
+        ipv6_address: [0; 16],
+        ipv6_prefix_len: 0,
+        _padding: [0; 3],
+        dns1_v6: [0; 16],
+        dns2_v6: [0; 16],
     }
 }
 
@@ -928,7 +955,11 @@ async fn connect_redirect(
     // This is CRITICAL for cluster redirect to work on iOS
     if let Some(exclude_cb) = callbacks.exclude_ip {
         if let Ok(ip_cstr) = std::ffi::CString::new(redirect_server.clone()) {
-            log_msg(callbacks, 1, &format!("[RUST] Requesting route exclusion for redirect IP: {}", redirect_server));
+            log_msg(
+                callbacks,
+                1,
+                &format!("[RUST] Requesting route exclusion for redirect IP: {redirect_server}"),
+            );
             let ctx = callbacks.context;
             let excluded = exclude_cb(ctx, ip_cstr.as_ptr());
             if excluded {
@@ -936,11 +967,19 @@ async fn connect_redirect(
                 // Give iOS time to apply the route change
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             } else {
-                log_msg(callbacks, 2, "[RUST] Warning: Route exclusion failed or not supported - continuing anyway");
+                log_msg(
+                    callbacks,
+                    2,
+                    "[RUST] Warning: Route exclusion failed or not supported - continuing anyway",
+                );
             }
         }
     } else {
-        log_msg(callbacks, 1, "[RUST] No exclude_ip callback - relying on SO_NET_SERVICE_TYPE");
+        log_msg(
+            callbacks,
+            1,
+            "[RUST] No exclude_ip callback - relying on SO_NET_SERVICE_TYPE",
+        );
     }
 
     // Create a modified config for the redirect server
@@ -950,7 +989,7 @@ async fn connect_redirect(
     redirect_config.sni_hostname = Some(config.server.clone()); // Preserve original hostname for SNI
     redirect_config.server = redirect_server.clone();
     redirect_config.port = redirect_port;
-    
+
     log_msg(
         callbacks,
         1,
@@ -1089,51 +1128,102 @@ async fn perform_dhcp(
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
 
     // Check for pending server data before DHCP (keepalive frames, etc.)
-    log_msg(callbacks, 1, "[RUST] Checking for pending server data before DHCP...");
-    
+    log_msg(
+        callbacks,
+        1,
+        "[RUST] Checking for pending server data before DHCP...",
+    );
+
     // Try a non-blocking read to drain any pending data
     match tokio::time::timeout(Duration::from_millis(200), conn_mgr.read_any(&mut buf)).await {
         Ok(Ok((_conn_idx, n))) if n > 0 => {
-            log_msg(callbacks, 1, &format!("[RUST] Pre-DHCP: Received {} bytes from conn {}", n, _conn_idx));
-            
+            log_msg(
+                callbacks,
+                1,
+                &format!("[RUST] Pre-DHCP: Received {n} bytes from conn {_conn_idx}"),
+            );
+
             // Log first 64 bytes for debugging
             let preview_len = n.min(64);
-            let preview: Vec<String> = buf[..preview_len].iter().map(|b| format!("{:02X}", b)).collect();
-            log_msg(callbacks, 1, &format!("[RUST] Pre-DHCP data (first {} bytes): [{}]", preview_len, preview.join(", ")));
-            
+            let preview: Vec<String> = buf[..preview_len]
+                .iter()
+                .map(|b| format!("{b:02X}"))
+                .collect();
+            log_msg(
+                callbacks,
+                1,
+                &format!(
+                    "[RUST] Pre-DHCP data (first {} bytes): [{}]",
+                    preview_len,
+                    preview.join(", ")
+                ),
+            );
+
             // Try to decode as tunnel frames
             match codec.feed(&buf[..n]) {
                 Ok(frames) => {
-                    log_msg(callbacks, 1, &format!("[RUST] Pre-DHCP: Decoded {} tunnel frames", frames.len()));
+                    log_msg(
+                        callbacks,
+                        1,
+                        &format!("[RUST] Pre-DHCP: Decoded {} tunnel frames", frames.len()),
+                    );
                     for (i, frame) in frames.iter().enumerate() {
                         if frame.is_keepalive() {
-                            log_msg(callbacks, 1, &format!("[RUST] Pre-DHCP frame {}: keepalive", i));
+                            log_msg(
+                                callbacks,
+                                1,
+                                &format!("[RUST] Pre-DHCP frame {i}: keepalive"),
+                            );
                         }
                     }
                 }
                 Err(e) => {
-                    log_msg(callbacks, 2, &format!("[RUST] Pre-DHCP: Failed to decode frames: {}", e));
+                    log_msg(
+                        callbacks,
+                        2,
+                        &format!("[RUST] Pre-DHCP: Failed to decode frames: {e}"),
+                    );
                 }
             }
         }
         Ok(Err(e)) => {
             let err_msg = e.to_string();
-            log_msg(callbacks, 2, &format!("[RUST] Pre-DHCP: Read error: {}", err_msg));
-            log_msg(callbacks, 2, &format!("[RUST] Pre-DHCP: Error details: {:?}, kind: {:?}", err_msg, e.kind()));
-            
+            log_msg(
+                callbacks,
+                2,
+                &format!("[RUST] Pre-DHCP: Read error: {err_msg}"),
+            );
+            log_msg(
+                callbacks,
+                2,
+                &format!(
+                    "[RUST] Pre-DHCP: Error details: {:?}, kind: {:?}",
+                    err_msg,
+                    e.kind()
+                ),
+            );
+
             // Check for TLS mode mismatch
             if err_msg.contains("InvalidContentType") || err_msg.contains("corrupt message") {
                 if let Some(source) = e.get_ref() {
-                    log_msg(callbacks, 2, &format!("[RUST] Pre-DHCP: Error source: {:?}", source));
+                    log_msg(
+                        callbacks,
+                        2,
+                        &format!("[RUST] Pre-DHCP: Error source: {source:?}"),
+                    );
                 }
                 log_msg(callbacks, 3, "[RUST] TLS mode mismatch detected - server may not be using TLS for tunnel data");
-                return Err(crate::error::Error::ConnectionClosed(
-                    format!("TLS mode mismatch: Server sent non-TLS data after authentication: {}", err_msg)
-                ));
+                return Err(crate::error::Error::ConnectionClosed(format!(
+                    "TLS mode mismatch: Server sent non-TLS data after authentication: {err_msg}"
+                )));
             }
         }
         Ok(Ok(_)) | Err(_) => {
-            log_msg(callbacks, 1, "[RUST] Pre-DHCP: No pending data (timeout or 0 bytes)");
+            log_msg(
+                callbacks,
+                1,
+                "[RUST] Pre-DHCP: No pending data (timeout or 0 bytes)",
+            );
         }
     }
 
@@ -1199,18 +1289,30 @@ async fn perform_dhcp(
             Ok(Err(e)) => {
                 let err_msg = e.to_string();
                 log_msg(callbacks, 2, &format!("[RUST] Read error during DHCP: {e}"));
-                log_msg(callbacks, 2, &format!("[RUST] Error kind: {:?}, debug: {:?}", e.kind(), e));
-                
+                log_msg(
+                    callbacks,
+                    2,
+                    &format!("[RUST] Error kind: {:?}, debug: {:?}", e.kind(), e),
+                );
+
                 // Check for TLS mode mismatch (server sending non-TLS data)
                 if err_msg.contains("InvalidContentType") || err_msg.contains("corrupt message") {
                     if let Some(source) = e.get_ref() {
-                        log_msg(callbacks, 2, &format!("[RUST] Error source: {:?}", source));
+                        log_msg(callbacks, 2, &format!("[RUST] Error source: {source:?}"));
                     }
-                    log_msg(callbacks, 3, "[RUST] Fatal TLS error - connection is broken");
-                    log_msg(callbacks, 3, "[RUST] This may indicate server TLS mode mismatch. Try reconnecting.");
-                    return Err(crate::error::Error::ConnectionClosed(
-                        format!("TLS connection broken during DHCP: {}", err_msg)
-                    ));
+                    log_msg(
+                        callbacks,
+                        3,
+                        "[RUST] Fatal TLS error - connection is broken",
+                    );
+                    log_msg(
+                        callbacks,
+                        3,
+                        "[RUST] This may indicate server TLS mode mismatch. Try reconnecting.",
+                    );
+                    return Err(crate::error::Error::ConnectionClosed(format!(
+                        "TLS connection broken during DHCP: {err_msg}"
+                    )));
                 }
             }
             Err(_) => {
@@ -1990,6 +2092,11 @@ impl Clone for SoftEtherSession {
             server_build: self.server_build,
             mac_address: self.mac_address,
             gateway_mac: self.gateway_mac,
+            ipv6_address: self.ipv6_address,
+            ipv6_prefix_len: self.ipv6_prefix_len,
+            _padding: self._padding,
+            dns1_v6: self.dns1_v6,
+            dns2_v6: self.dns2_v6,
         }
     }
 }

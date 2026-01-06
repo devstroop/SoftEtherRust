@@ -336,6 +336,7 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
         on_packets_received: Some(jni_on_packets_received),
         on_log: Some(jni_on_log),
         protect_socket: Some(jni_protect_socket),
+        exclude_ip: None, // Android doesn't need IP exclusion (uses protect_socket instead)
     };
 
     // Create client
