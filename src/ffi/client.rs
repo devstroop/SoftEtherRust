@@ -42,8 +42,8 @@ struct FfiClient {
     atomic_state: Arc<AtomicU8>,
     /// Session info (after connection)
     session: Option<SoftEtherSession>,
-    /// Statistics
-    stats: FfiStats,
+    /// Statistics (Arc for sharing with async task)
+    stats: Arc<FfiStats>,
     /// Tokio runtime
     runtime: Option<tokio::runtime::Runtime>,
     /// Running flag
@@ -83,7 +83,7 @@ impl FfiClient {
             state: SoftEtherState::Disconnected,
             atomic_state: Arc::new(AtomicU8::new(SoftEtherState::Disconnected as u8)),
             session: None,
-            stats: FfiStats::default(),
+            stats: Arc::new(FfiStats::default()),
             runtime: None,
             running: Arc::new(AtomicBool::new(false)),
             tx_sender: None,
@@ -377,6 +377,7 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
     let running = guard.running.clone();
     let callbacks = guard.callbacks.clone();
     let atomic_state = guard.atomic_state.clone();
+    let stats = guard.stats.clone();
 
     // Log that we're starting the async task
     if let Some(cb) = callbacks.on_log {
@@ -402,6 +403,7 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
             callbacks.clone(),
             tx_recv,
             atomic_state,
+            stats,
         )
         .await;
 
@@ -466,6 +468,7 @@ async fn connect_and_run(
     callbacks: SoftEtherCallbacks,
     mut tx_recv: mpsc::Receiver<Vec<u8>>,
     atomic_state: Arc<AtomicU8>,
+    stats: Arc<FfiStats>,
 ) -> crate::error::Result<()> {
     // Log helper - must clone callbacks for local use
     fn log_message(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
@@ -484,6 +487,7 @@ async fn connect_and_run(
             &callbacks,
             &mut tx_recv,
             &atomic_state,
+            &stats,
         )
         .await
         {
@@ -525,6 +529,7 @@ async fn connect_and_run_inner(
     callbacks: &SoftEtherCallbacks,
     tx_recv: &mut mpsc::Receiver<Vec<u8>>,
     atomic_state: &Arc<AtomicU8>,
+    stats: &Arc<FfiStats>,
 ) -> crate::error::Result<()> {
     // Log helper
     fn log_message(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
@@ -909,6 +914,7 @@ async fn connect_and_run_inner(
         final_auth.rc4_key_pair.as_ref(),
         config.qos,
         udp_accel.as_mut(),
+        stats,
     )
     .await
 }
@@ -1452,6 +1458,7 @@ async fn run_packet_loop(
     rc4_key_pair: Option<&Rc4KeyPair>,
     qos_enabled: bool,
     udp_accel: Option<&mut crate::net::UdpAccel>,
+    stats: &Arc<FfiStats>,
 ) -> crate::error::Result<()> {
     use crate::packet::is_priority_packet;
     fn log_msg(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
@@ -1616,6 +1623,10 @@ async fn run_packet_loop(
                         });
                     }
                     
+                    // Calculate bytes being sent for stats
+                    let total_bytes: usize = modified_frames.iter().map(|f| f.len()).sum();
+                    let packet_count = modified_frames.len() as u64;
+                    
                     // Try UDP acceleration first if ready
                     let mut sent_via_udp = false;
                     if let Some(ref mut ua) = udp_accel {
@@ -1647,6 +1658,10 @@ async fn run_packet_loop(
                         
                         conn_mgr.write_all(&to_send).await.map_err(crate::error::Error::Io)?;
                     }
+                    
+                    // Update send statistics
+                    stats.packets_sent.fetch_add(packet_count, Ordering::Relaxed);
+                    stats.bytes_sent.fetch_add(total_bytes as u64, Ordering::Relaxed);
                 }
             }
 
@@ -1681,6 +1696,10 @@ async fn run_packet_loop(
                         }
                     }
                     
+                    // Update receive statistics
+                    stats.packets_received.fetch_add(1, Ordering::Relaxed);
+                    stats.bytes_received.fetch_add(frame_data.len() as u64, Ordering::Relaxed);
+                    
                     let len = frame_data.len() as u16;
                     buffer.extend_from_slice(&len.to_be_bytes());
                     buffer.extend_from_slice(&frame_data);
@@ -1704,6 +1723,7 @@ async fn run_packet_loop(
                             if !frames.is_empty() {
                                 // Build length-prefixed buffer for callback
                                 let mut buffer = Vec::with_capacity(n + frames.len() * 2);
+                                let mut total_bytes: u64 = 0;
                                 for frame in &frames {
                                     // Decompress if needed
                                     let frame_data: Vec<u8> = if is_compressed(frame) {
@@ -1731,10 +1751,16 @@ async fn run_packet_loop(
                                         }
                                     }
                                     
+                                    total_bytes += frame_data.len() as u64;
                                     let len = frame_data.len() as u16;
                                     buffer.extend_from_slice(&len.to_be_bytes());
                                     buffer.extend_from_slice(&frame_data);
                                 }
+                                
+                                // Update receive statistics
+                                stats.packets_received.fetch_add(frames.len() as u64, Ordering::Relaxed);
+                                stats.bytes_received.fetch_add(total_bytes, Ordering::Relaxed);
+                                
                                 if let Some(cb) = callbacks.on_packets_received {
                                     cb(callbacks.context, buffer.as_ptr(), buffer.len(), frames.len() as u32);
                                 }

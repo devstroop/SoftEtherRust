@@ -25,19 +25,20 @@ _All Android issues resolved._
 - ✅ Server UDP accel response parsed (`UdpAccelServerResponse`)
 - ✅ UDP data path integrated into FFI packet loop
 - ✅ V1 protocol (RC4 + SHA-1) fully implemented
+- ✅ V2 protocol (ChaCha20-Poly1305 AEAD) fully implemented
 - ✅ Automatic fallback to TCP when UDP not ready
 - ✅ Parallel send/receive in packet loop
-- ❌ V2 protocol (ChaCha20-Poly1305) not yet implemented
 - Impact: Provides lower-latency tunnel when UDP path established
 
 ---
 
 ## 5. Performance
 
-### 5.1 Packet Statistics Not Incremented (FFI)
-- `bytes_sent`, `bytes_received`, `packets_sent`, `packets_received` not updated in packet loop
-- Only `packets_dropped` and `uptime_secs` work correctly
-- Impact: Low - stats API returns zeros for traffic counters
+### 5.1 Packet Statistics ✅ RESOLVED
+- ✅ `bytes_sent`, `bytes_received`, `packets_sent`, `packets_received` now incremented in FFI packet loop
+- ✅ `packets_dropped` and `uptime_secs` work correctly
+- ✅ Stats wrapped in `Arc<FfiStats>` and passed through async task chain
+- Impact: Resolved - mobile apps can now show accurate traffic statistics
 
 ### 5.2 ARP / Gateway MAC Learning ✅ RESOLVED
 - ✅ Desktop learns gateway MAC via ARP responses
@@ -101,3 +102,5 @@ _All half-connection mode issues resolved._
 - ✅ Reconnection logic for FFI/mobile (retry with 10s delay for UserAlreadyLoggedIn, up to 5 attempts)
 - ✅ ARP/Gateway MAC learning for FFI/mobile (GARP + gateway request sent, ARP replies processed, outgoing frames use learned MAC)
 - ✅ QoS packet prioritization (is_priority_packet() detects ToS/DSCP, ICMP, VoIP ports; FFI sorts priority packets first)
+- ✅ UDP Acceleration V2 (ChaCha20-Poly1305 AEAD encryption for UDP packets)
+- ✅ Packet statistics in FFI (bytes_sent/received, packets_sent/received now tracked via Arc<FfiStats>)

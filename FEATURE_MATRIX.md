@@ -12,7 +12,7 @@
 | **Half-Connection Mode** | ✅ | ✅ | ✅ |
 | **RC4 Encryption** | ✅ | ✅ | ✅ |
 | **Compression** | ✅ | ✅ | ✅ |
-| **UDP Acceleration** | ❌ (auth only) | ❌ (auth only) | ❌ (auth only) |
+| **UDP Acceleration** | ✅ V1+V2 | ✅ V1+V2 | ✅ V1+V2 |
 | **Socket Protection** | N/A | ✅ | ✅ |
 | **IP Exclusion (Cluster)** | N/A | ✅ | ✅ |
 | **Certificate Pinning** | ✅ | ✅ | ✅ |
@@ -126,19 +126,22 @@
 
 ---
 
-## Recommended Fixes
+## Completed Items
 
-### Low Priority
-
-1. **UDP acceleration V2 (ChaCha20-Poly1305)**
-   - Currently only V1 (RC4 + SHA-1) implemented
-   - V2 offers better security but requires additional crypto
-
-2. **Packet statistics on FFI** 
-   - `bytes_sent`, `bytes_received`, `packets_sent`, `packets_received` not incremented in packet loop
-   - Only `packets_dropped` and `uptime_secs` work
-
-3. **ARP / Gateway MAC learning on mobile**
-   - Desktop learns gateway MAC via ARP; mobile always uses broadcast FF:FF:FF:FF:FF:FF
-   - Works but suboptimal for some L2 scenarios
+All major features are now complete:
+- ✅ TLS/HTTPS connection with certificate pinning
+- ✅ Password and secure authentication
+- ✅ DHCP v4 and v6 with lease renewal/rebind
+- ✅ Multi-connection and half-connection modes
+- ✅ RC4 tunnel encryption
+- ✅ LZ4 compression
+- ✅ UDP Acceleration V1 (RC4 + SHA-1) and V2 (ChaCha20-Poly1305)
+- ✅ Socket protection (iOS/Android)
+- ✅ IP exclusion for cluster redirects
+- ✅ NAT-T keepalive
+- ✅ IP fragmentation and reassembly
+- ✅ QoS packet prioritization
+- ✅ ARP/Gateway MAC learning
+- ✅ Packet statistics tracking
+- ✅ Reconnection logic for "User Already Logged In"
 
