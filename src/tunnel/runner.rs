@@ -267,6 +267,7 @@ impl TunnelRunner {
     /// Configure routes for VPN traffic.
     ///
     /// This sets up routing so traffic to the VPN subnet goes through the TUN device.
+    /// Currently only used when TUN adapter fully supports routing (Linux).
     #[allow(dead_code)]
     fn configure_routes(&self, tun: &impl TunAdapter, dhcp_config: &DhcpConfig) -> Result<()> {
         // CRITICAL: If default route is requested, add the VPN server host route FIRST

@@ -279,7 +279,7 @@ struct FragmentEntry {
     data: Vec<u8>,
     /// Fragment offset in bytes
     offset: usize,
-    /// Whether this is the last fragment
+    /// Whether this is the last fragment (stored for debugging/future use)
     #[allow(dead_code)]
     is_last: bool,
 }

@@ -57,13 +57,46 @@ _All Android issues resolved._
 
 ---
 
-## 6. Half-Connection Mode
+## 6. Code Quality
+
+### 6.1 Function Complexity ✅ RESOLVED
+- ✅ `connect_and_run_inner` refactored from 343 to ~120 lines
+- ✅ Extracted helpers to `src/ffi/connection.rs`: `update_state`, `resolve_server_ip`, `generate_session_mac`, `create_session_from_dhcp`, `init_udp_acceleration`, `log_encryption_status`
+- ✅ `run_packet_loop` refactored using helpers in `src/ffi/packet_loop.rs`
+- ✅ Extracted: `process_arp_for_learning`, `prepare_outbound_frames`, `process_received_frame`, `build_callback_buffer`, `update_stats`, `parse_length_prefixed_packets`
+- ✅ Converted inline `log_msg` helpers to `callbacks.log_info/warn/error()` method calls
+- Location: `src/ffi/client.rs`, `src/ffi/connection.rs`, `src/ffi/packet_loop.rs`
+
+### 6.2 Performance Optimizations (Low Priority)
+- ❌ `Vec::new()` allocations in packet parsing - use `Cow<[u8]>` for zero-copy
+- ❌ `to_lowercase()` on every Pack lookup - use `unicase::UniCase` for case-insensitive keys
+- Location: `src/ffi/client.rs`, `src/protocol/pack.rs`
+- Impact: Minor - reduces allocations in hot paths
+
+### 6.3 Dead Code Cleanup ✅ RESOLVED
+- ✅ `DhcpHandler` is actually used in `src/tunnel/data_loop.rs` (DataLoopState)
+- ✅ `#[allow(dead_code)]` annotations reviewed and documented:
+  - `notify_connected` in ffi/client.rs - reserved for future API
+  - `notify_state` annotation removed (method is used)
+  - Protocol constants (qos.rs, dhcpv6.rs, udp_accel.rs) - kept for API completeness
+  - `is_last` in fragment.rs - stored for debugging
+  - `configure_routes` in runner.rs - platform-specific, used on Linux
+- Location: Various files
+
+### 6.4 API Design (Low Priority)
+- ❌ `SoftEtherConfig` has 20+ fields - group into sub-structs
+- Location: `src/ffi/types.rs`
+- Recommendation: Group into `ConnectionConfig`, `SecurityConfig`, `RoutingConfig`, `FeatureFlags`
+
+---
+
+## 7. Half-Connection Mode
 
 _All half-connection mode issues resolved._
 
 ---
 
-## 7. Resolved
+## 8. Resolved
 
 - ✅ Compression latency (switched to fast level)
 - ✅ Android socket protection
@@ -108,3 +141,6 @@ _All half-connection mode issues resolved._
 - ✅ Code deduplication: `is_dhcp_response()` / `is_dhcpv6_response()` moved to `src/packet/mod.rs`
 - ✅ Added `SoftEtherCallbacks::log()` method to eliminate duplicate log helpers
 - ✅ Clippy warnings fixed (collapsible if, range contains, unnecessary to_vec)
+- ✅ Function complexity: `connect_and_run_inner` refactored 343→120 lines (helpers in connection.rs)
+- ✅ Function complexity: `run_packet_loop` refactored with helpers in packet_loop.rs
+- ✅ Dead code audit: `#[allow(dead_code)]` annotations reviewed and documented
