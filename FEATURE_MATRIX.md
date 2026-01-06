@@ -68,19 +68,21 @@
 - ✅ Server response parsed (`UdpAccelResponse`)
 - ✅ UDP data path implemented (`src/net/udp_accel.rs`)
 - ✅ V1 protocol (RC4 + SHA-1) fully implemented
+- ✅ V2 protocol (ChaCha20-Poly1305 AEAD) fully implemented
 - ✅ Automatic fallback to TCP when UDP not ready
 - ✅ Parallel send/receive in packet loop
-- ❌ V2 protocol (ChaCha20-Poly1305) not implemented
 
 **Implementation Details:**
 - `UdpAccel::send()` - Encode and encrypt packets for UDP
 - `UdpAccel::try_recv()` - Non-blocking receive from UDP socket
 - `UdpAccel::is_send_ready()` - Check if UDP path is established
 - `UdpAccel::send_keepalive()` - Keep UDP connection alive
-- Packet format: IV (20B) + Cookie + Timestamps + Size + Flag + Data + Verify (20B zeros)
-- Key derivation: SHA-1(common_key || iv) for RC4 encryption
+- V1 packet format: IV (20B) + Cookie + Timestamps + Size + Flag + Data + Verify (20B zeros)
+- V1 key derivation: SHA-1(common_key || iv) for RC4 encryption
+- V2 packet format: Nonce (12B) + [Encrypted Payload] + Tag (16B)
+- V2 uses ChaCha20-Poly1305 AEAD (first 32 bytes of 128B common key)
 
-**Priority:** Complete for V1, V2 deferred until needed.
+**Priority:** ✅ Complete for V1 and V2.
 
 ---
 

@@ -5,7 +5,7 @@
 //!
 //! Based on SoftEther's UdpAccel.c/h implementation.
 //!
-//! ## Packet Format (V1)
+//! ## Packet Format (V1 - RC4 + SHA-1)
 //! ```text
 //! +----------------+-------------------+
 //! | IV (20 bytes)  | Encrypted Payload |
@@ -17,8 +17,22 @@
 //! | 4B     | 8B       | 8B       | 2B   | 1B   | var  | var     | 20B    |
 //! +--------+----------+----------+------+------+------+---------+--------+
 //! ```
-//!
 //! The Verify field is 20 zero bytes for integrity check.
+//!
+//! ## Packet Format (V2 - ChaCha20-Poly1305 AEAD)
+//! ```text
+//! +----------------+-------------------+--------+
+//! | Nonce (12B)    | Encrypted Payload | Tag    |
+//! +----------------+-------------------+--------+
+//!                                       (16 bytes)
+//!
+//! Encrypted Payload (same structure, no Verify):
+//! +--------+----------+----------+------+------+------+---------+
+//! | Cookie | MyTick   | YourTick | Size | Flag | Data | Padding |
+//! | 4B     | 8B       | 8B       | 2B   | 1B   | var  | var     |
+//! +--------+----------+----------+------+------+------+---------+
+//! ```
+//! The 16-byte Poly1305 tag provides authenticated encryption.
 
 use std::io::Cursor;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
@@ -26,6 +40,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::{Buf, BufMut};
+use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
 use tokio::net::UdpSocket as TokioUdpSocket;
 use tracing::{debug, info, trace, warn};
 
@@ -36,7 +51,6 @@ use crate::error::{Error, Result};
 pub const UDP_ACCELERATION_COMMON_KEY_SIZE_V1: usize = 20;
 
 /// UDP acceleration common key size for version 2 (ChaCha20-Poly1305).
-#[allow(dead_code)]
 pub const UDP_ACCELERATION_COMMON_KEY_SIZE_V2: usize = 128;
 
 /// UDP acceleration packet IV size for V1.
@@ -46,16 +60,23 @@ pub const UDP_ACCELERATION_PACKET_IV_SIZE_V1: usize = 20;
 #[allow(dead_code)]
 pub const UDP_ACCELERATION_PACKET_KEY_SIZE_V1: usize = 20;
 
+/// UDP acceleration packet IV/nonce size for V2 (ChaCha20-Poly1305).
+pub const UDP_ACCELERATION_PACKET_IV_SIZE_V2: usize = 12;
+
+/// UDP acceleration packet MAC/tag size for V2 (Poly1305).
+pub const UDP_ACCELERATION_PACKET_MAC_SIZE_V2: usize = 16;
+
 /// UDP acceleration version 1.
 pub const UDP_ACCEL_VERSION_1: u32 = 1;
 
 /// UDP acceleration version 2.
-#[allow(dead_code)]
 pub const UDP_ACCEL_VERSION_2: u32 = 2;
 
 /// Maximum UDP acceleration version supported.
-/// Note: We currently only support V1 as V2 requires ChaCha20-Poly1305.
-pub const UDP_ACCEL_MAX_VERSION: u32 = 1;
+pub const UDP_ACCEL_MAX_VERSION: u32 = 2;
+
+/// Maximum padding size for protocol obfuscation.
+const UDP_ACCELERATION_MAX_PADDING_SIZE: usize = 32;
 
 /// Keepalive interval range (ms).
 #[allow(dead_code)]
@@ -142,8 +163,14 @@ pub struct UdpAccel {
     /// IV for next packet (V1).
     pub next_iv: [u8; UDP_ACCELERATION_COMMON_KEY_SIZE_V1],
 
-    /// IV for next packet (V2).
-    pub next_iv_v2: [u8; 12],
+    /// Nonce for next packet (V2 - 12 bytes).
+    pub next_iv_v2: [u8; UDP_ACCELERATION_PACKET_IV_SIZE_V2],
+
+    /// ChaCha20-Poly1305 encryption key for V2 (derived from my_key_v2).
+    cipher_encrypt: Option<LessSafeKey>,
+
+    /// ChaCha20-Poly1305 decryption key for V2 (derived from your_key_v2).
+    cipher_decrypt: Option<LessSafeKey>,
 
     /// Disable NAT-T (NAT traversal).
     pub no_nat_t: bool,
@@ -201,7 +228,7 @@ impl UdpAccel {
         let my_key: [u8; UDP_ACCELERATION_COMMON_KEY_SIZE_V1] = crypto::random_bytes();
         let my_key_v2: [u8; UDP_ACCELERATION_COMMON_KEY_SIZE_V2] = crypto::random_bytes();
         let next_iv: [u8; UDP_ACCELERATION_COMMON_KEY_SIZE_V1] = crypto::random_bytes();
-        let next_iv_v2: [u8; 12] = crypto::random_bytes();
+        let next_iv_v2: [u8; UDP_ACCELERATION_PACKET_IV_SIZE_V2] = crypto::random_bytes();
 
         // Generate random cookie
         let my_cookie: u32 = rand::random::<u32>() | 1; // Ensure non-zero
@@ -235,6 +262,8 @@ impl UdpAccel {
             socket: Some(Arc::new(tokio_socket)),
             next_iv,
             next_iv_v2,
+            cipher_encrypt: None, // Initialized in init_client for V2
+            cipher_decrypt: None, // Initialized in init_client for V2
             no_nat_t: no_nat_t || is_ipv6, // NAT-T disabled for IPv6
             nat_t_tran_id: rand::random(),
             is_ipv6,
@@ -283,6 +312,19 @@ impl UdpAccel {
                 )));
             }
             self.your_key_v2.copy_from_slice(server_key);
+            
+            // Initialize ChaCha20-Poly1305 ciphers for V2
+            // Encrypt with my key, decrypt with server's key
+            // ChaCha20-Poly1305 uses first 32 bytes of the 128-byte key
+            let encrypt_key = UnboundKey::new(&CHACHA20_POLY1305, &self.my_key_v2[..32])
+                .map_err(|_| Error::invalid_response("Failed to create V2 encrypt key"))?;
+            let decrypt_key = UnboundKey::new(&CHACHA20_POLY1305, &self.your_key_v2[..32])
+                .map_err(|_| Error::invalid_response("Failed to create V2 decrypt key"))?;
+            
+            self.cipher_encrypt = Some(LessSafeKey::new(encrypt_key));
+            self.cipher_decrypt = Some(LessSafeKey::new(decrypt_key));
+            
+            debug!("Initialized ChaCha20-Poly1305 ciphers for UDP acceleration V2");
         } else {
             if server_key.len() != UDP_ACCELERATION_COMMON_KEY_SIZE_V1 {
                 return Err(Error::invalid_response(format!(
@@ -446,8 +488,13 @@ impl UdpAccel {
         let mut buf = Vec::with_capacity(UDP_ACCELERATION_TMP_BUF_SIZE);
 
         if !self.plain_text_mode {
-            // Add IV
-            buf.extend_from_slice(&self.next_iv);
+            if self.version > 1 {
+                // V2: Add 12-byte nonce
+                buf.extend_from_slice(&self.next_iv_v2);
+            } else {
+                // V1: Add 20-byte IV
+                buf.extend_from_slice(&self.next_iv);
+            }
         }
 
         let encrypted_start = buf.len();
@@ -473,34 +520,76 @@ impl UdpAccel {
         buf.extend_from_slice(data);
 
         if !self.plain_text_mode {
-            // Add padding for security (random amount up to available space)
-            let current_size = buf.len() + UDP_ACCELERATION_PACKET_IV_SIZE_V1;
-            if current_size < self.max_udp_packet_size {
-                let max_pad = (self.max_udp_packet_size - current_size).min(32);
-                let pad_size = if max_pad > 0 {
-                    rand::random::<usize>() % max_pad
-                } else {
-                    0
-                };
-                buf.extend(std::iter::repeat(0u8).take(pad_size));
+            if self.version > 1 {
+                // V2: ChaCha20-Poly1305 AEAD
+                let current_size = buf.len() + UDP_ACCELERATION_PACKET_MAC_SIZE_V2;
+                if current_size < self.max_udp_packet_size {
+                    let max_pad = (self.max_udp_packet_size - current_size).min(UDP_ACCELERATION_MAX_PADDING_SIZE);
+                    let pad_size = if max_pad > 0 {
+                        rand::random::<usize>() % max_pad
+                    } else {
+                        0
+                    };
+                    buf.extend(std::iter::repeat(0u8).take(pad_size));
+                }
+
+                // Encrypt using ChaCha20-Poly1305
+                let cipher = self.cipher_encrypt.as_ref()
+                    .ok_or_else(|| Error::invalid_state("V2 cipher not initialized"))?;
+                
+                let nonce = Nonce::assume_unique_for_key(self.next_iv_v2);
+                
+                // Get plaintext to encrypt
+                let plaintext = buf[encrypted_start..].to_vec();
+                let plaintext_len = plaintext.len();
+                
+                // Create buffer for in-place encryption with room for tag
+                let mut in_out = plaintext;
+                in_out.resize(plaintext_len + UDP_ACCELERATION_PACKET_MAC_SIZE_V2, 0);
+                
+                // Use seal_in_place_separate_tag for encryption
+                let (in_out_data, tag_buf) = in_out.split_at_mut(plaintext_len);
+                let tag = cipher.seal_in_place_separate_tag(nonce, Aad::empty(), in_out_data)
+                    .map_err(|_| Error::protocol("V2 encryption failed"))?;
+                tag_buf.copy_from_slice(tag.as_ref());
+                
+                // Replace encrypted portion in buf
+                buf.truncate(encrypted_start);
+                buf.extend_from_slice(&in_out);
+
+                // Update next nonce (use first 12 bytes of encrypted data)
+                self.next_iv_v2.copy_from_slice(&buf[encrypted_start..encrypted_start + UDP_ACCELERATION_PACKET_IV_SIZE_V2]);
+            } else {
+                // V1: RC4 + SHA-1
+                // Add padding for security
+                let current_size = buf.len() + UDP_ACCELERATION_PACKET_IV_SIZE_V1;
+                if current_size < self.max_udp_packet_size {
+                    let max_pad = (self.max_udp_packet_size - current_size).min(UDP_ACCELERATION_MAX_PADDING_SIZE);
+                    let pad_size = if max_pad > 0 {
+                        rand::random::<usize>() % max_pad
+                    } else {
+                        0
+                    };
+                    buf.extend(std::iter::repeat(0u8).take(pad_size));
+                }
+
+                // Add verify field (20 zero bytes for integrity check)
+                buf.extend_from_slice(&[0u8; UDP_ACCELERATION_PACKET_IV_SIZE_V1]);
+
+                // Encrypt the payload (everything after IV)
+                let key = Self::calc_key_v1(&self.my_key, &self.next_iv);
+                let mut cipher = Rc4::new(&key);
+                cipher.process(&mut buf[encrypted_start..]);
+
+                // Update next IV (use last 20 bytes of encrypted data)
+                let new_iv_start = buf.len() - UDP_ACCELERATION_PACKET_IV_SIZE_V1;
+                self.next_iv.copy_from_slice(&buf[new_iv_start..]);
             }
-
-            // Add verify field (20 zero bytes for integrity check)
-            buf.extend_from_slice(&[0u8; UDP_ACCELERATION_PACKET_IV_SIZE_V1]);
-
-            // Encrypt the payload (everything after IV)
-            let key = Self::calc_key_v1(&self.my_key, &self.next_iv);
-            let mut cipher = Rc4::new(&key);
-            cipher.process(&mut buf[encrypted_start..]);
-
-            // Update next IV (use last 20 bytes of encrypted data)
-            let new_iv_start = buf.len() - UDP_ACCELERATION_PACKET_IV_SIZE_V1;
-            self.next_iv.copy_from_slice(&buf[new_iv_start..]);
         }
 
         // Send
         let sent = socket.send_to(&buf, server_addr).await.map_err(Error::Io)?;
-        trace!("UDP accel sent {} bytes to {}", sent, server_addr);
+        trace!("UDP accel V{} sent {} bytes to {}", self.version, sent, server_addr);
 
         Ok(sent)
     }
@@ -521,8 +610,18 @@ impl UdpAccel {
     pub fn process_recv(&mut self, buf: &[u8], src_addr: SocketAddr) -> Option<(Vec<u8>, bool)> {
         let now = self.now();
 
-        if buf.len() < UDP_ACCELERATION_PACKET_IV_SIZE_V1 + 4 + 8 + 8 + 2 + 1 {
-            trace!("UDP accel packet too small: {} bytes", buf.len());
+        if self.version > 1 {
+            self.process_recv_v2(buf, src_addr, now)
+        } else {
+            self.process_recv_v1(buf, src_addr, now)
+        }
+    }
+
+    /// Process V1 packet (RC4 + SHA-1).
+    fn process_recv_v1(&mut self, buf: &[u8], src_addr: SocketAddr, now: u64) -> Option<(Vec<u8>, bool)> {
+        let min_size = UDP_ACCELERATION_PACKET_IV_SIZE_V1 + 4 + 8 + 8 + 2 + 1;
+        if buf.len() < min_size {
+            trace!("UDP accel V1 packet too small: {} bytes", buf.len());
             return None;
         }
 
@@ -536,18 +635,59 @@ impl UdpAccel {
             let key = Self::calc_key_v1(&self.your_key, iv);
             let mut cipher = Rc4::new(&key);
             cipher.process(encrypted);
-        }
 
-        // Verify integrity (last 20 bytes should be zeros in V1)
-        if !self.plain_text_mode {
+            // Verify integrity (last 20 bytes should be zeros)
             let verify_start = encrypted_len - UDP_ACCELERATION_PACKET_IV_SIZE_V1;
             if encrypted[verify_start..].iter().any(|&b| b != 0) {
-                trace!("UDP accel integrity check failed");
+                trace!("UDP accel V1 integrity check failed");
                 return None;
             }
         }
 
-        let mut cursor = Cursor::new(&encrypted[..]);
+        self.parse_decrypted_payload(encrypted, src_addr, now)
+    }
+
+    /// Process V2 packet (ChaCha20-Poly1305 AEAD).
+    fn process_recv_v2(&mut self, buf: &[u8], src_addr: SocketAddr, now: u64) -> Option<(Vec<u8>, bool)> {
+        let min_size = UDP_ACCELERATION_PACKET_IV_SIZE_V2 + UDP_ACCELERATION_PACKET_MAC_SIZE_V2 + 4 + 8 + 8 + 2 + 1;
+        if buf.len() < min_size {
+            trace!("UDP accel V2 packet too small: {} bytes", buf.len());
+            return None;
+        }
+
+        let nonce_bytes = &buf[..UDP_ACCELERATION_PACKET_IV_SIZE_V2];
+        let ciphertext = &buf[UDP_ACCELERATION_PACKET_IV_SIZE_V2..];
+        
+        if ciphertext.len() < UDP_ACCELERATION_PACKET_MAC_SIZE_V2 {
+            trace!("UDP accel V2 ciphertext too small");
+            return None;
+        }
+
+        if self.plain_text_mode {
+            // No decryption needed
+            self.parse_decrypted_payload(&mut ciphertext.to_vec(), src_addr, now)
+        } else {
+            // Decrypt with ChaCha20-Poly1305
+            let cipher = self.cipher_decrypt.as_ref()?;
+            
+            let nonce = Nonce::try_assume_unique_for_key(nonce_bytes).ok()?;
+            let mut in_out = ciphertext.to_vec();
+            
+            // open_in_place decrypts and verifies the tag
+            let plaintext = cipher.open_in_place(nonce, Aad::empty(), &mut in_out).ok()?;
+            
+            self.parse_decrypted_payload(&mut plaintext.to_vec(), src_addr, now)
+        }
+    }
+
+    /// Parse decrypted payload (common for V1 and V2).
+    fn parse_decrypted_payload(&mut self, data: &[u8], src_addr: SocketAddr, now: u64) -> Option<(Vec<u8>, bool)> {
+        if data.len() < 4 + 8 + 8 + 2 + 1 {
+            trace!("UDP accel decrypted payload too small");
+            return None;
+        }
+
+        let mut cursor = Cursor::new(data);
 
         // Cookie
         let cookie = cursor.get_u32();
@@ -579,7 +719,7 @@ impl UdpAccel {
         // Extract inner data
         let pos = cursor.position() as usize;
         let inner_data = if inner_size > 0 {
-            encrypted[pos..pos + inner_size].to_vec()
+            data[pos..pos + inner_size].to_vec()
         } else {
             Vec::new()
         };
