@@ -44,10 +44,13 @@ _All Android issues resolved._
 - ✅ Outgoing frames rewritten to use learned gateway MAC (falls back to broadcast if not learned)
 - Impact: Resolved - full parity with desktop ARP behavior
 
-### 5.3 QoS Packet Prioritization Not Implemented
-- `qos` config flag is parsed and sent to server
-- But actual VoIP packet prioritization logic not implemented
-- Impact: Low - VoIP packets not prioritized on client side
+### 5.3 QoS Packet Prioritization ✅ RESOLVED
+- ✅ `qos` config flag is parsed and sent to server
+- ✅ QoS module implemented (src/packet/qos.rs) with `is_priority_packet()` function
+- ✅ Priority detection matches official SoftEther: IPv4 ToS != 0, ICMP, VoIP ports
+- ✅ IPv6 traffic class and ICMPv6 also prioritized
+- ✅ FFI packet loop sorts priority packets to front when QoS enabled
+- Impact: Resolved - VoIP/real-time packets sent first in batch transmissions
 
 ---
 
@@ -95,3 +98,4 @@ _All half-connection mode issues resolved._
 - ✅ DHCPv6 integration for FFI/mobile (perform_dhcpv6 after DHCPv4, session includes ipv6_address/dns1_v6/dns2_v6)
 - ✅ Reconnection logic for FFI/mobile (retry with 10s delay for UserAlreadyLoggedIn, up to 5 attempts)
 - ✅ ARP/Gateway MAC learning for FFI/mobile (GARP + gateway request sent, ARP replies processed, outgoing frames use learned MAC)
+- ✅ QoS packet prioritization (is_priority_packet() detects ToS/DSCP, ICMP, VoIP ports; FFI sorts priority packets first)

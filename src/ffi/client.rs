@@ -869,6 +869,7 @@ async fn connect_and_run_inner(
         mac,
         dhcp_config,
         final_auth.rc4_key_pair.as_ref(),
+        config.qos,
     )
     .await
 }
@@ -1401,7 +1402,7 @@ impl TunnelEncryption {
     }
 }
 
-/// Run the main packet forwarding loop with ARP handling
+/// Run the main packet forwarding loop with ARP handling and QoS
 async fn run_packet_loop(
     conn_mgr: &mut ConnectionManager,
     running: Arc<AtomicBool>,
@@ -1410,7 +1411,9 @@ async fn run_packet_loop(
     mac: [u8; 6],
     dhcp_config: DhcpConfig,
     rc4_key_pair: Option<&Rc4KeyPair>,
+    qos_enabled: bool,
 ) -> crate::error::Result<()> {
+    use crate::packet::is_priority_packet;
     fn log_msg(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
         if let Some(cb) = callbacks.on_log {
             if let Ok(cstr) = std::ffi::CString::new(msg) {
@@ -1517,13 +1520,24 @@ async fn run_packet_loop(
                 if !frames.is_empty() {
                     // Rewrite destination MAC to use learned gateway MAC if available
                     let gateway_mac = arp.gateway_mac_or_broadcast();
-                    let modified_frames: Vec<Vec<u8>> = frames.into_iter().map(|mut frame| {
+                    let mut modified_frames: Vec<Vec<u8>> = frames.into_iter().map(|mut frame| {
                         if frame.len() >= 14 {
                             // Replace destination MAC (first 6 bytes)
                             frame[0..6].copy_from_slice(&gateway_mac);
                         }
                         frame
                     }).collect();
+                    
+                    // QoS: Sort priority packets to front if enabled
+                    // This ensures VoIP/real-time packets are sent first
+                    if qos_enabled && modified_frames.len() > 1 {
+                        modified_frames.sort_by(|a, b| {
+                            let a_prio = is_priority_packet(a);
+                            let b_prio = is_priority_packet(b);
+                            // Priority packets (true) should come first
+                            b_prio.cmp(&a_prio)
+                        });
+                    }
                     
                     // Encode frames into tunnel format
                     let encoded = tunnel_codec.encode(&modified_frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
