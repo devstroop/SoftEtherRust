@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use super::callbacks::*;
 use super::types::*;
 use crate::client::{ConnectionManager, VpnConnection};
-use crate::packet::{DhcpClient, DhcpConfig, DhcpState};
+use crate::packet::{fragment_ipv4_packet, DhcpClient, DhcpConfig, DhcpState, FragmentResult};
 use crate::protocol::{
     decompress, is_compressed, AuthPack, AuthResult, AuthType, ConnectionOptions, HelloResponse,
     HttpCodec, HttpRequest, Pack, RedirectInfo, TunnelCodec, CONTENT_TYPE_PACK,
@@ -1257,7 +1257,11 @@ async fn run_packet_loop(
             Some(frame_data) = tx_recv.recv() => {
                 let frames = parse_length_prefixed_packets(&frame_data);
                 if !frames.is_empty() {
-                    let encoded = tunnel_codec.encode(&frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
+                    // Process frames with potential IP fragmentation
+                    // MTU for IP packets: tunnel MTU minus Ethernet header (14 bytes)
+                    let ip_mtu = 1400 - 14; // Use a conservative MTU for fragmentation
+                    let processed_frames = fragment_outgoing_frames(&frames, ip_mtu);
+                    let encoded = tunnel_codec.encode(&processed_frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
                     conn_mgr.write_all(&encoded).await.map_err(crate::error::Error::Io)?;
                 }
             }
@@ -1444,6 +1448,70 @@ fn parse_length_prefixed_packets(data: &[u8]) -> Vec<Vec<u8>> {
         }
     }
 
+    result
+}
+
+/// Fragment outgoing Ethernet frames if IP packets exceed MTU
+/// 
+/// This function:
+/// 1. Extracts the IP packet from each Ethernet frame
+/// 2. Fragments IPv4 packets that exceed the MTU (if DF flag not set)
+/// 3. Re-wraps each fragment in Ethernet headers
+/// 4. Returns all resulting frames
+fn fragment_outgoing_frames(frames: &[Vec<u8>], ip_mtu: usize) -> Vec<Vec<u8>> {
+    let mut result = Vec::with_capacity(frames.len());
+    
+    for frame in frames {
+        // Need at least Ethernet header (14) + minimal IP header (20)
+        if frame.len() < 34 {
+            result.push(frame.clone());
+            continue;
+        }
+        
+        // Check if this is an IPv4 packet (EtherType 0x0800)
+        let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+        if ethertype != 0x0800 {
+            // Not IPv4 (could be IPv6 or ARP) - pass through unchanged
+            result.push(frame.clone());
+            continue;
+        }
+        
+        // Extract Ethernet header and IP packet
+        let eth_header = &frame[0..14];
+        let ip_packet = &frame[14..];
+        
+        // Try to fragment
+        match fragment_ipv4_packet(ip_packet, ip_mtu) {
+            FragmentResult::NoFragmentationNeeded => {
+                // Packet fits, send as-is
+                result.push(frame.clone());
+            }
+            FragmentResult::Fragmented(fragments) => {
+                // Re-wrap each fragment in Ethernet header
+                for frag in fragments {
+                    let mut eth_frame = Vec::with_capacity(14 + frag.len());
+                    eth_frame.extend_from_slice(eth_header);
+                    eth_frame.extend_from_slice(&frag);
+                    result.push(eth_frame);
+                }
+            }
+            FragmentResult::DontFragment => {
+                // DF flag is set - we should send ICMP "Fragmentation Needed"
+                // but for now, just drop the packet (it would fail anyway)
+                // In production, we might want to log this or send ICMP
+                tracing::debug!(
+                    "Dropping packet with DF flag set (size={}, mtu={})",
+                    ip_packet.len(),
+                    ip_mtu
+                );
+            }
+            FragmentResult::InvalidPacket => {
+                // Malformed packet - pass through anyway, let server handle it
+                result.push(frame.clone());
+            }
+        }
+    }
+    
     result
 }
 
