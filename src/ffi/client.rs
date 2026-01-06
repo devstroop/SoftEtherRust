@@ -1886,6 +1886,7 @@ impl Clone for SoftEtherCallbacks {
             on_packets_received: self.on_packets_received,
             on_log: self.on_log,
             protect_socket: self.protect_socket,
+            exclude_ip: self.exclude_ip,
         }
     }
 }

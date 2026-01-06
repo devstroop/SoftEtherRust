@@ -183,6 +183,8 @@ class SoftEtherBridge {
         fun onPacketsReceived(packets: List<ByteArray>)
         fun onLog(level: LogLevel, message: String) {}
         fun onProtectSocket(fd: Int): Boolean = false
+        /** Called when an IP should be excluded from VPN routing (cluster redirect). */
+        fun onExcludeIp(ip: String): Boolean = false
     }
     
     var listener: Listener? = null
@@ -469,6 +471,11 @@ class SoftEtherBridge {
     @Suppress("unused")  // Called from JNI
     private fun onProtectSocket(fd: Int): Boolean {
         return listener?.onProtectSocket(fd) ?: false
+    }
+    
+    @Suppress("unused")  // Called from JNI
+    private fun onExcludeIp(ip: String): Boolean {
+        return listener?.onExcludeIp(ip) ?: false
     }
     
     // MARK: - Cleanup

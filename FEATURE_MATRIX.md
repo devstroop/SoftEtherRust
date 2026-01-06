@@ -14,7 +14,7 @@
 | **Compression** | ✅ | ✅ | ✅ |
 | **UDP Acceleration** | ❌ (auth only) | ❌ (auth only) | ❌ (auth only) |
 | **Socket Protection** | N/A | ✅ | ✅ |
-| **IP Exclusion (Cluster)** | N/A | ✅ | ❌ |
+| **IP Exclusion (Cluster)** | N/A | ✅ | ✅ |
 | **Certificate Pinning** | ✅ | ✅ | ✅ |
 | **NAT-T Keepalive** | ✅ | ✅ | ✅ |
 | **IP Fragmentation** | ✅ | ✅ | ✅ |
@@ -88,9 +88,12 @@
 
 **Desktop:** Uses TUN/TAP routing directly
 
-**iOS:** ✅ `exclude_ip` callback - allows app to exclude cluster server IP from VPN routes
+**iOS:** ✅ `excludedRoutes` in NEPacketTunnelNetworkSettings excludes server IP from VPN
 
-**Android:** ❌ Not implemented - would need similar callback
+**Android:** ✅ `exclude_ip` callback + `protect()` socket:
+  - `onExcludeIp(ip)` callback notifies app of IPs to exclude
+  - `VpnService.protect(fd)` prevents VPN routing loop for sockets
+  - Excluded IPs stored for tunnel reconfiguration
 
 ---
 
@@ -109,18 +112,12 @@
 
 ## Recommended Fixes
 
-### Medium Priority
-
-1. **Android IP exclusion callback**
-   - Add `exclude_ip` callback for cluster redirect scenarios
-   - Currently only iOS has this callback
-
 ### Low Priority
 
-2. **UDP acceleration data path**
+1. **UDP acceleration data path**
    - Requires parallel UDP socket management
    - Deferred until TCP performance issues reported
 
-3. **Multi-connection for mobile**
+2. **Multi-connection for mobile**
    - Single connection is sufficient for mobile use cases
    - Would add complexity with minimal benefit

@@ -201,6 +201,35 @@ extern "C" fn jni_protect_socket(context: *mut std::ffi::c_void, fd: i32) -> boo
     false
 }
 
+extern "C" fn jni_exclude_ip(context: *mut std::ffi::c_void, ip: *const std::ffi::c_char) -> bool {
+    if context.is_null() || ip.is_null() {
+        return false;
+    }
+
+    let ctx = unsafe { &*(context as *const JniCallbackContext) };
+    let ip_str = unsafe { std::ffi::CStr::from_ptr(ip) };
+    let ip_string = match ip_str.to_str() {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    if let Ok(mut env) = ctx.jvm.attach_current_thread() {
+        if let Ok(ip_jstring) = env.new_string(ip_string) {
+            if let Ok(result) = env.call_method(
+                &ctx.bridge_ref,
+                "onExcludeIp",
+                "(Ljava/lang/String;)Z",
+                &[JValue::Object(&ip_jstring)],
+            ) {
+                if let Ok(excluded) = result.z() {
+                    return excluded;
+                }
+            }
+        }
+    }
+    false
+}
+
 // =============================================================================
 // JNI Native Methods
 // =============================================================================
@@ -336,6 +365,7 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
         on_packets_received: Some(jni_on_packets_received),
         on_log: Some(jni_on_log),
         protect_socket: Some(jni_protect_socket),
+        exclude_ip: Some(jni_exclude_ip),
     };
 
     // Create client
