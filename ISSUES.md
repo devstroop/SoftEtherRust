@@ -37,10 +37,12 @@ _All Android issues resolved._
 - Only `packets_dropped` and `uptime_secs` work correctly
 - Impact: Low - stats API returns zeros for traffic counters
 
-### 5.2 ARP / Gateway MAC Learning Not Implemented (FFI)
-- Desktop learns gateway MAC via ARP responses
-- Mobile uses broadcast MAC (FF:FF:FF:FF:FF:FF) for all outbound frames
-- Impact: Low - works but suboptimal for some L2 scenarios
+### 5.2 ARP / Gateway MAC Learning ✅ RESOLVED
+- ✅ Desktop learns gateway MAC via ARP responses
+- ✅ Mobile now sends gratuitous ARP and gateway ARP request at tunnel start
+- ✅ Incoming ARP packets processed to learn gateway MAC
+- ✅ Outgoing frames rewritten to use learned gateway MAC (falls back to broadcast if not learned)
+- Impact: Resolved - full parity with desktop ARP behavior
 
 ### 5.3 QoS Packet Prioritization Not Implemented
 - `qos` config flag is parsed and sent to server
@@ -92,3 +94,4 @@ _All half-connection mode issues resolved._
 - ✅ Half-connection mode direction verified (TcpDirection 0=Both, 1=ServerToClient, 2=ClientToServer matches official C; primary always ClientToServer; can_send/can_recv filters connections correctly)
 - ✅ DHCPv6 integration for FFI/mobile (perform_dhcpv6 after DHCPv4, session includes ipv6_address/dns1_v6/dns2_v6)
 - ✅ Reconnection logic for FFI/mobile (retry with 10s delay for UserAlreadyLoggedIn, up to 5 attempts)
+- ✅ ARP/Gateway MAC learning for FFI/mobile (GARP + gateway request sent, ARP replies processed, outgoing frames use learned MAC)

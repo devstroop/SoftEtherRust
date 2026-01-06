@@ -15,7 +15,7 @@ use super::callbacks::*;
 use super::types::*;
 use crate::client::{ConnectionManager, VpnConnection};
 use crate::crypto::{Rc4, Rc4KeyPair};
-use crate::packet::{DhcpClient, DhcpConfig, DhcpState, Dhcpv6Client, Dhcpv6Config, Dhcpv6State};
+use crate::packet::{ArpHandler, DhcpClient, DhcpConfig, DhcpState, Dhcpv6Client, Dhcpv6Config, Dhcpv6State};
 use crate::protocol::{
     decompress, is_compressed, AuthPack, AuthResult, AuthType, ConnectionOptions, HelloResponse,
     HttpCodec, HttpRequest, Pack, RedirectInfo, TunnelCodec, CONTENT_TYPE_PACK,
@@ -1401,14 +1401,14 @@ impl TunnelEncryption {
     }
 }
 
-/// Run the main packet forwarding loop
+/// Run the main packet forwarding loop with ARP handling
 async fn run_packet_loop(
     conn_mgr: &mut ConnectionManager,
     running: Arc<AtomicBool>,
     callbacks: SoftEtherCallbacks,
     tx_recv: &mut mpsc::Receiver<Vec<u8>>,
-    _mac: [u8; 6],
-    _dhcp_config: DhcpConfig,
+    mac: [u8; 6],
+    dhcp_config: DhcpConfig,
     rc4_key_pair: Option<&Rc4KeyPair>,
 ) -> crate::error::Result<()> {
     fn log_msg(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
@@ -1423,8 +1423,54 @@ async fn run_packet_loop(
     let mut read_buf = vec![0u8; 65536];
     let keepalive_interval_secs = 5u64;
 
+    // Set up ARP handler for gateway MAC learning
+    let mut arp = ArpHandler::new(mac);
+    let gateway = dhcp_config.gateway.unwrap_or(dhcp_config.ip);
+    arp.configure(dhcp_config.ip, gateway);
+
+    log_msg(
+        &callbacks,
+        1,
+        &format!(
+            "[RUST] ARP configured: my_ip={}, gateway_ip={}",
+            dhcp_config.ip, gateway
+        ),
+    );
+
     // Create RC4 encryption state if keys are provided
     let mut encryption = rc4_key_pair.map(TunnelEncryption::new);
+
+    // Send gratuitous ARP to announce our presence
+    let garp = arp.build_gratuitous_arp();
+    let encoded_garp = tunnel_codec.encode(&[&garp]);
+    let garp_to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
+        let mut data = encoded_garp.to_vec();
+        enc.encrypt(&mut data);
+        data
+    } else {
+        encoded_garp.to_vec()
+    };
+    conn_mgr
+        .write_all(&garp_to_send)
+        .await
+        .map_err(crate::error::Error::Io)?;
+    log_msg(&callbacks, 1, "[RUST] Sent gratuitous ARP");
+
+    // Send ARP request for gateway MAC
+    let gateway_arp = arp.build_gateway_request();
+    let encoded_gw = tunnel_codec.encode(&[&gateway_arp]);
+    let gw_to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
+        let mut data = encoded_gw.to_vec();
+        enc.encrypt(&mut data);
+        data
+    } else {
+        encoded_gw.to_vec()
+    };
+    conn_mgr
+        .write_all(&gw_to_send)
+        .await
+        .map_err(crate::error::Error::Io)?;
+    log_msg(&callbacks, 1, "[RUST] Sent gateway ARP request");
 
     log_msg(&callbacks, 1, "[RUST] Packet loop started");
 
@@ -1469,8 +1515,18 @@ async fn run_packet_loop(
             Some(frame_data) = tx_recv.recv() => {
                 let frames = parse_length_prefixed_packets(&frame_data);
                 if !frames.is_empty() {
+                    // Rewrite destination MAC to use learned gateway MAC if available
+                    let gateway_mac = arp.gateway_mac_or_broadcast();
+                    let modified_frames: Vec<Vec<u8>> = frames.into_iter().map(|mut frame| {
+                        if frame.len() >= 14 {
+                            // Replace destination MAC (first 6 bytes)
+                            frame[0..6].copy_from_slice(&gateway_mac);
+                        }
+                        frame
+                    }).collect();
+                    
                     // Encode frames into tunnel format
-                    let encoded = tunnel_codec.encode(&frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
+                    let encoded = tunnel_codec.encode(&modified_frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
                     
                     // Encrypt if RC4 is enabled, otherwise send as-is
                     let to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
@@ -1505,6 +1561,26 @@ async fn run_packet_loop(
                                     } else {
                                         frame.to_vec()
                                     };
+                                    
+                                    // Process ARP packets for gateway MAC learning
+                                    if frame_data.len() >= 14 {
+                                        let ethertype = u16::from_be_bytes([frame_data[12], frame_data[13]]);
+                                        if ethertype == 0x0806 {
+                                            // This is an ARP packet - process it
+                                            let had_mac = arp.has_gateway_mac();
+                                            arp.process_arp(&frame_data);
+                                            // Log if we just learned gateway MAC
+                                            if !had_mac {
+                                                if let Some(gw_mac) = arp.gateway_mac() {
+                                                    log_msg(&callbacks, 1, &format!(
+                                                        "[RUST] Learned gateway MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                                                        gw_mac[0], gw_mac[1], gw_mac[2], gw_mac[3], gw_mac[4], gw_mac[5]
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
                                     let len = frame_data.len() as u16;
                                     buffer.extend_from_slice(&len.to_be_bytes());
                                     buffer.extend_from_slice(&frame_data);
