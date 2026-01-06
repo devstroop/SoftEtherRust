@@ -537,8 +537,7 @@ async fn connect_and_run(
                         &callbacks,
                         2,
                         &format!(
-                            "[RUST] User already logged in. Waiting {}s for old session to expire... (attempt {}/{})",
-                            RETRY_DELAY_SECS, attempt, MAX_USER_IN_USE_RETRIES
+                            "[RUST] User already logged in. Waiting {RETRY_DELAY_SECS}s for old session to expire... (attempt {attempt}/{MAX_USER_IN_USE_RETRIES})"
                         ),
                     );
                     update_state(&atomic_state, &callbacks, SoftEtherState::Connecting);
@@ -548,8 +547,7 @@ async fn connect_and_run(
                         &callbacks,
                         3,
                         &format!(
-                            "[RUST] User already logged in - max retries ({}) exceeded",
-                            MAX_USER_IN_USE_RETRIES
+                            "[RUST] User already logged in - max retries ({MAX_USER_IN_USE_RETRIES}) exceeded"
                         ),
                     );
                     return Err(crate::error::Error::UserAlreadyLoggedIn);
@@ -767,14 +765,14 @@ async fn connect_and_run_inner(
 
     // Verify we have session key after redirect handling
     if final_auth.session_key.is_empty() {
-        log_message(&callbacks, 3, "[RUST] No session key after redirect");
+        log_message(callbacks, 3, "[RUST] No session key after redirect");
         return Err(crate::error::Error::AuthenticationFailed(
             "No session key received from redirect server".into(),
         ));
     }
 
     log_message(
-        &callbacks,
+        callbacks,
         1,
         &format!(
             "[RUST] Session established: {} bytes session key",
@@ -783,10 +781,10 @@ async fn connect_and_run_inner(
     );
 
     // Create connection manager for packet I/O
-    log_message(&callbacks, 1, "[RUST] Creating connection manager...");
+    log_message(callbacks, 1, "[RUST] Creating connection manager...");
     let mut conn_mgr = ConnectionManager::new(
         active_conn,
-        &config,
+        config,
         &final_auth,
         &actual_server_addr,
         actual_server_port,
@@ -798,7 +796,7 @@ async fn connect_and_run_inner(
     mac[0] = (mac[0] | 0x02) & 0xFE; // Local/unicast
 
     log_message(
-        &callbacks,
+        callbacks,
         1,
         &format!(
             "[RUST] Generated MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
@@ -807,18 +805,13 @@ async fn connect_and_run_inner(
     );
 
     // Perform DHCP to get IP configuration
-    log_message(&callbacks, 1, "[RUST] Starting DHCP...");
-    update_state(
-        &atomic_state,
-        &callbacks,
-        SoftEtherState::EstablishingTunnel,
-    );
+    log_message(callbacks, 1, "[RUST] Starting DHCP...");
+    update_state(atomic_state, callbacks, SoftEtherState::EstablishingTunnel);
 
-    let dhcp_config = match perform_dhcp(&mut conn_mgr, mac, &callbacks, config.use_compress).await
-    {
+    let dhcp_config = match perform_dhcp(&mut conn_mgr, mac, callbacks, config.use_compress).await {
         Ok(config) => {
             log_message(
-                &callbacks,
+                callbacks,
                 1,
                 &format!(
                     "[RUST] DHCP complete: IP={}, Gateway={:?}, DNS={:?}",
@@ -828,7 +821,7 @@ async fn connect_and_run_inner(
             config
         }
         Err(e) => {
-            log_message(&callbacks, 3, &format!("[RUST] DHCP failed: {e}"));
+            log_message(callbacks, 3, &format!("[RUST] DHCP failed: {e}"));
             return Err(e);
         }
     };
@@ -836,7 +829,7 @@ async fn connect_and_run_inner(
     // Establish additional connections if max_connections > 1
     if config.max_connections > 1 {
         log_message(
-            &callbacks,
+            callbacks,
             1,
             &format!(
                 "[RUST] Multi-connection mode: establishing {} additional connections...",
@@ -847,7 +840,7 @@ async fn connect_and_run_inner(
         if let Err(e) = conn_mgr.establish_additional_connections().await {
             // Log but don't fail - we can continue with fewer connections
             log_message(
-                &callbacks,
+                callbacks,
                 2,
                 &format!("[RUST] Warning: Failed to establish all additional connections: {e}"),
             );
@@ -855,7 +848,7 @@ async fn connect_and_run_inner(
 
         let stats = conn_mgr.stats();
         log_message(
-            &callbacks,
+            callbacks,
             1,
             &format!(
                 "[RUST] Connection pool: {}/{} connections active (half-connection mode: {})",
@@ -888,14 +881,14 @@ async fn connect_and_run_inner(
         create_session_from_dhcp(&dhcp_config, dhcpv6_config.as_ref(), actual_server_ip, mac);
 
     // Notify connected with session info
-    log_message(&callbacks, 1, "[RUST] Notifying Android of connection...");
+    log_message(callbacks, 1, "[RUST] Notifying Android of connection...");
     if let Some(cb) = callbacks.on_connected {
         cb(callbacks.context, &session);
     }
-    update_state(&atomic_state, &callbacks, SoftEtherState::Connected);
+    update_state(atomic_state, callbacks, SoftEtherState::Connected);
 
     log_message(
-        &callbacks,
+        callbacks,
         1,
         &format!(
             "[RUST] Connected! IP: {}, Server: {}",
@@ -906,18 +899,18 @@ async fn connect_and_run_inner(
     // Log RC4 encryption status
     if final_auth.rc4_key_pair.is_some() {
         log_message(
-            &callbacks,
+            callbacks,
             1,
             "[RUST] RC4 tunnel encryption enabled (UseFastRC4 mode)",
         );
     } else if config.use_encrypt {
         log_message(
-            &callbacks,
+            callbacks,
             1,
             "[RUST] Using TLS-layer encryption (UseSSLDataEncryption mode)",
         );
     } else {
-        log_message(&callbacks, 1, "[RUST] Encryption disabled");
+        log_message(callbacks, 1, "[RUST] Encryption disabled");
     }
 
     // Initialize UDP acceleration if server supports it
@@ -926,14 +919,14 @@ async fn connect_and_run_inner(
             Ok(mut accel) => {
                 if let Err(e) = accel.init_from_response(udp_response) {
                     log_message(
-                        &callbacks,
+                        callbacks,
                         2,
                         &format!("[RUST] Failed to initialize UDP acceleration: {e}"),
                     );
                     None
                 } else {
                     log_message(
-                        &callbacks,
+                        callbacks,
                         1,
                         &format!(
                             "[RUST] UDP acceleration initialized: version={}, server={}:{}",
@@ -945,7 +938,7 @@ async fn connect_and_run_inner(
             }
             Err(e) => {
                 log_message(
-                    &callbacks,
+                    callbacks,
                     2,
                     &format!("[RUST] Failed to create UDP socket: {e}"),
                 );
@@ -1451,6 +1444,7 @@ async fn send_frame(
 }
 
 /// Run the main packet forwarding loop with ARP handling, QoS, and optional UDP acceleration.
+#[allow(clippy::too_many_arguments)]
 async fn run_packet_loop(
     conn_mgr: &mut ConnectionManager,
     running: Arc<AtomicBool>,

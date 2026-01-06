@@ -2,6 +2,11 @@
 //!
 //! This module extracts packet handling logic from the main client to reduce
 //! function complexity and improve code organization.
+//!
+//! These helpers are prepared for future refactoring when the main client
+//! run_packet_loop function is further modularized.
+
+#![allow(dead_code)]
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

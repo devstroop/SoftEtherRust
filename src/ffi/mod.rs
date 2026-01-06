@@ -80,9 +80,6 @@ pub use callbacks::*;
 pub use client::*;
 pub use types::*;
 
-// Re-export connection helpers for internal use
-pub(crate) use connection::*;
-
 #[cfg(feature = "jni")]
 mod jni;
 

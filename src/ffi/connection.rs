@@ -2,6 +2,11 @@
 //!
 //! This module extracts connection setup logic from the main client to reduce
 //! function complexity and improve code organization.
+//!
+//! These helpers are prepared for future refactoring when the main client
+//! connect_and_run_inner function is further modularized.
+
+#![allow(dead_code)]
 
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU8, Ordering};
