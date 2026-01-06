@@ -168,7 +168,10 @@ typedef struct {
 // =============================================================================
 
 typedef void* SoftEtherHandle;
-#define SOFTETHER_HANDLE_NULL ((SoftEtherHandle)0)
+
+// Null handle constant - use this instead of casting 0/NULL
+// Note: Defined as extern const for Swift interoperability (macros aren't imported)
+extern const SoftEtherHandle SOFTETHER_HANDLE_NULL;
 
 // =============================================================================
 // API Functions

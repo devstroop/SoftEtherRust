@@ -182,30 +182,30 @@ pub unsafe extern "C" fn softether_create(
     callbacks: *const SoftEtherCallbacks,
 ) -> SoftEtherHandle {
     if config.is_null() {
-        return SOFTETHER_HANDLE_NULL;
+        return NULL_HANDLE;
     }
 
     let config = &*config;
     if !config.is_valid() {
-        return SOFTETHER_HANDLE_NULL;
+        return NULL_HANDLE;
     }
 
     // Parse configuration
     let server = match cstr_to_string(config.server) {
         Some(s) => s,
-        None => return SOFTETHER_HANDLE_NULL,
+        None => return NULL_HANDLE,
     };
     let hub = match cstr_to_string(config.hub) {
         Some(s) => s,
-        None => return SOFTETHER_HANDLE_NULL,
+        None => return NULL_HANDLE,
     };
     let username = match cstr_to_string(config.username) {
         Some(s) => s,
-        None => return SOFTETHER_HANDLE_NULL,
+        None => return NULL_HANDLE,
     };
     let password_hash = match cstr_to_string(config.password_hash) {
         Some(s) => s,
-        None => return SOFTETHER_HANDLE_NULL,
+        None => return NULL_HANDLE,
     };
 
     // Parse optional routing strings

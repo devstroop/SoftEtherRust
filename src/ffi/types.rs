@@ -212,8 +212,19 @@ pub struct SoftEtherStats {
 /// This is actually a pointer to the internal Rust struct.
 pub type SoftEtherHandle = *mut c_void;
 
-/// Null handle constant.
-pub const SOFTETHER_HANDLE_NULL: SoftEtherHandle = std::ptr::null_mut();
+/// Wrapper type for thread-safe static export of null handle.
+/// Raw pointers don't implement Sync, so we wrap in a newtype.
+#[repr(transparent)]
+pub struct NullHandle(pub *mut c_void);
+unsafe impl Sync for NullHandle {}
+
+/// Null handle constant exported for Swift interoperability.
+/// C macros aren't imported by Swift, so we export this as a proper symbol.
+#[no_mangle]
+pub static SOFTETHER_HANDLE_NULL: NullHandle = NullHandle(std::ptr::null_mut());
+
+/// Internal constant for use within Rust code.
+pub(crate) const NULL_HANDLE: SoftEtherHandle = std::ptr::null_mut();
 
 // Helper functions for FFI
 
