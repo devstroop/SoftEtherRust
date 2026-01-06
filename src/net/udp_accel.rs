@@ -4,29 +4,80 @@
 //! providing better performance especially for real-time applications.
 //!
 //! Based on SoftEther's UdpAccel.c/h implementation.
+//!
+//! ## Packet Format (V1)
+//! ```text
+//! +----------------+-------------------+
+//! | IV (20 bytes)  | Encrypted Payload |
+//! +----------------+-------------------+
+//!
+//! Encrypted Payload:
+//! +--------+----------+----------+------+------+------+---------+--------+
+//! | Cookie | MyTick   | YourTick | Size | Flag | Data | Padding | Verify |
+//! | 4B     | 8B       | 8B       | 2B   | 1B   | var  | var     | 20B    |
+//! +--------+----------+----------+------+------+------+---------+--------+
+//! ```
+//!
+//! The Verify field is 20 zero bytes for integrity check.
 
+use std::io::Cursor;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
-use tokio::net::UdpSocket as TokioUdpSocket;
-use tracing::{debug, info, warn};
+use std::time::Instant;
 
-use crate::crypto;
+use bytes::{Buf, BufMut};
+use tokio::net::UdpSocket as TokioUdpSocket;
+use tracing::{debug, info, trace, warn};
+
+use crate::crypto::{self, Rc4};
 use crate::error::{Error, Result};
 
 /// UDP acceleration common key size for version 1 (SHA-1 based).
 pub const UDP_ACCELERATION_COMMON_KEY_SIZE_V1: usize = 20;
 
 /// UDP acceleration common key size for version 2 (ChaCha20-Poly1305).
+#[allow(dead_code)]
 pub const UDP_ACCELERATION_COMMON_KEY_SIZE_V2: usize = 128;
+
+/// UDP acceleration packet IV size for V1.
+pub const UDP_ACCELERATION_PACKET_IV_SIZE_V1: usize = 20;
+
+/// UDP acceleration packet key size for V1 (derived from SHA-1).
+#[allow(dead_code)]
+pub const UDP_ACCELERATION_PACKET_KEY_SIZE_V1: usize = 20;
 
 /// UDP acceleration version 1.
 pub const UDP_ACCEL_VERSION_1: u32 = 1;
 
 /// UDP acceleration version 2.
+#[allow(dead_code)]
 pub const UDP_ACCEL_VERSION_2: u32 = 2;
 
 /// Maximum UDP acceleration version supported.
-pub const UDP_ACCEL_MAX_VERSION: u32 = 2;
+/// Note: We currently only support V1 as V2 requires ChaCha20-Poly1305.
+pub const UDP_ACCEL_MAX_VERSION: u32 = 1;
+
+/// Keepalive interval range (ms).
+#[allow(dead_code)]
+const UDP_ACCELERATION_KEEPALIVE_INTERVAL_MIN: u64 = 1000;
+#[allow(dead_code)]
+const UDP_ACCELERATION_KEEPALIVE_INTERVAL_MAX: u64 = 3000;
+
+/// Keepalive timeout - if no packet received in this time, connection is lost.
+const UDP_ACCELERATION_KEEPALIVE_TIMEOUT: u64 = 9000;
+
+/// Time window for sequence checking (ms).
+const UDP_ACCELERATION_WINDOW_SIZE_MSEC: u64 = 30000;
+
+/// Time required for continuous receive before connection is stable.
+const UDP_ACCELERATION_REQUIRE_CONTINUOUS: u64 = 1000;
+
+/// Maximum UDP packet size for PPPoE.
+#[allow(dead_code)]
+const MTU_FOR_PPPOE: usize = 1500 - 8; // 1492
+
+/// Maximum temporary buffer size.
+const UDP_ACCELERATION_TMP_BUF_SIZE: usize = 2048;
 
 /// UDP Acceleration state.
 #[derive(Debug)]
@@ -79,8 +130,11 @@ pub struct UdpAccel {
     /// Fast disconnect detection.
     pub fast_detect: bool,
 
-    /// Whether UDP acceleration is usable.
+    /// Whether UDP acceleration is usable (initialized).
     pub is_usable: bool,
+
+    /// Whether we've received any packet from peer.
+    pub is_reached_once: bool,
 
     /// The UDP socket (if bound).
     socket: Option<Arc<TokioUdpSocket>>,
@@ -99,6 +153,24 @@ pub struct UdpAccel {
 
     /// IPv6 mode.
     pub is_ipv6: bool,
+
+    /// Creation time for tick calculation.
+    created_at: Instant,
+
+    /// Last tick value sent to peer.
+    pub last_recv_my_tick: u64,
+
+    /// Last tick value received from peer.
+    pub last_recv_your_tick: u64,
+
+    /// Last time we received any valid packet.
+    pub last_recv_tick: u64,
+
+    /// First time we had stable continuous receive.
+    pub first_stable_receive_tick: u64,
+
+    /// Maximum UDP packet size.
+    pub max_udp_packet_size: usize,
 }
 
 impl UdpAccel {
@@ -159,13 +231,25 @@ impl UdpAccel {
             plain_text_mode: false,
             fast_detect: false,
             is_usable: false,
+            is_reached_once: false,
             socket: Some(Arc::new(tokio_socket)),
             next_iv,
             next_iv_v2,
             no_nat_t: no_nat_t || is_ipv6, // NAT-T disabled for IPv6
             nat_t_tran_id: rand::random(),
             is_ipv6,
+            created_at: Instant::now(),
+            last_recv_my_tick: 0,
+            last_recv_your_tick: 0,
+            last_recv_tick: 0,
+            first_stable_receive_tick: 0,
+            max_udp_packet_size: if is_ipv6 { MTU_FOR_PPPOE - 40 } else { MTU_FOR_PPPOE - 20 } - 8,
         })
+    }
+
+    /// Get current tick (milliseconds since creation).
+    pub fn now(&self) -> u64 {
+        self.created_at.elapsed().as_millis() as u64
     }
 
     /// Initialize the client side with server information.
@@ -234,6 +318,30 @@ impl UdpAccel {
         Ok(())
     }
 
+    /// Initialize UDP acceleration from server response.
+    ///
+    /// This is a convenience method that calls `init_client` with the
+    /// response fields.
+    pub fn init_from_response(&mut self, response: &UdpAccelServerResponse) -> Result<()> {
+        if !response.enabled {
+            return Err(Error::invalid_response("UDP acceleration not enabled"));
+        }
+
+        // Set protocol version
+        self.version = response.version.min(UDP_ACCEL_MAX_VERSION);
+        self.plain_text_mode = !response.use_encryption;
+        self.use_hmac = response.use_hmac;
+        self.fast_detect = response.fast_disconnect_detect;
+
+        self.init_client(
+            &response.server_key,
+            response.server_ip,
+            response.server_port,
+            response.server_cookie,
+            response.client_cookie,
+        )
+    }
+
     /// Get the UDP socket for sending/receiving.
     pub fn socket(&self) -> Option<&Arc<TokioUdpSocket>> {
         self.socket.as_ref()
@@ -281,6 +389,261 @@ impl UdpAccel {
             && self.socket.is_some()
             && self.your_ip.is_some()
             && self.your_port.is_some()
+    }
+
+    /// Check if send is ready (we've received packets from peer recently).
+    pub fn is_send_ready(&mut self) -> bool {
+        if !self.is_usable || self.your_port.is_none() || self.your_ip.is_none() {
+            return false;
+        }
+
+        let now = self.now();
+        let timeout = if self.fast_detect {
+            UDP_ACCELERATION_KEEPALIVE_TIMEOUT / 3
+        } else {
+            UDP_ACCELERATION_KEEPALIVE_TIMEOUT
+        };
+
+        if self.last_recv_tick == 0 || (self.last_recv_tick + timeout) < now {
+            self.first_stable_receive_tick = 0;
+            return false;
+        }
+
+        (self.first_stable_receive_tick + UDP_ACCELERATION_REQUIRE_CONTINUOUS) <= now
+    }
+
+    /// Calculate V1 encryption key from common key and IV.
+    /// Algorithm: SHA-1(common_key || iv)
+    fn calc_key_v1(common_key: &[u8; UDP_ACCELERATION_COMMON_KEY_SIZE_V1], iv: &[u8]) -> [u8; 20] {
+        use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY};
+        let mut ctx = Context::new(&SHA1_FOR_LEGACY_USE_ONLY);
+        ctx.update(common_key);
+        ctx.update(iv);
+        let digest = ctx.finish();
+        let mut key = [0u8; 20];
+        key.copy_from_slice(digest.as_ref());
+        key
+    }
+
+    /// Encode and send a packet via UDP.
+    ///
+    /// # Arguments
+    /// * `data` - The data to send (can be empty for keepalive)
+    /// * `compressed` - Whether the data is compressed (flag byte)
+    ///
+    /// # Returns
+    /// Number of bytes sent, or error.
+    pub async fn send(&mut self, data: &[u8], compressed: bool) -> Result<usize> {
+        if !self.is_ready() {
+            return Err(Error::invalid_state("UDP accel not ready"));
+        }
+
+        let socket = self.socket.as_ref().unwrap();
+        let server_addr = self.server_addr().unwrap();
+        let now = self.now();
+
+        // Build packet
+        let mut buf = Vec::with_capacity(UDP_ACCELERATION_TMP_BUF_SIZE);
+
+        if !self.plain_text_mode {
+            // Add IV
+            buf.extend_from_slice(&self.next_iv);
+        }
+
+        let encrypted_start = buf.len();
+
+        // Cookie (4 bytes)
+        let cookie = self.your_cookie.unwrap_or(0);
+        buf.put_u32(cookie);
+
+        // MyTick (8 bytes) - current time
+        let my_tick = if now == 0 { 1 } else { now };
+        buf.put_u64(my_tick);
+
+        // YourTick (8 bytes) - last received tick from peer
+        buf.put_u64(self.last_recv_your_tick);
+
+        // Size (2 bytes)
+        buf.put_u16(data.len() as u16);
+
+        // Flag (1 byte) - compression flag
+        buf.put_u8(if compressed { 1 } else { 0 });
+
+        // Data
+        buf.extend_from_slice(data);
+
+        if !self.plain_text_mode {
+            // Add padding for security (random amount up to available space)
+            let current_size = buf.len() + UDP_ACCELERATION_PACKET_IV_SIZE_V1;
+            if current_size < self.max_udp_packet_size {
+                let max_pad = (self.max_udp_packet_size - current_size).min(32);
+                let pad_size = if max_pad > 0 {
+                    rand::random::<usize>() % max_pad
+                } else {
+                    0
+                };
+                buf.extend(std::iter::repeat(0u8).take(pad_size));
+            }
+
+            // Add verify field (20 zero bytes for integrity check)
+            buf.extend_from_slice(&[0u8; UDP_ACCELERATION_PACKET_IV_SIZE_V1]);
+
+            // Encrypt the payload (everything after IV)
+            let key = Self::calc_key_v1(&self.my_key, &self.next_iv);
+            let mut cipher = Rc4::new(&key);
+            cipher.process(&mut buf[encrypted_start..]);
+
+            // Update next IV (use last 20 bytes of encrypted data)
+            let new_iv_start = buf.len() - UDP_ACCELERATION_PACKET_IV_SIZE_V1;
+            self.next_iv.copy_from_slice(&buf[new_iv_start..]);
+        }
+
+        // Send
+        let sent = socket.send_to(&buf, server_addr).await.map_err(Error::Io)?;
+        trace!("UDP accel sent {} bytes to {}", sent, server_addr);
+
+        Ok(sent)
+    }
+
+    /// Send a keepalive packet.
+    pub async fn send_keepalive(&mut self) -> Result<usize> {
+        self.send(&[], false).await
+    }
+
+    /// Process a received UDP packet.
+    ///
+    /// # Arguments
+    /// * `buf` - The received packet data
+    /// * `src_addr` - Source address of the packet
+    ///
+    /// # Returns
+    /// The decrypted payload data and compression flag, or None if invalid.
+    pub fn process_recv(&mut self, buf: &[u8], src_addr: SocketAddr) -> Option<(Vec<u8>, bool)> {
+        let now = self.now();
+
+        if buf.len() < UDP_ACCELERATION_PACKET_IV_SIZE_V1 + 4 + 8 + 8 + 2 + 1 {
+            trace!("UDP accel packet too small: {} bytes", buf.len());
+            return None;
+        }
+
+        let mut data = buf.to_vec();
+        let iv = &buf[..UDP_ACCELERATION_PACKET_IV_SIZE_V1];
+        let encrypted = &mut data[UDP_ACCELERATION_PACKET_IV_SIZE_V1..];
+        let encrypted_len = encrypted.len();
+
+        if !self.plain_text_mode {
+            // Decrypt
+            let key = Self::calc_key_v1(&self.your_key, iv);
+            let mut cipher = Rc4::new(&key);
+            cipher.process(encrypted);
+        }
+
+        // Verify integrity (last 20 bytes should be zeros in V1)
+        if !self.plain_text_mode {
+            let verify_start = encrypted_len - UDP_ACCELERATION_PACKET_IV_SIZE_V1;
+            if encrypted[verify_start..].iter().any(|&b| b != 0) {
+                trace!("UDP accel integrity check failed");
+                return None;
+            }
+        }
+
+        let mut cursor = Cursor::new(&encrypted[..]);
+
+        // Cookie
+        let cookie = cursor.get_u32();
+        if cookie != self.my_cookie {
+            trace!("UDP accel cookie mismatch: expected {}, got {}", self.my_cookie, cookie);
+            return None;
+        }
+
+        // MyTick (sender's tick)
+        let my_tick = cursor.get_u64();
+
+        // YourTick (our tick echoed back)
+        let your_tick = cursor.get_u64();
+
+        // Size
+        let inner_size = cursor.get_u16() as usize;
+
+        // Flag
+        let flag = cursor.get_u8();
+        let compressed = flag != 0;
+
+        // Validate remaining data
+        let remaining = cursor.remaining();
+        if remaining < inner_size {
+            trace!("UDP accel data too short: need {}, have {}", inner_size, remaining);
+            return None;
+        }
+
+        // Extract inner data
+        let pos = cursor.position() as usize;
+        let inner_data = if inner_size > 0 {
+            encrypted[pos..pos + inner_size].to_vec()
+        } else {
+            Vec::new()
+        };
+
+        // Check for replay (tick must be within window)
+        if my_tick < self.last_recv_your_tick {
+            if (self.last_recv_your_tick - my_tick) >= UDP_ACCELERATION_WINDOW_SIZE_MSEC {
+                trace!("UDP accel replay detected");
+                return None;
+            }
+        }
+
+        // Update state
+        self.last_recv_my_tick = self.last_recv_my_tick.max(your_tick);
+        self.last_recv_your_tick = self.last_recv_your_tick.max(my_tick);
+
+        // Update peer address if needed
+        if let Some(ref current_ip) = self.your_ip {
+            if *current_ip != src_addr.ip() || self.your_port != Some(src_addr.port()) {
+                debug!("UDP accel peer address changed: {} -> {}", 
+                    SocketAddr::new(*current_ip, self.your_port.unwrap_or(0)),
+                    src_addr);
+                self.your_ip = Some(src_addr.ip());
+                self.your_port = Some(src_addr.port());
+            }
+        }
+
+        // Update receive timing
+        if self.last_recv_my_tick != 0 {
+            if (self.last_recv_my_tick + UDP_ACCELERATION_WINDOW_SIZE_MSEC) >= now {
+                self.last_recv_tick = now;
+                self.is_reached_once = true;
+
+                if self.first_stable_receive_tick == 0 {
+                    self.first_stable_receive_tick = now;
+                }
+            }
+        }
+
+        trace!("UDP accel received {} bytes (compressed={})", inner_data.len(), compressed);
+        Some((inner_data, compressed))
+    }
+
+    /// Receive a packet from the UDP socket.
+    ///
+    /// This is a non-blocking receive that returns immediately if no data.
+    pub async fn try_recv(&self) -> Result<Option<(Vec<u8>, SocketAddr)>> {
+        let socket = match &self.socket {
+            Some(s) => s,
+            None => return Err(Error::invalid_state("No UDP socket")),
+        };
+
+        let mut buf = vec![0u8; UDP_ACCELERATION_TMP_BUF_SIZE];
+        
+        match socket.try_recv_from(&mut buf) {
+            Ok((len, addr)) => {
+                buf.truncate(len);
+                Ok(Some((buf, addr)))
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                Ok(None)
+            }
+            Err(e) => Err(Error::Io(e)),
+        }
     }
 }
 

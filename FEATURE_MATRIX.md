@@ -66,10 +66,21 @@
 **All Platforms:**
 - ✅ Auth flow sends UDP accel params (`udp_accel: true`)
 - ✅ Server response parsed (`UdpAccelResponse`)
-- ❌ No UDP data path implemented
-- ❌ No fallback/upgrade to UDP when available
+- ✅ UDP data path implemented (`src/net/udp_accel.rs`)
+- ✅ V1 protocol (RC4 + SHA-1) fully implemented
+- ✅ Automatic fallback to TCP when UDP not ready
+- ✅ Parallel send/receive in packet loop
+- ❌ V2 protocol (ChaCha20-Poly1305) not implemented
 
-**Priority:** Low - TCP works fine, UDP is a performance optimization.
+**Implementation Details:**
+- `UdpAccel::send()` - Encode and encrypt packets for UDP
+- `UdpAccel::try_recv()` - Non-blocking receive from UDP socket
+- `UdpAccel::is_send_ready()` - Check if UDP path is established
+- `UdpAccel::send_keepalive()` - Keep UDP connection alive
+- Packet format: IV (20B) + Cookie + Timestamps + Size + Flag + Data + Verify (20B zeros)
+- Key derivation: SHA-1(common_key || iv) for RC4 encryption
+
+**Priority:** Complete for V1, V2 deferred until needed.
 
 ---
 
@@ -106,6 +117,7 @@
 | RC4 Encryption | `src/tunnel/runner.rs:TunnelEncryption` | `src/ffi/client.rs:TunnelEncryption` |
 | Compression | `src/protocol/tunnel.rs:compress/decompress` | Same (shared) |
 | Multi-Connection | `src/client/multi_connection.rs` | Same (shared) |
+| UDP Acceleration | `src/net/udp_accel.rs` | Same (shared) |
 | DHCP | `src/tunnel/runner.rs` (desktop), `src/ffi/client.rs:perform_dhcp` | Separate impls |
 | Auth | `src/protocol/auth.rs` | Same (shared) |
 | RC4 Crypto | `src/crypto/rc4.rs` | Same (shared) |
@@ -116,9 +128,9 @@
 
 ### Low Priority
 
-1. **UDP acceleration data path**
-   - Requires parallel UDP socket management
-   - Deferred until TCP performance issues reported
+1. **UDP acceleration V2 (ChaCha20-Poly1305)**
+   - Currently only V1 (RC4 + SHA-1) implemented
+   - V2 offers better security but requires additional crypto
 
 2. **Packet statistics on FFI** 
    - `bytes_sent`, `bytes_received`, `packets_sent`, `packets_received` not incremented in packet loop

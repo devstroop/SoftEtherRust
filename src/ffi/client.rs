@@ -859,6 +859,44 @@ async fn connect_and_run_inner(
         log_message(&callbacks, 1, "[RUST] Encryption disabled");
     }
 
+    // Initialize UDP acceleration if server supports it
+    let mut udp_accel = if let Some(ref udp_response) = final_auth.udp_accel_response {
+        match crate::net::UdpAccel::new(None, true, false) {
+            Ok(mut accel) => {
+                if let Err(e) = accel.init_from_response(udp_response) {
+                    log_message(
+                        &callbacks,
+                        2,
+                        &format!("[RUST] Failed to initialize UDP acceleration: {e}"),
+                    );
+                    None
+                } else {
+                    log_message(
+                        &callbacks,
+                        1,
+                        &format!(
+                            "[RUST] UDP acceleration initialized: version={}, server={}:{}",
+                            accel.version,
+                            udp_response.server_ip,
+                            udp_response.server_port
+                        ),
+                    );
+                    Some(accel)
+                }
+            }
+            Err(e) => {
+                log_message(
+                    &callbacks,
+                    2,
+                    &format!("[RUST] Failed to create UDP socket: {e}"),
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Run the packet loop
     log_message(callbacks, 1, "[RUST] Starting packet loop...");
     run_packet_loop(
@@ -870,6 +908,7 @@ async fn connect_and_run_inner(
         dhcp_config,
         final_auth.rc4_key_pair.as_ref(),
         config.qos,
+        udp_accel.as_mut(),
     )
     .await
 }
@@ -1402,7 +1441,7 @@ impl TunnelEncryption {
     }
 }
 
-/// Run the main packet forwarding loop with ARP handling and QoS
+/// Run the main packet forwarding loop with ARP handling, QoS, and optional UDP acceleration.
 async fn run_packet_loop(
     conn_mgr: &mut ConnectionManager,
     running: Arc<AtomicBool>,
@@ -1412,6 +1451,7 @@ async fn run_packet_loop(
     dhcp_config: DhcpConfig,
     rc4_key_pair: Option<&Rc4KeyPair>,
     qos_enabled: bool,
+    udp_accel: Option<&mut crate::net::UdpAccel>,
 ) -> crate::error::Result<()> {
     use crate::packet::is_priority_packet;
     fn log_msg(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
@@ -1424,6 +1464,7 @@ async fn run_packet_loop(
 
     let mut tunnel_codec = TunnelCodec::new();
     let mut read_buf = vec![0u8; 65536];
+    let mut udp_recv_buf = vec![0u8; 65536];
     let keepalive_interval_secs = 5u64;
 
     // Set up ARP handler for gateway MAC learning
@@ -1477,6 +1518,24 @@ async fn run_packet_loop(
 
     log_msg(&callbacks, 1, "[RUST] Packet loop started");
 
+    // Track UDP acceleration state
+    let mut udp_ready_logged = false;
+    let mut last_udp_keepalive = std::time::Instant::now();
+    let udp_keepalive_interval = Duration::from_secs(2);
+
+    // Start UDP acceleration if available - send initial keepalives
+    if let Some(ref mut ua) = udp_accel {
+        log_msg(&callbacks, 1, "[RUST] Sending initial UDP keepalives to establish path...");
+        // Send a few keepalives to trigger server response
+        for _ in 0..3 {
+            if let Err(e) = ua.send_keepalive().await {
+                log_msg(&callbacks, 2, &format!("[RUST] UDP initial keepalive failed: {e}"));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     // Send first keepalive immediately (encrypt if RC4 is enabled)
     let keepalive = tunnel_codec.encode_keepalive();
     let first_keepalive: Vec<u8> = if let Some(ref mut enc) = encryption {
@@ -1493,7 +1552,7 @@ async fn run_packet_loop(
     let mut last_keepalive = std::time::Instant::now();
 
     while running.load(Ordering::SeqCst) {
-        // Check if we need to send keepalive
+        // Check if we need to send keepalive (TCP)
         if last_keepalive.elapsed() >= Duration::from_secs(keepalive_interval_secs) {
             let keepalive = tunnel_codec.encode_keepalive();
             // Encrypt keepalive if RC4 is enabled
@@ -1509,6 +1568,24 @@ async fn run_packet_loop(
                 .await
                 .map_err(crate::error::Error::Io)?;
             last_keepalive = std::time::Instant::now();
+        }
+
+        // Send UDP keepalives if UDP acceleration is active
+        if let Some(ref mut ua) = udp_accel {
+            if ua.is_send_ready() {
+                if !udp_ready_logged {
+                    log_msg(&callbacks, 1, "[RUST] UDP acceleration path is now active!");
+                    udp_ready_logged = true;
+                }
+                if last_udp_keepalive.elapsed() >= udp_keepalive_interval {
+                    if let Err(e) = ua.send_keepalive().await {
+                        log_msg(&callbacks, 2, &format!("[RUST] UDP keepalive failed: {e}"));
+                    }
+                    last_udp_keepalive = std::time::Instant::now();
+                }
+            } else {
+                udp_ready_logged = false; // Reset if UDP becomes inactive
+            }
         }
 
         tokio::select! {
@@ -1539,23 +1616,82 @@ async fn run_packet_loop(
                         });
                     }
                     
-                    // Encode frames into tunnel format
-                    let encoded = tunnel_codec.encode(&modified_frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
+                    // Try UDP acceleration first if ready
+                    let mut sent_via_udp = false;
+                    if let Some(ref mut ua) = udp_accel {
+                        if ua.is_send_ready() {
+                            // Send each frame via UDP (no tunnel framing needed)
+                            for frame in &modified_frames {
+                                if let Err(e) = ua.send(frame, false).await {
+                                    log_msg(&callbacks, 2, &format!("[RUST] UDP send failed: {e}"));
+                                    break;
+                                }
+                            }
+                            sent_via_udp = true;
+                        }
+                    }
                     
-                    // Encrypt if RC4 is enabled, otherwise send as-is
-                    let to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
-                        let mut data = encoded.to_vec();
-                        enc.encrypt(&mut data);
-                        data
-                    } else {
-                        encoded.to_vec()
-                    };
-                    
-                    conn_mgr.write_all(&to_send).await.map_err(crate::error::Error::Io)?;
+                    // Fallback to TCP if UDP not ready or not available
+                    if !sent_via_udp {
+                        // Encode frames into tunnel format
+                        let encoded = tunnel_codec.encode(&modified_frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
+                        
+                        // Encrypt if RC4 is enabled, otherwise send as-is
+                        let to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
+                            let mut data = encoded.to_vec();
+                            enc.encrypt(&mut data);
+                            data
+                        } else {
+                            encoded.to_vec()
+                        };
+                        
+                        conn_mgr.write_all(&to_send).await.map_err(crate::error::Error::Io)?;
+                    }
                 }
             }
 
-            // Data from VPN server to send to mobile app
+            // UDP receive (if UDP acceleration is available)
+            result = async {
+                if let Some(ref mut ua) = udp_accel {
+                    ua.try_recv(&mut udp_recv_buf).await
+                } else {
+                    // No UDP - just wait forever (will be cancelled by other branches)
+                    std::future::pending::<Option<(Vec<u8>, bool)>>().await
+                }
+            } => {
+                if let Some((frame_data, _compressed)) = result {
+                    // Process received UDP frame
+                    // Build length-prefixed buffer for callback
+                    let mut buffer = Vec::with_capacity(frame_data.len() + 2);
+                    
+                    // Process ARP packets for gateway MAC learning
+                    if frame_data.len() >= 14 {
+                        let ethertype = u16::from_be_bytes([frame_data[12], frame_data[13]]);
+                        if ethertype == 0x0806 {
+                            let had_mac = arp.has_gateway_mac();
+                            arp.process_arp(&frame_data);
+                            if !had_mac {
+                                if let Some(gw_mac) = arp.gateway_mac() {
+                                    log_msg(&callbacks, 1, &format!(
+                                        "[RUST] Learned gateway MAC (UDP): {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                                        gw_mac[0], gw_mac[1], gw_mac[2], gw_mac[3], gw_mac[4], gw_mac[5]
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    
+                    let len = frame_data.len() as u16;
+                    buffer.extend_from_slice(&len.to_be_bytes());
+                    buffer.extend_from_slice(&frame_data);
+                    
+                    if let Some(cb) = callbacks.on_packets_received {
+                        cb(callbacks.context, buffer.as_ptr(), buffer.len(), 1);
+                    }
+                }
+            }
+
+            // Data from VPN server to send to mobile app (TCP)
             result = tokio::time::timeout(Duration::from_millis(500), conn_mgr.read_any(&mut read_buf)) => {
                 match result {
                     Ok(Ok((_conn_idx, n))) if n > 0 => {
@@ -1874,7 +2010,17 @@ async fn authenticate(
                     &format!("[RUST] Response body: {} bytes", response.body.len()),
                 );
                 let pack = crate::protocol::Pack::deserialize(&response.body)?;
-                let result = AuthResult::from_pack(&pack)?;
+                
+                // Resolve remote IP for UDP accel parsing
+                let remote_ip = if config.udp_accel {
+                    resolve_server_ip(&config.server)
+                        .map(std::net::IpAddr::V4)
+                        .ok()
+                } else {
+                    None
+                };
+                
+                let result = AuthResult::from_pack_with_remote(&pack, remote_ip)?;
 
                 if result.error > 0 {
                     log_msg(
@@ -1891,16 +2037,9 @@ async fn authenticate(
                     )));
                 }
 
-                // Check if server supports UDP acceleration
+                // Log UDP acceleration status
                 if config.udp_accel {
-                    // Try to get remote IP for UDP accel parsing
-                    let remote_ip = resolve_server_ip(&config.server)
-                        .map(std::net::IpAddr::V4)
-                        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
-
-                    if let Some(udp_response) =
-                        AuthResult::parse_udp_accel_response(&pack, remote_ip)
-                    {
+                    if let Some(ref udp_response) = result.udp_accel_response {
                         log_msg(
                             callbacks,
                             1,
@@ -1909,14 +2048,13 @@ async fn authenticate(
                                 udp_response.version, udp_response.server_port, udp_response.use_encryption
                             ),
                         );
-                        // TODO: Initialize UDP accel with server params and integrate with tunnel runner
-                        // For now, we just log that the server supports it
                     } else {
                         log_msg(
                             callbacks,
                             2,
                             "[RUST] Server does not support UDP acceleration",
                         );
+                    }
                     }
                 }
 

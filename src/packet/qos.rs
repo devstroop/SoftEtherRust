@@ -11,10 +11,12 @@
 
 /// EtherType values
 const ETHERTYPE_IPV4: u16 = 0x0800;
+#[allow(dead_code)]
 const ETHERTYPE_IPV6: u16 = 0x86DD;
 
 /// IP protocol numbers
 const IPPROTO_ICMP: u8 = 1;
+#[allow(dead_code)]
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 

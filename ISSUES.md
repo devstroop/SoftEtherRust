@@ -20,13 +20,15 @@ _All Android issues resolved._
 
 ## 4. Protocol
 
-### 4.1 UDP Acceleration Data Path Not Integrated
-- ✅ UDP accel params now sent during authentication (when `udp_accel: true`)
-- ✅ Server UDP accel response is parsed and logged
-- ❌ UDP data path NOT integrated into tunnel runner
-- ❌ No fallback/upgrade to UDP when available
-- Note: Auth negotiation is complete, but actual UDP send/recv requires tunnel runner changes
-- Official C: `UdpAccel` integrated with `SessionMain()`, parallel send/recv paths
+### 4.1 UDP Acceleration ✅ RESOLVED
+- ✅ UDP accel params sent during authentication (when `udp_accel: true`)
+- ✅ Server UDP accel response parsed (`UdpAccelServerResponse`)
+- ✅ UDP data path integrated into FFI packet loop
+- ✅ V1 protocol (RC4 + SHA-1) fully implemented
+- ✅ Automatic fallback to TCP when UDP not ready
+- ✅ Parallel send/receive in packet loop
+- ❌ V2 protocol (ChaCha20-Poly1305) not yet implemented
+- Impact: Provides lower-latency tunnel when UDP path established
 
 ---
 
