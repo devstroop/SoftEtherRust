@@ -96,7 +96,7 @@ pub fn generate_transaction_id() -> u32 {
 }
 
 /// Bidirectional RC4 encryption state for tunnel traffic.
-/// 
+///
 /// This wraps separate send/receive RC4 ciphers for encrypting
 /// outbound and decrypting inbound tunnel data.
 pub struct TunnelEncryption {
@@ -106,12 +106,15 @@ pub struct TunnelEncryption {
 
 impl TunnelEncryption {
     /// Create new tunnel encryption state from an RC4 key pair (client mode).
-    /// 
+    ///
     /// - Send cipher uses client_to_server key
     /// - Recv cipher uses server_to_client key
     pub fn new(key_pair: &Rc4KeyPair) -> Self {
         let (send_cipher, recv_cipher) = key_pair.create_client_ciphers();
-        Self { send_cipher, recv_cipher }
+        Self {
+            send_cipher,
+            recv_cipher,
+        }
     }
 
     /// Encrypt data in-place for sending to server.

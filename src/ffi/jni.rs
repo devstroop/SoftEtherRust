@@ -290,7 +290,7 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
     // Get optional routing strings
     let ipv4_include_str = get_string(&mut env, &ipv4_include).unwrap_or_default();
     let ipv4_exclude_str = get_string(&mut env, &ipv4_exclude).unwrap_or_default();
-    
+
     // Get optional TLS strings
     let custom_ca_pem_str = get_string(&mut env, &custom_ca_pem).unwrap_or_default();
     let cert_fingerprint_str = get_string(&mut env, &cert_fingerprint_sha256).unwrap_or_default();
@@ -547,7 +547,7 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetSession
 }
 
 /// Get connection statistics as long array.
-/// Returns [bytes_sent, bytes_received, packets_sent, packets_received, uptime_secs, active_connections, reconnect_count]
+/// Returns [bytes_sent, bytes_received, packets_sent, packets_received, uptime_secs, active_connections, reconnect_count, packets_dropped]
 #[no_mangle]
 pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetStats<'local>(
     mut env: JNIEnv<'local>,
@@ -565,7 +565,7 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetStats<'
         return std::ptr::null_mut();
     }
 
-    let data: [i64; 7] = [
+    let data: [i64; 8] = [
         stats.bytes_sent as i64,
         stats.bytes_received as i64,
         stats.packets_sent as i64,
@@ -573,9 +573,10 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetStats<'
         stats.uptime_secs as i64,
         stats.active_connections as i64,
         stats.reconnect_count as i64,
+        stats.packets_dropped as i64,
     ];
 
-    match env.new_long_array(7) {
+    match env.new_long_array(8) {
         Ok(arr) => {
             let _ = env.set_long_array_region(&arr, 0, &data);
             arr.into_raw()

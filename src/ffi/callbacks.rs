@@ -123,7 +123,7 @@ unsafe impl Sync for SoftEtherCallbacks {}
 
 impl SoftEtherCallbacks {
     /// Log a message through the registered callback.
-    /// 
+    ///
     /// # Parameters
     /// - `level`: Log level (0=debug, 1=info, 2=warn, 3=error)
     /// - `msg`: The message to log

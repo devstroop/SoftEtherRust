@@ -59,7 +59,7 @@ pub use qos::{get_dscp, is_priority_packet, DscpClass};
 pub const DHCP_CLIENT_PORT: u16 = 68;
 
 /// Check if an Ethernet frame is a DHCP response (UDP dst port 68).
-/// 
+///
 /// Returns `true` if the frame is an IPv4/UDP packet with destination port 68.
 #[inline]
 pub fn is_dhcp_response(frame: &[u8]) -> bool {
@@ -81,7 +81,7 @@ pub fn is_dhcp_response(frame: &[u8]) -> bool {
 }
 
 /// Check if an Ethernet frame is a DHCPv6 response (UDP dst port 546).
-/// 
+///
 /// Returns `true` if the frame is an IPv6/UDP packet with destination port 546.
 #[inline]
 pub fn is_dhcpv6_response(frame: &[u8]) -> bool {
