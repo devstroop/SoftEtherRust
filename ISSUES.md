@@ -67,11 +67,13 @@ _All Android issues resolved._
 - ✅ Converted inline `log_msg` helpers to `callbacks.log_info/warn/error()` method calls
 - Location: `src/ffi/client.rs`, `src/ffi/connection.rs`, `src/ffi/packet_loop.rs`
 
-### 6.2 Performance Optimizations (Low Priority)
-- ❌ `Vec::new()` allocations in packet parsing - use `Cow<[u8]>` for zero-copy
-- ❌ `to_lowercase()` on every Pack lookup - use `unicase::UniCase` for case-insensitive keys
-- Location: `src/ffi/client.rs`, `src/protocol/pack.rs`
-- Impact: Minor - reduces allocations in hot paths
+### 6.2 Performance Optimizations ✅ RESOLVED
+- ✅ Pack now uses `UniCase<String>` for case-insensitive key storage
+- ✅ Eliminates redundant `to_lowercase()` on storage (keys stored once at insert)
+- ✅ Lookups still require allocation but benefit from UniCase's optimized comparison
+- ❌ `Vec::new()` allocations in packet parsing - use `Cow<[u8]>` for zero-copy (deferred)
+- Location: `src/protocol/pack.rs`
+- Impact: Minor improvement - reduces allocations during Pack construction
 
 ### 6.3 Dead Code Cleanup ✅ RESOLVED
 - ✅ `DhcpHandler` is actually used in `src/tunnel/data_loop.rs` (DataLoopState)
