@@ -120,3 +120,37 @@ impl Default for SoftEtherCallbacks {
 // and we ensure proper synchronization in the FFI layer.
 unsafe impl Send for SoftEtherCallbacks {}
 unsafe impl Sync for SoftEtherCallbacks {}
+
+impl SoftEtherCallbacks {
+    /// Log a message through the registered callback.
+    /// 
+    /// # Parameters
+    /// - `level`: Log level (0=debug, 1=info, 2=warn, 3=error)
+    /// - `msg`: The message to log
+    #[inline]
+    pub fn log(&self, level: i32, msg: &str) {
+        if let Some(cb) = self.on_log {
+            if let Ok(cstr) = std::ffi::CString::new(msg) {
+                cb(self.context, level, cstr.as_ptr());
+            }
+        }
+    }
+
+    /// Log an info message (level 1).
+    #[inline]
+    pub fn log_info(&self, msg: &str) {
+        self.log(1, msg);
+    }
+
+    /// Log a warning message (level 2).
+    #[inline]
+    pub fn log_warn(&self, msg: &str) {
+        self.log(2, msg);
+    }
+
+    /// Log an error message (level 3).
+    #[inline]
+    pub fn log_error(&self, msg: &str) {
+        self.log(3, msg);
+    }
+}

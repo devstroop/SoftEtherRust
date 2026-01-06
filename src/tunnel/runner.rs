@@ -34,7 +34,7 @@ use crate::adapter::WintunDevice;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use crate::client::ConcurrentReader;
 use crate::client::{ConnectionManager, VpnConnection};
-use crate::crypto::{Rc4, Rc4KeyPair};
+use crate::crypto::{Rc4KeyPair, TunnelEncryption};
 use crate::error::{Error, Result};
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use crate::packet::ArpHandler;
@@ -109,40 +109,6 @@ pub struct TunnelRunner {
     config: TunnelConfig,
     mac: [u8; 6],
     running: Arc<AtomicBool>,
-}
-
-/// RC4 encryption state for tunnel data.
-///
-/// RC4 is a streaming cipher - each cipher instance maintains state
-/// and MUST NOT be reset between packets. Send and recv use separate ciphers.
-pub struct TunnelEncryption {
-    /// RC4 send cipher (for encrypting outgoing data).
-    send_cipher: Rc4,
-    /// RC4 recv cipher (for decrypting incoming data).
-    recv_cipher: Rc4,
-}
-
-impl TunnelEncryption {
-    /// Create from RC4 key pair (client mode).
-    pub fn new(key_pair: &Rc4KeyPair) -> Self {
-        let (send_cipher, recv_cipher) = key_pair.create_client_ciphers();
-        Self {
-            send_cipher,
-            recv_cipher,
-        }
-    }
-
-    /// Encrypt data in-place for sending.
-    #[inline]
-    pub fn encrypt(&mut self, data: &mut [u8]) {
-        self.send_cipher.process(data);
-    }
-
-    /// Decrypt data in-place after receiving.
-    #[inline]
-    pub fn decrypt(&mut self, data: &mut [u8]) {
-        self.recv_cipher.process(data);
-    }
 }
 
 impl TunnelRunner {

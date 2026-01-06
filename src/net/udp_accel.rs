@@ -665,7 +665,7 @@ impl UdpAccel {
 
         if self.plain_text_mode {
             // No decryption needed
-            self.parse_decrypted_payload(&mut ciphertext.to_vec(), src_addr, now)
+            self.parse_decrypted_payload(ciphertext, src_addr, now)
         } else {
             // Decrypt with ChaCha20-Poly1305
             let cipher = self.cipher_decrypt.as_ref()?;
@@ -676,7 +676,7 @@ impl UdpAccel {
             // open_in_place decrypts and verifies the tag
             let plaintext = cipher.open_in_place(nonce, Aad::empty(), &mut in_out).ok()?;
             
-            self.parse_decrypted_payload(&mut plaintext.to_vec(), src_addr, now)
+            self.parse_decrypted_payload(plaintext, src_addr, now)
         }
     }
 
@@ -725,11 +725,11 @@ impl UdpAccel {
         };
 
         // Check for replay (tick must be within window)
-        if my_tick < self.last_recv_your_tick {
-            if (self.last_recv_your_tick - my_tick) >= UDP_ACCELERATION_WINDOW_SIZE_MSEC {
-                trace!("UDP accel replay detected");
-                return None;
-            }
+        if my_tick < self.last_recv_your_tick
+            && (self.last_recv_your_tick - my_tick) >= UDP_ACCELERATION_WINDOW_SIZE_MSEC
+        {
+            trace!("UDP accel replay detected");
+            return None;
         }
 
         // Update state
@@ -748,14 +748,14 @@ impl UdpAccel {
         }
 
         // Update receive timing
-        if self.last_recv_my_tick != 0 {
-            if (self.last_recv_my_tick + UDP_ACCELERATION_WINDOW_SIZE_MSEC) >= now {
-                self.last_recv_tick = now;
-                self.is_reached_once = true;
+        if self.last_recv_my_tick != 0
+            && (self.last_recv_my_tick + UDP_ACCELERATION_WINDOW_SIZE_MSEC) >= now
+        {
+            self.last_recv_tick = now;
+            self.is_reached_once = true;
 
-                if self.first_stable_receive_tick == 0 {
-                    self.first_stable_receive_tick = now;
-                }
+            if self.first_stable_receive_tick == 0 {
+                self.first_stable_receive_tick = now;
             }
         }
 

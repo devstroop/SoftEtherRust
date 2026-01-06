@@ -104,3 +104,7 @@ _All half-connection mode issues resolved._
 - ✅ QoS packet prioritization (is_priority_packet() detects ToS/DSCP, ICMP, VoIP ports; FFI sorts priority packets first)
 - ✅ UDP Acceleration V2 (ChaCha20-Poly1305 AEAD encryption for UDP packets)
 - ✅ Packet statistics in FFI (bytes_sent/received, packets_sent/received now tracked via Arc<FfiStats>)
+- ✅ Code deduplication: `TunnelEncryption` moved to shared `src/crypto/mod.rs`
+- ✅ Code deduplication: `is_dhcp_response()` / `is_dhcpv6_response()` moved to `src/packet/mod.rs`
+- ✅ Added `SoftEtherCallbacks::log()` method to eliminate duplicate log helpers
+- ✅ Clippy warnings fixed (collapsible if, range contains, unnecessary to_vec)

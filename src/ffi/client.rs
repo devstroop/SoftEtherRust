@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use super::callbacks::*;
 use super::types::*;
 use crate::client::{ConnectionManager, VpnConnection};
-use crate::crypto::{Rc4, Rc4KeyPair};
+use crate::crypto::{Rc4KeyPair, TunnelEncryption};
 use crate::packet::{ArpHandler, DhcpClient, DhcpConfig, DhcpState, Dhcpv6Client, Dhcpv6Config, Dhcpv6State};
 use crate::protocol::{
     decompress, is_compressed, AuthPack, AuthResult, AuthType, ConnectionOptions, HelloResponse,
@@ -1208,43 +1208,8 @@ async fn perform_dhcp(
     }
 }
 
-/// Check if an Ethernet frame is a DHCP response (UDP dst port 68)
-fn is_dhcp_response(frame: &[u8]) -> bool {
-    // Minimum: Ethernet(14) + IP(20) + UDP(8) + DHCP minimal
-    if frame.len() < 42 {
-        return false;
-    }
-    // Check EtherType is IPv4
-    if frame[12] != 0x08 || frame[13] != 0x00 {
-        return false;
-    }
-    // Check IP protocol is UDP (17)
-    if frame[23] != 17 {
-        return false;
-    }
-    // Check UDP destination port is 68 (DHCP client)
-    let dst_port = u16::from_be_bytes([frame[36], frame[37]]);
-    dst_port == 68
-}
-
-/// Check if an Ethernet frame is a DHCPv6 response (UDP dst port 546)
-fn is_dhcpv6_response(frame: &[u8]) -> bool {
-    // Minimum: Ethernet(14) + IPv6(40) + UDP(8) + DHCPv6 minimal
-    if frame.len() < 66 {
-        return false;
-    }
-    // Check EtherType is IPv6
-    if frame[12] != 0x86 || frame[13] != 0xDD {
-        return false;
-    }
-    // Check IPv6 Next Header is UDP (17)
-    if frame[20] != 17 {
-        return false;
-    }
-    // Check UDP destination port is 546 (DHCPv6 client)
-    let dst_port = u16::from_be_bytes([frame[54], frame[55]]);
-    dst_port == crate::packet::DHCPV6_CLIENT_PORT
-}
+// Use shared DHCP response checkers from packet module
+use crate::packet::{is_dhcp_response, is_dhcpv6_response};
 
 /// Perform DHCPv6 through the tunnel to get IPv6 configuration
 /// This is optional and may fail if the server doesn't support DHCPv6
@@ -1416,35 +1381,6 @@ async fn send_frame(
         .await
         .map_err(crate::error::Error::Io)?;
     Ok(())
-}
-
-/// RC4 encryption state for tunnel data.
-/// 
-/// RC4 is a streaming cipher - each cipher instance maintains state
-/// and MUST NOT be reset between packets. Send and recv use separate ciphers.
-struct TunnelEncryption {
-    send_cipher: Rc4,
-    recv_cipher: Rc4,
-}
-
-impl TunnelEncryption {
-    /// Create from RC4 key pair (client mode).
-    fn new(key_pair: &Rc4KeyPair) -> Self {
-        let (send_cipher, recv_cipher) = key_pair.create_client_ciphers();
-        Self { send_cipher, recv_cipher }
-    }
-
-    /// Encrypt data in-place for sending.
-    #[inline]
-    fn encrypt(&mut self, data: &mut [u8]) {
-        self.send_cipher.process(data);
-    }
-
-    /// Decrypt data in-place after receiving.
-    #[inline]
-    fn decrypt(&mut self, data: &mut [u8]) {
-        self.recv_cipher.process(data);
-    }
 }
 
 /// Run the main packet forwarding loop with ARP handling, QoS, and optional UDP acceleration.

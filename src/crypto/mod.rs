@@ -5,6 +5,7 @@
 //! - Password hashing functions
 //! - Secure password computation
 //! - RC4 stream cipher for tunnel encryption
+//! - TunnelEncryption wrapper for bidirectional RC4
 
 mod rc4;
 mod sha0;
@@ -92,6 +93,38 @@ pub fn fill_random(dest: &mut [u8]) {
 pub fn generate_transaction_id() -> u32 {
     use rand::Rng;
     rand::thread_rng().gen()
+}
+
+/// Bidirectional RC4 encryption state for tunnel traffic.
+/// 
+/// This wraps separate send/receive RC4 ciphers for encrypting
+/// outbound and decrypting inbound tunnel data.
+pub struct TunnelEncryption {
+    send_cipher: Rc4,
+    recv_cipher: Rc4,
+}
+
+impl TunnelEncryption {
+    /// Create new tunnel encryption state from an RC4 key pair (client mode).
+    /// 
+    /// - Send cipher uses client_to_server key
+    /// - Recv cipher uses server_to_client key
+    pub fn new(key_pair: &Rc4KeyPair) -> Self {
+        let (send_cipher, recv_cipher) = key_pair.create_client_ciphers();
+        Self { send_cipher, recv_cipher }
+    }
+
+    /// Encrypt data in-place for sending to server.
+    #[inline]
+    pub fn encrypt(&mut self, data: &mut [u8]) {
+        self.send_cipher.process(data);
+    }
+
+    /// Decrypt data in-place received from server.
+    #[inline]
+    pub fn decrypt(&mut self, data: &mut [u8]) {
+        self.recv_cipher.process(data);
+    }
 }
 
 #[cfg(test)]

@@ -104,8 +104,8 @@ fn is_priority_ipv4(ip_packet: &[u8]) -> bool {
             let src_port = u16::from_be_bytes([ip_packet[udp_start], ip_packet[udp_start + 1]]);
 
             // RTP port range (common for VoIP)
-            if (dst_port >= RTP_PORT_MIN && dst_port <= RTP_PORT_MAX)
-                || (src_port >= RTP_PORT_MIN && src_port <= RTP_PORT_MAX)
+            if (RTP_PORT_MIN..=RTP_PORT_MAX).contains(&dst_port)
+                || (RTP_PORT_MIN..=RTP_PORT_MAX).contains(&src_port)
             {
                 // Small packet likely to be voice frame
                 if ip_packet.len() <= SMALL_PACKET_THRESHOLD {
@@ -160,13 +160,12 @@ fn is_priority_ipv6(ip_packet: &[u8]) -> bool {
         let dst_port = u16::from_be_bytes([ip_packet[udp_start + 2], ip_packet[udp_start + 3]]);
         let src_port = u16::from_be_bytes([ip_packet[udp_start], ip_packet[udp_start + 1]]);
 
-        // RTP port range
-        if (dst_port >= RTP_PORT_MIN && dst_port <= RTP_PORT_MAX)
-            || (src_port >= RTP_PORT_MIN && src_port <= RTP_PORT_MAX)
+        // RTP port range - small packets likely voice frames
+        if ((RTP_PORT_MIN..=RTP_PORT_MAX).contains(&dst_port)
+            || (RTP_PORT_MIN..=RTP_PORT_MAX).contains(&src_port))
+            && ip_packet.len() <= SMALL_PACKET_THRESHOLD
         {
-            if ip_packet.len() <= SMALL_PACKET_THRESHOLD {
-                return true;
-            }
+            return true;
         }
 
         // SIP signaling
