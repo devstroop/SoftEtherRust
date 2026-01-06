@@ -1460,7 +1460,7 @@ async fn run_packet_loop(
     dhcp_config: DhcpConfig,
     rc4_key_pair: Option<&Rc4KeyPair>,
     qos_enabled: bool,
-    udp_accel: Option<&mut crate::net::UdpAccel>,
+    mut udp_accel: Option<&mut crate::net::UdpAccel>,
     stats: &Arc<FfiStats>,
 ) -> crate::error::Result<()> {
     use crate::packet::is_priority_packet;
@@ -1474,7 +1474,7 @@ async fn run_packet_loop(
 
     let mut tunnel_codec = TunnelCodec::new();
     let mut read_buf = vec![0u8; 65536];
-    let mut udp_recv_buf = vec![0u8; 65536];
+    let _udp_recv_buf = vec![0u8; 65536];
     let keepalive_interval_secs = 5u64;
 
     // Set up ARP handler for gateway MAC learning
@@ -1678,17 +1678,20 @@ async fn run_packet_loop(
 
             // UDP receive (if UDP acceleration is available)
             result = async {
-                if let Some(ref mut ua) = udp_accel {
-                    ua.try_recv(&mut udp_recv_buf).await
+                if let Some(ref ua) = udp_accel {
+                    ua.try_recv().await
                 } else {
                     // No UDP - just wait forever (will be cancelled by other branches)
-                    std::future::pending::<Option<(Vec<u8>, bool)>>().await
+                    std::future::pending::<crate::error::Result<Option<(Vec<u8>, std::net::SocketAddr)>>>().await
                 }
             } => {
-                if let Some((frame_data, _compressed)) = result {
-                    // Process received UDP frame
-                    // Build length-prefixed buffer for callback
-                    let mut buffer = Vec::with_capacity(frame_data.len() + 2);
+                if let Ok(Some((raw_data, src_addr))) = result {
+                    // Process the received UDP packet through the accelerator
+                    if let Some(ref mut ua) = udp_accel {
+                        if let Some((frame_data, _compressed)) = ua.process_recv(&raw_data, src_addr) {
+                            // Process received UDP frame
+                            // Build length-prefixed buffer for callback
+                            let mut buffer = Vec::with_capacity(frame_data.len() + 2);
 
                     // Process ARP packets for gateway MAC learning
                     if frame_data.len() >= 14 {
@@ -1717,6 +1720,8 @@ async fn run_packet_loop(
 
                     if let Some(cb) = callbacks.on_packets_received {
                         cb(callbacks.context, buffer.as_ptr(), buffer.len(), 1);
+                    }
+                        }
                     }
                 }
             }
