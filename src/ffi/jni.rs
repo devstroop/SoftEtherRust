@@ -268,6 +268,17 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
     accept_pushed_routes: jboolean,
     ipv4_include: JString,
     ipv4_exclude: JString,
+    // Static IP Configuration
+    static_ipv4_address: JString,
+    static_ipv4_netmask: JString,
+    static_ipv4_gateway: JString,
+    static_ipv4_dns1: JString,
+    static_ipv4_dns2: JString,
+    static_ipv6_address: JString,
+    static_ipv6_prefix_len: jint,
+    static_ipv6_gateway: JString,
+    static_ipv6_dns1: JString,
+    static_ipv6_dns2: JString,
 ) -> jlong {
     // Get required strings
     let server_str = match get_string(&mut env, &server) {
@@ -295,6 +306,17 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
     let custom_ca_pem_str = get_string(&mut env, &custom_ca_pem).unwrap_or_default();
     let cert_fingerprint_str = get_string(&mut env, &cert_fingerprint_sha256).unwrap_or_default();
 
+    // Get optional static IP strings
+    let static_ipv4_address_str = get_string(&mut env, &static_ipv4_address).unwrap_or_default();
+    let static_ipv4_netmask_str = get_string(&mut env, &static_ipv4_netmask).unwrap_or_default();
+    let static_ipv4_gateway_str = get_string(&mut env, &static_ipv4_gateway).unwrap_or_default();
+    let static_ipv4_dns1_str = get_string(&mut env, &static_ipv4_dns1).unwrap_or_default();
+    let static_ipv4_dns2_str = get_string(&mut env, &static_ipv4_dns2).unwrap_or_default();
+    let static_ipv6_address_str = get_string(&mut env, &static_ipv6_address).unwrap_or_default();
+    let static_ipv6_gateway_str = get_string(&mut env, &static_ipv6_gateway).unwrap_or_default();
+    let static_ipv6_dns1_str = get_string(&mut env, &static_ipv6_dns1).unwrap_or_default();
+    let static_ipv6_dns2_str = get_string(&mut env, &static_ipv6_dns2).unwrap_or_default();
+
     // Create CStrings for FFI
     let server_cstr = match to_cstring(&server_str) {
         Some(s) => s,
@@ -316,6 +338,17 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
     let ipv4_exclude_cstr = to_cstring(&ipv4_exclude_str);
     let custom_ca_pem_cstr = to_cstring(&custom_ca_pem_str);
     let cert_fingerprint_cstr = to_cstring(&cert_fingerprint_str);
+
+    // Create CStrings for static IP configuration
+    let static_ipv4_address_cstr = to_cstring(&static_ipv4_address_str);
+    let static_ipv4_netmask_cstr = to_cstring(&static_ipv4_netmask_str);
+    let static_ipv4_gateway_cstr = to_cstring(&static_ipv4_gateway_str);
+    let static_ipv4_dns1_cstr = to_cstring(&static_ipv4_dns1_str);
+    let static_ipv4_dns2_cstr = to_cstring(&static_ipv4_dns2_str);
+    let static_ipv6_address_cstr = to_cstring(&static_ipv6_address_str);
+    let static_ipv6_gateway_cstr = to_cstring(&static_ipv6_gateway_str);
+    let static_ipv6_dns1_cstr = to_cstring(&static_ipv6_dns1_str);
+    let static_ipv6_dns2_cstr = to_cstring(&static_ipv6_dns2_str);
 
     // Create config with all options
     let config = SoftEtherConfig {
@@ -349,6 +382,45 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
             .map(|s| s.as_ptr())
             .unwrap_or(std::ptr::null()),
         ipv4_exclude: ipv4_exclude_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        // Static IPv4 Configuration
+        static_ipv4_address: static_ipv4_address_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        static_ipv4_netmask: static_ipv4_netmask_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        static_ipv4_gateway: static_ipv4_gateway_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        static_ipv4_dns1: static_ipv4_dns1_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        static_ipv4_dns2: static_ipv4_dns2_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        // Static IPv6 Configuration
+        static_ipv6_address: static_ipv6_address_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        static_ipv6_prefix_len: static_ipv6_prefix_len as u32,
+        static_ipv6_gateway: static_ipv6_gateway_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        static_ipv6_dns1: static_ipv6_dns1_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        static_ipv6_dns2: static_ipv6_dns2_cstr
             .as_ref()
             .map(|s| s.as_ptr())
             .unwrap_or(std::ptr::null()),
