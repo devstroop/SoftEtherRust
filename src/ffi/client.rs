@@ -787,6 +787,15 @@ async fn connect_and_run(
         ),
     );
 
+    // Create tunnel encryption context BEFORE DHCP (needed for encrypted tunnel data)
+    let mut tunnel_crypto = if config.use_encrypt && !final_auth.session_key.is_empty() {
+        log_message(&callbacks, 1, "[RUST] Initializing RC4 tunnel encryption...");
+        crate::crypto::TunnelCrypto::new(&final_auth.session_key)
+    } else {
+        log_message(&callbacks, 1, "[RUST] Tunnel encryption disabled");
+        crate::crypto::TunnelCrypto::disabled()
+    };
+
     // Perform DHCP to get IP configuration
     log_message(&callbacks, 1, "[RUST] Starting DHCP...");
     update_state(
@@ -795,7 +804,7 @@ async fn connect_and_run(
         SoftEtherState::EstablishingTunnel,
     );
 
-    let dhcp_config = match perform_dhcp(&mut conn_mgr, mac, &callbacks, config.use_compress).await
+    let dhcp_config = match perform_dhcp(&mut conn_mgr, mac, &callbacks, config.use_compress, &mut tunnel_crypto).await
     {
         Ok(config) => {
             log_message(
@@ -842,6 +851,7 @@ async fn connect_and_run(
         &mut tx_recv,
         mac,
         dhcp_config,
+        &mut tunnel_crypto,
     )
     .await
 }
@@ -1023,6 +1033,7 @@ async fn perform_dhcp(
     mac: [u8; 6],
     callbacks: &SoftEtherCallbacks,
     use_compress: bool,
+    tunnel_crypto: &mut crate::crypto::TunnelCrypto,
 ) -> crate::error::Result<DhcpConfig> {
     use tokio::time::timeout;
 
@@ -1048,7 +1059,7 @@ async fn perform_dhcp(
         1,
         &format!("[RUST] Sending DHCP DISCOVER ({} bytes)", discover.len()),
     );
-    send_frame(conn_mgr, &discover, &mut send_buf, use_compress).await?;
+    send_frame(conn_mgr, &discover, &mut send_buf, use_compress, tunnel_crypto).await?;
 
     // Wait for OFFER/ACK
     loop {
@@ -1060,6 +1071,9 @@ async fn perform_dhcp(
 
         match timeout(Duration::from_secs(3), conn_mgr.read_any(&mut buf)).await {
             Ok(Ok((_conn_idx, n))) if n > 0 => {
+                // Decrypt if encryption is enabled
+                tunnel_crypto.decrypt(&mut buf[..n]);
+                
                 // Decode tunnel frames
                 let frames = codec.feed(&buf[..n])?;
                 for frame in frames {
@@ -1088,7 +1102,7 @@ async fn perform_dhcp(
                                     // Got OFFER, send REQUEST
                                     if let Some(request) = dhcp.build_request() {
                                         log_msg(callbacks, 1, "[RUST] Sending DHCP REQUEST");
-                                        send_frame(conn_mgr, &request, &mut send_buf, use_compress)
+                                        send_frame(conn_mgr, &request, &mut send_buf, use_compress, tunnel_crypto)
                                             .await?;
                                     }
                                 }
@@ -1112,11 +1126,11 @@ async fn perform_dhcp(
                 if dhcp.state() == DhcpState::DiscoverSent {
                     log_msg(callbacks, 2, "[RUST] DHCP timeout, retrying DISCOVER");
                     let discover = dhcp.build_discover();
-                    send_frame(conn_mgr, &discover, &mut send_buf, use_compress).await?;
+                    send_frame(conn_mgr, &discover, &mut send_buf, use_compress, tunnel_crypto).await?;
                 } else if dhcp.state() == DhcpState::RequestSent {
                     log_msg(callbacks, 2, "[RUST] DHCP timeout, retrying REQUEST");
                     if let Some(request) = dhcp.build_request() {
-                        send_frame(conn_mgr, &request, &mut send_buf, use_compress).await?;
+                        send_frame(conn_mgr, &request, &mut send_buf, use_compress, tunnel_crypto).await?;
                     }
                 }
             }
@@ -1143,12 +1157,13 @@ fn is_dhcp_response(frame: &[u8]) -> bool {
     dst_port == 68
 }
 
-/// Send an Ethernet frame through the tunnel
+/// Send an Ethernet frame through the tunnel with optional encryption
 async fn send_frame(
     conn_mgr: &mut ConnectionManager,
     frame: &[u8],
     buf: &mut [u8],
     use_compress: bool,
+    tunnel_crypto: &mut crate::crypto::TunnelCrypto,
 ) -> crate::error::Result<()> {
     use crate::protocol::compress;
 
@@ -1172,6 +1187,9 @@ async fn send_frame(
     buf[4..8].copy_from_slice(&(data_to_send.len() as u32).to_be_bytes());
     buf[8..8 + data_to_send.len()].copy_from_slice(&data_to_send);
 
+    // Encrypt if enabled
+    tunnel_crypto.encrypt(&mut buf[..total_len]);
+
     conn_mgr
         .write_all(&buf[..total_len])
         .await
@@ -1187,6 +1205,7 @@ async fn run_packet_loop(
     tx_recv: &mut mpsc::Receiver<Vec<u8>>,
     mac: [u8; 6],
     dhcp_config: DhcpConfig,
+    tunnel_crypto: &mut crate::crypto::TunnelCrypto,
 ) -> crate::error::Result<()> {
     fn log_msg(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
         if let Some(cb) = callbacks.on_log {
@@ -1219,13 +1238,30 @@ async fn run_packet_loop(
             ),
         );
     }
+    
+    // Log encryption status
+    if tunnel_crypto.is_enabled() {
+        log_msg(&callbacks, 1, "[RUST] RC4 tunnel encryption enabled");
+    } else {
+        log_msg(&callbacks, 1, "[RUST] Tunnel encryption disabled");
+    }
 
     log_msg(&callbacks, 1, "[RUST] Packet loop started");
 
+    // Helper to encrypt and send data
+    async fn encrypt_and_send(
+        conn_mgr: &mut ConnectionManager,
+        crypto: &mut crate::crypto::TunnelCrypto,
+        data: &[u8],
+    ) -> std::io::Result<()> {
+        let mut encrypted = data.to_vec();
+        crypto.encrypt(&mut encrypted);
+        conn_mgr.write_all(&encrypted).await
+    }
+
     // Send first keepalive immediately
     let keepalive = tunnel_codec.encode_keepalive();
-    conn_mgr
-        .write_all(&keepalive)
+    encrypt_and_send(conn_mgr, tunnel_crypto, &keepalive)
         .await
         .map_err(crate::error::Error::Io)?;
     let mut last_keepalive = std::time::Instant::now();
@@ -1234,8 +1270,7 @@ async fn run_packet_loop(
         // Check if we need to send keepalive
         if last_keepalive.elapsed() >= Duration::from_secs(keepalive_interval_secs) {
             let keepalive = tunnel_codec.encode_keepalive();
-            conn_mgr
-                .write_all(&keepalive)
+            encrypt_and_send(conn_mgr, tunnel_crypto, &keepalive)
                 .await
                 .map_err(crate::error::Error::Io)?;
             last_keepalive = std::time::Instant::now();
@@ -1265,7 +1300,7 @@ async fn run_packet_loop(
                     let request = dhcp_client.build_renewal_request(config.ip, server_id, gateway_mac);
                     let frames = vec![request.to_vec()];
                     let encoded = tunnel_codec.encode(&frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
-                    conn_mgr.write_all(&encoded).await.map_err(crate::error::Error::Io)?;
+                    encrypt_and_send(conn_mgr, tunnel_crypto, &encoded).await.map_err(crate::error::Error::Io)?;
                     dhcp_handler.mark_renewal_sent();
                     log_msg(&callbacks, 1, "[RUST] Sent DHCP renewal request");
                 }
@@ -1275,7 +1310,7 @@ async fn run_packet_loop(
                 let request = dhcp_client.build_rebinding_request(config.ip);
                 let frames = vec![request.to_vec()];
                 let encoded = tunnel_codec.encode(&frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
-                conn_mgr.write_all(&encoded).await.map_err(crate::error::Error::Io)?;
+                encrypt_and_send(conn_mgr, tunnel_crypto, &encoded).await.map_err(crate::error::Error::Io)?;
                 dhcp_handler.mark_renewal_sent();
                 log_msg(&callbacks, 1, "[RUST] Sent DHCP rebinding request (broadcast)");
             }
@@ -1293,7 +1328,7 @@ async fn run_packet_loop(
                     let ip_mtu = 1400 - 14; // Use a conservative MTU for fragmentation
                     let processed_frames = fragment_outgoing_frames(&frames, ip_mtu);
                     let encoded = tunnel_codec.encode(&processed_frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
-                    conn_mgr.write_all(&encoded).await.map_err(crate::error::Error::Io)?;
+                    encrypt_and_send(conn_mgr, tunnel_crypto, &encoded).await.map_err(crate::error::Error::Io)?;
                 }
             }
 
@@ -1301,6 +1336,9 @@ async fn run_packet_loop(
             result = tokio::time::timeout(Duration::from_millis(500), conn_mgr.read_any(&mut read_buf)) => {
                 match result {
                     Ok(Ok((_conn_idx, n))) if n > 0 => {
+                        // Decrypt incoming data
+                        tunnel_crypto.decrypt(&mut read_buf[..n]);
+                        
                         if let Ok(frames) = tunnel_codec.decode(&read_buf[..n]) {
                             if !frames.is_empty() {
                                 // Build length-prefixed buffer for callback
@@ -1352,7 +1390,7 @@ async fn run_packet_loop(
             let frames = vec![release.to_vec()];
             let encoded = tunnel_codec.encode(&frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
             // Best effort - don't fail if this doesn't work
-            let _ = conn_mgr.write_all(&encoded).await;
+            let _ = encrypt_and_send(conn_mgr, tunnel_crypto, &encoded).await;
         }
     }
 
