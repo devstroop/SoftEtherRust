@@ -43,7 +43,9 @@ use crate::packet::BROADCAST_MAC;
 use crate::packet::{DhcpClient, DhcpConfig, DhcpState};
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use crate::protocol::decompress_into;
-use crate::protocol::{compress, compress_into, decompress, is_compressed, TunnelCodec};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use crate::protocol::compress_into;
+use crate::protocol::{compress, decompress, is_compressed, TunnelCodec};
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use super::DataLoopState;
@@ -128,6 +130,7 @@ impl TunnelRunner {
     }
 
     /// Create encryption state if RC4 keys are configured.
+    #[allow(dead_code)]
     fn create_encryption(&self) -> Option<TunnelEncryption> {
         self.config.rc4_key_pair.as_ref().map(TunnelEncryption::new)
     }
@@ -511,6 +514,7 @@ impl TunnelRunner {
     }
 
     /// Send an Ethernet frame through the tunnel with optional RC4 encryption.
+    #[allow(dead_code)]
     async fn send_frame_encrypted(
         &self,
         conn: &mut VpnConnection,
