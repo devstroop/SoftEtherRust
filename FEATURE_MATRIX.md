@@ -118,3 +118,19 @@
 1. **UDP acceleration data path**
    - Requires parallel UDP socket management
    - Deferred until TCP performance issues reported
+
+2. **Packet statistics on FFI** 
+   - `bytes_sent`, `bytes_received`, `packets_sent`, `packets_received` not incremented in packet loop
+   - Only `packets_dropped` and `uptime_secs` work
+
+3. **ARP / Gateway MAC learning on mobile**
+   - Desktop learns gateway MAC via ARP; mobile always uses broadcast FF:FF:FF:FF:FF:FF
+   - Works but suboptimal for some L2 scenarios
+
+4. **DHCPv6 integration**
+   - Code exists at `src/packet/dhcp.rs` (DHCPv6 structs) but not called
+   - Session IPv6 fields always zeroed on all platforms
+
+5. **Reconnection logic on mobile**
+   - Desktop has retry for "User Already Logged In" errors
+   - Mobile fails on first error; apps handle reconnection externally

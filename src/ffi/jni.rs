@@ -249,6 +249,8 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
     password_hash: JString,
     // TLS Settings
     skip_tls_verify: jboolean,
+    custom_ca_pem: JString,
+    cert_fingerprint_sha256: JString,
     // Connection Settings
     max_connections: jint,
     timeout_seconds: jint,
@@ -288,6 +290,10 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
     // Get optional routing strings
     let ipv4_include_str = get_string(&mut env, &ipv4_include).unwrap_or_default();
     let ipv4_exclude_str = get_string(&mut env, &ipv4_exclude).unwrap_or_default();
+    
+    // Get optional TLS strings
+    let custom_ca_pem_str = get_string(&mut env, &custom_ca_pem).unwrap_or_default();
+    let cert_fingerprint_str = get_string(&mut env, &cert_fingerprint_sha256).unwrap_or_default();
 
     // Create CStrings for FFI
     let server_cstr = match to_cstring(&server_str) {
@@ -308,6 +314,8 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
     };
     let ipv4_include_cstr = to_cstring(&ipv4_include_str);
     let ipv4_exclude_cstr = to_cstring(&ipv4_exclude_str);
+    let custom_ca_pem_cstr = to_cstring(&custom_ca_pem_str);
+    let cert_fingerprint_cstr = to_cstring(&cert_fingerprint_str);
 
     // Create config with all options
     let config = SoftEtherConfig {
@@ -317,6 +325,14 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
         username: username_cstr.as_ptr(),
         password_hash: password_hash_cstr.as_ptr(),
         skip_tls_verify: if skip_tls_verify != 0 { 1 } else { 0 },
+        custom_ca_pem: custom_ca_pem_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        cert_fingerprint_sha256: cert_fingerprint_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
         max_connections: max_connections as u32,
         timeout_seconds: timeout_seconds as u32,
         mtu: mtu as u32,
@@ -336,8 +352,6 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
             .as_ref()
             .map(|s| s.as_ptr())
             .unwrap_or(std::ptr::null()),
-        cert_fingerprint_sha256: std::ptr::null(),
-        custom_ca_pem: std::ptr::null(),
     };
 
     // Get JVM for callbacks

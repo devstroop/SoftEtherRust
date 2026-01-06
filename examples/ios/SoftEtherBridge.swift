@@ -181,6 +181,9 @@ public class SoftEtherBridge {
     public var onDisconnected: ((Error?) -> Void)?
     public var onPacketsReceived: (([Data]) -> Void)?
     public var onLog: ((LogLevel, String) -> Void)?
+    /// Called when an IP should be excluded from VPN routing (cluster redirect).
+    /// iOS apps should add this IP to NEIPv4Route.excludedRoutes.
+    public var onExcludeIp: ((String) -> Bool)?
     
     public enum LogLevel: Int {
         case error = 0
@@ -282,6 +285,7 @@ public class SoftEtherBridge {
         cCallbacks.on_packets_received = packetsReceivedCallback
         cCallbacks.on_log = logCallback
         cCallbacks.protect_socket = protectSocketCallback  // Socket protection for iOS
+        cCallbacks.exclude_ip = excludeIpCallback  // IP exclusion for cluster redirects
         
         // Create client
         handle = softether_create(&cConfig, &cCallbacks)
@@ -513,6 +517,21 @@ private func protectSocketCallback(context: UnsafeMutableRawPointer?, socketFd: 
         // The socket may still work if excludedRoutes is configured in NetworkExtension
         return 1  // Return success to allow connection attempt
     }
+}
+
+/// IP exclusion callback for iOS.
+/// Called when an IP should be excluded from VPN routing (cluster redirect scenarios).
+/// The app should add this IP to NEIPv4Route.excludedRoutes.
+private func excludeIpCallback(context: UnsafeMutableRawPointer?, ip: UnsafePointer<CChar>?) -> Int32 {
+    guard let context = context, let ip = ip else { return 0 }
+    let ctx = Unmanaged<CallbackContext>.fromOpaque(context).takeUnretainedValue()
+    
+    let ipString = String(cString: ip)
+    if let callback = ctx.bridge?.onExcludeIp {
+        return callback(ipString) ? 1 : 0
+    }
+    // No callback set - return success anyway to not block connection
+    return 1
 }
 
 // MARK: - Errors

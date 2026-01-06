@@ -1187,10 +1187,17 @@ async fn run_packet_loop(
 
     log_msg(&callbacks, 1, "[RUST] Packet loop started");
 
-    // Send first keepalive immediately
+    // Send first keepalive immediately (encrypt if RC4 is enabled)
     let keepalive = tunnel_codec.encode_keepalive();
+    let first_keepalive: Vec<u8> = if let Some(ref mut enc) = encryption {
+        let mut data = keepalive.to_vec();
+        enc.encrypt(&mut data);
+        data
+    } else {
+        keepalive.to_vec()
+    };
     conn_mgr
-        .write_all(&keepalive)
+        .write_all(&first_keepalive)
         .await
         .map_err(crate::error::Error::Io)?;
     let mut last_keepalive = std::time::Instant::now();
@@ -1199,8 +1206,16 @@ async fn run_packet_loop(
         // Check if we need to send keepalive
         if last_keepalive.elapsed() >= Duration::from_secs(keepalive_interval_secs) {
             let keepalive = tunnel_codec.encode_keepalive();
+            // Encrypt keepalive if RC4 is enabled
+            let to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
+                let mut data = keepalive.to_vec();
+                enc.encrypt(&mut data);
+                data
+            } else {
+                keepalive.to_vec()
+            };
             conn_mgr
-                .write_all(&keepalive)
+                .write_all(&to_send)
                 .await
                 .map_err(crate::error::Error::Io)?;
             last_keepalive = std::time::Instant::now();
