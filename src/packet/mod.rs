@@ -42,8 +42,8 @@ pub use ethernet::{
 pub use arp::{ArpHandler, ArpOperation, PendingArpReply};
 pub use dhcp::{DhcpClient, DhcpConfig, DhcpHandler, DhcpMessageType, DhcpOption, DhcpState};
 pub use dhcpv6::{
-    Dhcpv6Client, Dhcpv6Config, Dhcpv6Handler, Dhcpv6MessageType, Dhcpv6Option, Dhcpv6State,
-    Dhcpv6StatusCode, mac_to_link_local, solicited_node_multicast, ALL_DHCP_SERVERS,
+    mac_to_link_local, solicited_node_multicast, Dhcpv6Client, Dhcpv6Config, Dhcpv6Handler,
+    Dhcpv6MessageType, Dhcpv6Option, Dhcpv6State, Dhcpv6StatusCode, ALL_DHCP_SERVERS,
     DHCPV6_CLIENT_PORT, DHCPV6_SERVER_PORT,
 };
 pub use fragment::{

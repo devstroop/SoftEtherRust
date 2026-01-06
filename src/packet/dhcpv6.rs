@@ -68,9 +68,9 @@ impl TryFrom<u8> for Dhcpv6MessageType {
 pub enum Dhcpv6Option {
     ClientId = 1,
     ServerId = 2,
-    IaNa = 3,        // Identity Association for Non-temporary Addresses
-    IaTa = 4,        // Identity Association for Temporary Addresses
-    IaAddr = 5,      // IA Address
+    IaNa = 3,   // Identity Association for Non-temporary Addresses
+    IaTa = 4,   // Identity Association for Temporary Addresses
+    IaAddr = 5, // IA Address
     OptionRequest = 6,
     Preference = 7,
     ElapsedTime = 8,
@@ -87,11 +87,11 @@ pub enum Dhcpv6Option {
     ReconfAccept = 20,
     DnsServers = 23,
     DomainList = 24,
-    IaPd = 25,       // Identity Association for Prefix Delegation
+    IaPd = 25, // Identity Association for Prefix Delegation
     IaPrefix = 26,
     InformationRefreshTime = 32,
-    SolMaxRt = 82,   // SOL_MAX_RT
-    InfMaxRt = 83,   // INF_MAX_RT
+    SolMaxRt = 82, // SOL_MAX_RT
+    InfMaxRt = 83, // INF_MAX_RT
 }
 
 /// DHCPv6 status codes.
@@ -255,7 +255,12 @@ pub fn mac_to_link_local(mac: &[u8; 6]) -> Ipv6Addr {
 pub fn solicited_node_multicast(ip: &Ipv6Addr) -> Ipv6Addr {
     let octets = ip.octets();
     Ipv6Addr::new(
-        0xff02, 0, 0, 0, 0, 1,
+        0xff02,
+        0,
+        0,
+        0,
+        0,
+        1,
         0xff00 | (octets[13] as u16),
         u16::from_be_bytes([octets[14], octets[15]]),
     )
@@ -401,7 +406,12 @@ impl Dhcpv6Client {
 
         // Parse message type and transaction ID
         let msg_type_byte = frame[dhcp_start];
-        let xid = u32::from_be_bytes([0, frame[dhcp_start + 1], frame[dhcp_start + 2], frame[dhcp_start + 3]]);
+        let xid = u32::from_be_bytes([
+            0,
+            frame[dhcp_start + 1],
+            frame[dhcp_start + 2],
+            frame[dhcp_start + 3],
+        ]);
 
         if xid != self.xid {
             debug!("XID mismatch: got {:06x}, expected {:06x}", xid, self.xid);
@@ -423,7 +433,8 @@ impl Dhcpv6Client {
 
         while option_start + 4 <= frame.len() {
             let opt_code = u16::from_be_bytes([frame[option_start], frame[option_start + 1]]);
-            let opt_len = u16::from_be_bytes([frame[option_start + 2], frame[option_start + 3]]) as usize;
+            let opt_len =
+                u16::from_be_bytes([frame[option_start + 2], frame[option_start + 3]]) as usize;
 
             if option_start + 4 + opt_len > frame.len() {
                 break;
@@ -438,28 +449,50 @@ impl Dhcpv6Client {
                 c if c == Dhcpv6Option::IaNa as u16 => {
                     // Parse IA_NA: IAID(4) + T1(4) + T2(4) + IA_ADDR options
                     if opt_len >= 12 {
-                        config.t1 = u32::from_be_bytes([opt_data[4], opt_data[5], opt_data[6], opt_data[7]]);
-                        config.t2 = u32::from_be_bytes([opt_data[8], opt_data[9], opt_data[10], opt_data[11]]);
-                        
+                        config.t1 = u32::from_be_bytes([
+                            opt_data[4],
+                            opt_data[5],
+                            opt_data[6],
+                            opt_data[7],
+                        ]);
+                        config.t2 = u32::from_be_bytes([
+                            opt_data[8],
+                            opt_data[9],
+                            opt_data[10],
+                            opt_data[11],
+                        ]);
+
                         // Parse nested IA_ADDR options
                         let mut ia_offset = 12;
                         while ia_offset + 4 <= opt_len {
-                            let ia_opt_code = u16::from_be_bytes([opt_data[ia_offset], opt_data[ia_offset + 1]]);
-                            let ia_opt_len = u16::from_be_bytes([opt_data[ia_offset + 2], opt_data[ia_offset + 3]]) as usize;
-                            
+                            let ia_opt_code =
+                                u16::from_be_bytes([opt_data[ia_offset], opt_data[ia_offset + 1]]);
+                            let ia_opt_len = u16::from_be_bytes([
+                                opt_data[ia_offset + 2],
+                                opt_data[ia_offset + 3],
+                            ]) as usize;
+
                             if ia_opt_code == Dhcpv6Option::IaAddr as u16 && ia_opt_len >= 24 {
-                                let ia_addr_data = &opt_data[ia_offset + 4..ia_offset + 4 + ia_opt_len];
+                                let ia_addr_data =
+                                    &opt_data[ia_offset + 4..ia_offset + 4 + ia_opt_len];
                                 // IPv6 address (16 bytes) + preferred_lifetime (4) + valid_lifetime (4)
-                                let addr_bytes: [u8; 16] = ia_addr_data[0..16].try_into().unwrap_or([0; 16]);
+                                let addr_bytes: [u8; 16] =
+                                    ia_addr_data[0..16].try_into().unwrap_or([0; 16]);
                                 config.ip = Ipv6Addr::from(addr_bytes);
                                 config.preferred_lifetime = u32::from_be_bytes([
-                                    ia_addr_data[16], ia_addr_data[17], ia_addr_data[18], ia_addr_data[19]
+                                    ia_addr_data[16],
+                                    ia_addr_data[17],
+                                    ia_addr_data[18],
+                                    ia_addr_data[19],
                                 ]);
                                 config.valid_lifetime = u32::from_be_bytes([
-                                    ia_addr_data[20], ia_addr_data[21], ia_addr_data[22], ia_addr_data[23]
+                                    ia_addr_data[20],
+                                    ia_addr_data[21],
+                                    ia_addr_data[22],
+                                    ia_addr_data[23],
                                 ]);
                             }
-                            
+
                             ia_offset += 4 + ia_opt_len;
                         }
                     }
@@ -482,7 +515,8 @@ impl Dhcpv6Client {
                 c if c == Dhcpv6Option::StatusCode as u16 => {
                     if opt_len >= 2 {
                         let code = u16::from_be_bytes([opt_data[0], opt_data[1]]);
-                        status_code = Dhcpv6StatusCode::try_from(code).unwrap_or(Dhcpv6StatusCode::UnspecFail);
+                        status_code = Dhcpv6StatusCode::try_from(code)
+                            .unwrap_or(Dhcpv6StatusCode::UnspecFail);
                     }
                 }
                 _ => {}
@@ -494,7 +528,10 @@ impl Dhcpv6Client {
         // Handle status code
         if status_code != Dhcpv6StatusCode::Success {
             warn!("DHCPv6 error status: {:?}", status_code);
-            if matches!(status_code, Dhcpv6StatusCode::NoAddrsAvail | Dhcpv6StatusCode::NoBinding) {
+            if matches!(
+                status_code,
+                Dhcpv6StatusCode::NoAddrsAvail | Dhcpv6StatusCode::NoBinding
+            ) {
                 self.state = Dhcpv6State::Failed;
             }
             return false;
@@ -513,14 +550,15 @@ impl Dhcpv6Client {
             }
             Dhcpv6MessageType::Reply => {
                 // For stateful, we need an address
-                if self.state == Dhcpv6State::RequestSent || 
-                   self.state == Dhcpv6State::Renewing ||
-                   self.state == Dhcpv6State::Rebinding {
+                if self.state == Dhcpv6State::RequestSent
+                    || self.state == Dhcpv6State::Renewing
+                    || self.state == Dhcpv6State::Rebinding
+                {
                     if config.ip.is_unspecified() {
                         debug!("REPLY without address for stateful request");
                         return false;
                     }
-                    
+
                     // Compute default T1/T2 if not provided
                     if config.t1 == 0 && config.valid_lifetime > 0 {
                         config.t1 = config.valid_lifetime / 2;
@@ -528,14 +566,17 @@ impl Dhcpv6Client {
                     if config.t2 == 0 && config.valid_lifetime > 0 {
                         config.t2 = config.valid_lifetime * 4 / 5;
                     }
-                    
+
                     self.config = config;
                     self.state = Dhcpv6State::Bound;
                     info!(
                         "DHCPv6 REPLY: IP={}, DNS={:?}, Preferred={}s, Valid={}s, T1={}s, T2={}s",
-                        self.config.ip, self.config.dns1,
-                        self.config.preferred_lifetime, self.config.valid_lifetime,
-                        self.config.t1, self.config.t2
+                        self.config.ip,
+                        self.config.dns1,
+                        self.config.preferred_lifetime,
+                        self.config.valid_lifetime,
+                        self.config.t1,
+                        self.config.t2
                     );
                     true
                 } else {
@@ -555,13 +596,21 @@ impl Dhcpv6Client {
     }
 
     /// Build a DHCPv6 packet (full Ethernet frame).
-    fn build_dhcpv6_packet(&self, msg_type: Dhcpv6MessageType, requested_ip: Option<&Ipv6Addr>) -> Bytes {
+    fn build_dhcpv6_packet(
+        &self,
+        msg_type: Dhcpv6MessageType,
+        requested_ip: Option<&Ipv6Addr>,
+    ) -> Bytes {
         let dhcp_payload = self.build_dhcpv6_payload(msg_type, requested_ip, true);
         self.wrap_in_frame(&dhcp_payload)
     }
 
     /// Build a DHCPv6 packet without server DUID (for REBIND).
-    fn build_dhcpv6_packet_no_server(&self, msg_type: Dhcpv6MessageType, requested_ip: Option<&Ipv6Addr>) -> Bytes {
+    fn build_dhcpv6_packet_no_server(
+        &self,
+        msg_type: Dhcpv6MessageType,
+        requested_ip: Option<&Ipv6Addr>,
+    ) -> Bytes {
         let dhcp_payload = self.build_dhcpv6_payload(msg_type, requested_ip, false);
         self.wrap_in_frame(&dhcp_payload)
     }
@@ -723,29 +772,29 @@ fn parse_domain_list(data: &[u8]) -> Vec<String> {
 
     while offset < data.len() {
         let mut domain_parts = Vec::new();
-        
+
         loop {
             if offset >= data.len() {
                 break;
             }
-            
+
             let len = data[offset] as usize;
             offset += 1;
-            
+
             if len == 0 {
                 break;
             }
-            
+
             if offset + len > data.len() {
                 break;
             }
-            
+
             if let Ok(part) = std::str::from_utf8(&data[offset..offset + len]) {
                 domain_parts.push(part.to_string());
             }
             offset += len;
         }
-        
+
         if !domain_parts.is_empty() {
             domains.push(domain_parts.join("."));
         }
@@ -836,7 +885,10 @@ impl Dhcpv6Handler {
     pub fn is_in_progress(&self) -> bool {
         matches!(
             self.state,
-            Dhcpv6State::SolicitSent | Dhcpv6State::RequestSent | Dhcpv6State::Renewing | Dhcpv6State::Rebinding
+            Dhcpv6State::SolicitSent
+                | Dhcpv6State::RequestSent
+                | Dhcpv6State::Renewing
+                | Dhcpv6State::Rebinding
         )
     }
 
@@ -1027,7 +1079,7 @@ mod tests {
     fn test_mac_to_link_local() {
         let mac = [0x00, 0x16, 0x3e, 0x12, 0x34, 0x56];
         let ll = mac_to_link_local(&mac);
-        
+
         // Should be fe80::216:3eff:fe12:3456
         assert!(ll.segments()[0] == 0xfe80);
         assert!(ll.segments()[1] == 0);
@@ -1044,7 +1096,7 @@ mod tests {
     fn test_generate_duid_ll() {
         let mac = [0x5E, 0x12, 0x34, 0x56, 0x78, 0x9A];
         let duid = generate_duid_ll(&mac);
-        
+
         // DUID-LL: type(2) + hw_type(2) + link_layer_addr(6) = 10 bytes
         assert_eq!(duid.len(), 10);
         assert_eq!(&duid[0..2], &DUID_TYPE_LL.to_be_bytes());
@@ -1105,7 +1157,7 @@ mod tests {
     fn test_solicited_node_multicast() {
         let ip: Ipv6Addr = "2001:db8::1234:5678".parse().unwrap();
         let snm = solicited_node_multicast(&ip);
-        
+
         // Should be ff02::1:ff34:5678
         assert_eq!(snm.segments()[0], 0xff02);
         assert_eq!(snm.segments()[5], 0x01);

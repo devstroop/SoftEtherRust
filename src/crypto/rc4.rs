@@ -57,7 +57,10 @@ impl Rc4 {
     /// Use this only if you need exact compatibility with implementations
     /// that don't use the skip optimization.
     pub fn new_no_skip(key: &[u8]) -> Self {
-        assert!(!key.is_empty() && key.len() <= 256, "Key must be 1-256 bytes");
+        assert!(
+            !key.is_empty() && key.len() <= 256,
+            "Key must be 1-256 bytes"
+        );
 
         // Key-scheduling algorithm (KSA)
         let mut state = [0u8; 256];
@@ -88,7 +91,8 @@ impl Rc4 {
         self.i = self.i.wrapping_add(1);
         self.j = self.j.wrapping_add(self.state[self.i as usize]);
         self.state.swap(self.i as usize, self.j as usize);
-        let k = self.state[(self.state[self.i as usize].wrapping_add(self.state[self.j as usize])) as usize];
+        let k = self.state
+            [(self.state[self.i as usize].wrapping_add(self.state[self.j as usize])) as usize];
         k
     }
 
@@ -221,7 +225,7 @@ fn derive_key(session_key: &[u8], direction: &[u8]) -> [u8; RC4_KEY_SIZE] {
     ctx.update(session_key);
     ctx.update(direction);
     let digest = ctx.finish();
-    
+
     let mut key = [0u8; RC4_KEY_SIZE];
     key.copy_from_slice(digest.as_ref());
     key
@@ -237,36 +241,40 @@ mod tests {
         let key = b"Key";
         let mut rc4_enc = Rc4::new_no_skip(key);
         let mut rc4_dec = Rc4::new_no_skip(key);
-        
+
         let plaintext = b"Hello RC4 World!";
         let mut data = plaintext.to_vec();
-        
+
         // Encrypt
         rc4_enc.process(&mut data);
         assert_ne!(&data[..], &plaintext[..], "Data should be encrypted");
-        
+
         // Decrypt
         rc4_dec.process(&mut data);
-        assert_eq!(&data[..], &plaintext[..], "Data should match original after decrypt");
+        assert_eq!(
+            &data[..],
+            &plaintext[..],
+            "Data should match original after decrypt"
+        );
     }
 
     #[test]
     fn test_rc4_encrypt_decrypt() {
         let key = b"test_key_12345";
         let plaintext = b"Hello, World! This is a test message.";
-        
+
         // Encrypt
         let mut rc4_enc = Rc4::new(key);
         let mut ciphertext = plaintext.to_vec();
         rc4_enc.process(&mut ciphertext);
-        
+
         // Ciphertext should be different from plaintext
         assert_ne!(&ciphertext[..], &plaintext[..]);
-        
+
         // Decrypt with fresh state
         let mut rc4_dec = Rc4::new(key);
         rc4_dec.process(&mut ciphertext);
-        
+
         // Should match original
         assert_eq!(&ciphertext[..], &plaintext[..]);
     }
@@ -276,19 +284,19 @@ mod tests {
         let key = b"streaming_key";
         let data1 = b"First chunk";
         let data2 = b"Second chunk";
-        
+
         // Encrypt in chunks
         let mut rc4_enc = Rc4::new(key);
         let mut enc1 = data1.to_vec();
         let mut enc2 = data2.to_vec();
         rc4_enc.process(&mut enc1);
         rc4_enc.process(&mut enc2);
-        
+
         // Decrypt in chunks with fresh state
         let mut rc4_dec = Rc4::new(key);
         rc4_dec.process(&mut enc1);
         rc4_dec.process(&mut enc2);
-        
+
         assert_eq!(&enc1[..], &data1[..]);
         assert_eq!(&enc2[..], &data2[..]);
     }
@@ -296,31 +304,31 @@ mod tests {
     #[test]
     fn test_tunnel_crypto() {
         let session_key = b"test_session_key_123";
-        
+
         // Create client and server crypto contexts
         // For testing, we swap send/recv keys to simulate server side
         let mut client = TunnelCrypto::new(session_key);
-        
+
         // Server uses opposite keys
         let send_key = derive_key(session_key, b"recv"); // Server sends with recv key
         let recv_key = derive_key(session_key, b"send"); // Server receives with send key
         let mut server_send = Rc4::new(&send_key);
         let mut server_recv = Rc4::new(&recv_key);
-        
+
         // Client sends to server
         let original = b"Client to server message";
         let mut data = original.to_vec();
         client.encrypt(&mut data);
-        
+
         // Server decrypts
         server_recv.process(&mut data);
         assert_eq!(&data[..], &original[..]);
-        
+
         // Server sends to client
         let original2 = b"Server to client message";
         let mut data2 = original2.to_vec();
         server_send.process(&mut data2);
-        
+
         // Client decrypts
         client.decrypt(&mut data2);
         assert_eq!(&data2[..], &original2[..]);
@@ -330,14 +338,14 @@ mod tests {
     fn test_tunnel_crypto_disabled() {
         let mut crypto = TunnelCrypto::disabled();
         assert!(!crypto.is_enabled());
-        
+
         let original = b"Test data";
         let mut data = original.to_vec();
-        
+
         // Should be no-op when disabled
         crypto.encrypt(&mut data);
         assert_eq!(&data[..], &original[..]);
-        
+
         crypto.decrypt(&mut data);
         assert_eq!(&data[..], &original[..]);
     }
@@ -345,13 +353,13 @@ mod tests {
     #[test]
     fn test_key_derivation() {
         let session_key = b"session123";
-        
+
         let send_key = derive_key(session_key, b"send");
         let recv_key = derive_key(session_key, b"recv");
-        
+
         // Keys should be different
         assert_ne!(send_key, recv_key);
-        
+
         // Keys should be deterministic
         let send_key2 = derive_key(session_key, b"send");
         assert_eq!(send_key, send_key2);
@@ -361,19 +369,19 @@ mod tests {
     fn test_rc4_clone() {
         let key = b"clone_test_key";
         let mut rc4 = Rc4::new(key);
-        
+
         // Process some data
         let mut data1 = vec![0u8; 100];
         rc4.process(&mut data1);
-        
+
         // Clone and process more
         let mut rc4_clone = rc4.clone();
         let mut data2a = vec![0u8; 50];
         let mut data2b = vec![0u8; 50];
-        
+
         rc4.process(&mut data2a);
         rc4_clone.process(&mut data2b);
-        
+
         // Both should produce same keystream after clone point
         assert_eq!(data2a, data2b);
     }
@@ -382,10 +390,10 @@ mod tests {
     fn test_process_to_vec() {
         let key = b"vec_test_key";
         let mut rc4 = Rc4::new(key);
-        
+
         let data = b"Original data";
         let encrypted = rc4.process_to_vec(data);
-        
+
         assert_ne!(&encrypted[..], &data[..]);
         assert_eq!(encrypted.len(), data.len());
     }

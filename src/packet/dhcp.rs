@@ -210,12 +210,7 @@ impl DhcpClient {
         server_ip: Ipv4Addr,
         gateway_mac: [u8; 6],
     ) -> Bytes {
-        self.build_dhcp_packet_unicast(
-            DhcpMessageType::Request,
-            client_ip,
-            server_ip,
-            gateway_mac,
-        )
+        self.build_dhcp_packet_unicast(DhcpMessageType::Request, client_ip, server_ip, gateway_mac)
     }
 
     /// Build a DHCP rebinding REQUEST packet (broadcast).
@@ -226,7 +221,12 @@ impl DhcpClient {
     }
 
     /// Build a DHCP RELEASE packet to release the lease.
-    pub fn build_release(&self, client_ip: Ipv4Addr, server_ip: Ipv4Addr, gateway_mac: [u8; 6]) -> Bytes {
+    pub fn build_release(
+        &self,
+        client_ip: Ipv4Addr,
+        server_ip: Ipv4Addr,
+        gateway_mac: [u8; 6],
+    ) -> Bytes {
         self.build_dhcp_packet_unicast(DhcpMessageType::Release, client_ip, server_ip, gateway_mac)
     }
 
@@ -406,8 +406,12 @@ impl DhcpClient {
                 self.state = DhcpState::Bound;
                 info!(
                     "DHCP ACK: IP={}, Gateway={:?}, DNS={:?}, Lease={}s, T1={}s, T2={}s",
-                    self.config.ip, self.config.gateway, self.config.dns1,
-                    self.config.lease_time, self.config.renewal_time, self.config.rebinding_time
+                    self.config.ip,
+                    self.config.gateway,
+                    self.config.dns1,
+                    self.config.lease_time,
+                    self.config.renewal_time,
+                    self.config.rebinding_time
                 );
                 true
             }
@@ -804,7 +808,10 @@ impl DhcpHandler {
     pub fn is_in_progress(&self) -> bool {
         matches!(
             self.state,
-            DhcpState::DiscoverSent | DhcpState::RequestSent | DhcpState::Renewing | DhcpState::Rebinding
+            DhcpState::DiscoverSent
+                | DhcpState::RequestSent
+                | DhcpState::Renewing
+                | DhcpState::Rebinding
         )
     }
 
