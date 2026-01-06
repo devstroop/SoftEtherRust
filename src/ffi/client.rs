@@ -1313,6 +1313,18 @@ async fn run_packet_loop(
         }
     }
 
+    // Send DHCP RELEASE before disconnecting (best effort)
+    if let Some(config) = dhcp_handler.config() {
+        if let Some(server_id) = config.server_id {
+            log_msg(&callbacks, 1, "[RUST] Sending DHCP RELEASE...");
+            let release = dhcp_client.build_release(config.ip, server_id, gateway_mac);
+            let frames = vec![release.to_vec()];
+            let encoded = tunnel_codec.encode(&frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
+            // Best effort - don't fail if this doesn't work
+            let _ = conn_mgr.write_all(&encoded).await;
+        }
+    }
+
     log_msg(&callbacks, 1, "[RUST] Packet loop ended");
     Ok(())
 }
