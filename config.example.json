@@ -15,7 +15,9 @@
     "default_route": false,
     "accept_pushed_routes": true,
     "ipv4_include": [],
-    "ipv4_exclude": []
+    "ipv4_exclude": [],
+    "ipv6_include": [],
+    "ipv6_exclude": []
   },
   "qos": false,
   "timeout_seconds": 30,
