@@ -204,7 +204,7 @@ pub fn fragment_ipv4_packet(ip_packet: &[u8], mtu: usize) -> FragmentResult {
         let mut new_flags_and_offset = fragment_offset_units;
 
         // Set MF flag if not last fragment OR if original had MF set and this is last
-        if !is_last_fragment || (original_mf && is_last_fragment && offset > 0) {
+        if !is_last_fragment || (original_mf && offset > 0) {
             new_flags_and_offset |= IP_FLAG_MF;
         } else if original_mf && is_last_fragment && offset == 0 {
             // Original had more fragments, but we're the last of this fragmentation
@@ -280,6 +280,7 @@ struct FragmentEntry {
     /// Fragment offset in bytes
     offset: usize,
     /// Whether this is the last fragment
+    #[allow(dead_code)]
     is_last: bool,
 }
 
@@ -375,8 +376,8 @@ impl ReassemblyState {
             if end > total_size {
                 return false; // Invalid fragment
             }
-            for i in fragment.offset..end {
-                covered[i] = true;
+            for item in covered.iter_mut().take(end).skip(fragment.offset) {
+                *item = true;
             }
         }
 

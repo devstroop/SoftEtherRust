@@ -194,6 +194,7 @@ pub enum Dhcpv6State {
 }
 
 /// DUID type: Link-layer address plus time (DUID-LLT).
+#[allow(dead_code)]
 const DUID_TYPE_LLT: u16 = 1;
 /// DUID type: Vendor-assigned unique ID (DUID-EN).
 const _DUID_TYPE_EN: u16 = 2;
