@@ -7,7 +7,7 @@
 | **TLS Connection** | ✅ | ✅ | ✅ |
 | **Authentication** | ✅ | ✅ | ✅ |
 | **DHCP** | ✅ | ✅ | ✅ |
-| **DHCPv6** | ✅ (code exists) | ✅ | ✅ |
+| **DHCPv6** | ✅ | ✅ | ✅ |
 | **Multi-Connection** | ✅ | ✅ | ✅ |
 | **Half-Connection Mode** | ✅ | ✅ | ✅ |
 | **RC4 Encryption** | ✅ | ✅ | ✅ |
@@ -19,6 +19,7 @@
 | **NAT-T Keepalive** | ✅ | ✅ | ✅ |
 | **IP Fragmentation** | ✅ | ✅ | ✅ |
 | **DHCP Renewal/Rebind** | ✅ | ✅ | ✅ |
+| **Reconnection (User In Use)** | ✅ | ✅ | ✅ |
 | **TUN/TAP Adapter** | ✅ | N/A (PacketTunnel) | N/A (VpnService) |
 
 ---
@@ -127,10 +128,3 @@
    - Desktop learns gateway MAC via ARP; mobile always uses broadcast FF:FF:FF:FF:FF:FF
    - Works but suboptimal for some L2 scenarios
 
-4. **DHCPv6 integration**
-   - Code exists at `src/packet/dhcp.rs` (DHCPv6 structs) but not called
-   - Session IPv6 fields always zeroed on all platforms
-
-5. **Reconnection logic on mobile**
-   - Desktop has retry for "User Already Logged In" errors
-   - Mobile fails on first error; apps handle reconnection externally

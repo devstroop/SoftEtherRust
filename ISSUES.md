@@ -28,18 +28,6 @@ _All Android issues resolved._
 - Note: Auth negotiation is complete, but actual UDP send/recv requires tunnel runner changes
 - Official C: `UdpAccel` integrated with `SessionMain()`, parallel send/recv paths
 
-### 4.2 DHCPv6 Not Integrated
-- DHCPv6 packet structures exist in `src/packet/dhcp.rs`
-- Code is never called on any platform
-- Session IPv6 fields (`ipv6_address`, `dns1_v6`, `dns2_v6`) always zeroed
-- Impact: Medium - no IPv6 address assignment
-
-### 4.3 Reconnection Logic Missing (FFI/Mobile)
-- Desktop has retry logic for "User Already Logged In" errors (10-second delays)
-- Mobile FFI returns error on first failure
-- `reconnect_count` stat is never incremented
-- Impact: Low - mobile apps expected to handle reconnection externally
-
 ---
 
 ## 5. Performance
@@ -102,3 +90,5 @@ _All half-connection mode issues resolved._
 - ✅ Android TLS cert pinning (custom_ca_pem and cert_fingerprint_sha256 wired in JNI)
 - ✅ Keepalive encryption (RC4 applied to keepalive packets on mobile)
 - ✅ Half-connection mode direction verified (TcpDirection 0=Both, 1=ServerToClient, 2=ClientToServer matches official C; primary always ClientToServer; can_send/can_recv filters connections correctly)
+- ✅ DHCPv6 integration for FFI/mobile (perform_dhcpv6 after DHCPv4, session includes ipv6_address/dns1_v6/dns2_v6)
+- ✅ Reconnection logic for FFI/mobile (retry with 10s delay for UserAlreadyLoggedIn, up to 5 attempts)
