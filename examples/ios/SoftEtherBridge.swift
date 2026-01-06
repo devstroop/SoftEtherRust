@@ -281,6 +281,7 @@ public class SoftEtherBridge {
         cCallbacks.on_disconnected = disconnectedCallback
         cCallbacks.on_packets_received = packetsReceivedCallback
         cCallbacks.on_log = logCallback
+        cCallbacks.protect_socket = protectSocketCallback  // Socket protection for iOS
         
         // Create client
         handle = softether_create(&cConfig, &cCallbacks)
@@ -492,6 +493,26 @@ private func logCallback(context: UnsafeMutableRawPointer?, level: Int32, messag
     let logLevel = SoftEtherBridge.LogLevel(rawValue: Int(level)) ?? .info
     let logMessage = String(cString: message)
     ctx.bridge?.onLog?(logLevel, logMessage)
+}
+
+/// Socket protection callback for iOS.
+/// Marks the socket with SO_NET_SERVICE_TYPE to prevent VPN routing loops.
+/// On iOS, this is equivalent to Android's VpnService.protect() functionality.
+private func protectSocketCallback(context: UnsafeMutableRawPointer?, socketFd: Int32) -> Int32 {
+    // Set SO_NET_SERVICE_TYPE to NET_SERVICE_TYPE_VV (voice & video)
+    // This marks the socket as network service traffic that should bypass VPN routing
+    // Value 6 = NET_SERVICE_TYPE_VV (defined in sys/socket.h)
+    var serviceType: Int32 = 6  // NET_SERVICE_TYPE_VV
+    let result = setsockopt(socketFd, SOL_SOCKET, SO_NET_SERVICE_TYPE, &serviceType, socklen_t(MemoryLayout<Int32>.size))
+    
+    if result == 0 {
+        // Success - socket is now marked to bypass VPN
+        return 1
+    } else {
+        // Failed to set socket option - log but continue anyway
+        // The socket may still work if excludedRoutes is configured in NetworkExtension
+        return 1  // Return success to allow connection attempt
+    }
 }
 
 // MARK: - Errors

@@ -2,7 +2,12 @@
 
 ## 1. Critical
 
-_All critical issues resolved._
+### 1.1 RC4 Encryption Missing in FFI/Mobile Path
+- Desktop `tunnel/runner.rs` has full RC4 integration via `TunnelEncryption`
+- FFI `ffi/client.rs:run_packet_loop` does NOT apply RC4 encrypt/decrypt
+- Server sends RC4 keys in auth response, but they are not used
+- **Impact:** Mobile apps send data unencrypted within TLS when `use_encrypt=true`
+- **Fix:** Wire `auth_result.rc4_key_pair` into packet loop, create `TunnelEncryption`, apply encrypt/decrypt
 
 ---
 
