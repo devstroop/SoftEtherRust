@@ -266,11 +266,12 @@ pub unsafe extern "C" fn softether_create(
         let ipv4_dns1 = cstr_to_string(config.static_ipv4_dns1);
         let ipv4_dns2 = cstr_to_string(config.static_ipv4_dns2);
         let ipv6_address = cstr_to_string(config.static_ipv6_address);
-        let ipv6_prefix_len = if config.static_ipv6_prefix_len > 0 && config.static_ipv6_prefix_len <= 128 {
-            Some(config.static_ipv6_prefix_len as u8)
-        } else {
-            None
-        };
+        let ipv6_prefix_len =
+            if config.static_ipv6_prefix_len > 0 && config.static_ipv6_prefix_len <= 128 {
+                Some(config.static_ipv6_prefix_len as u8)
+            } else {
+                None
+            };
         let ipv6_gateway = cstr_to_string(config.static_ipv6_gateway);
         let ipv6_dns1 = cstr_to_string(config.static_ipv6_dns1);
         let ipv6_dns2 = cstr_to_string(config.static_ipv6_dns2);
