@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn test_udp_voip_ports() {
         // Create UDP packet to RTP port range
-        let mut frame = vec![0u8; 14 + 20 + 8 + 100]; // Eth + IP + UDP + payload
+        let mut frame = [0u8; 14 + 20 + 8 + 100]; // Eth + IP + UDP + payload
         frame[12] = 0x08;
         frame[13] = 0x00; // IPv4
         frame[14] = 0x45; // Version 4, IHL 5
