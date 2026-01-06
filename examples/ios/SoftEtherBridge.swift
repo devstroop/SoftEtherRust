@@ -126,6 +126,8 @@ public class SoftEtherBridge {
         public let acceptPushedRoutes: Bool
         public let ipv4Include: String?
         public let ipv4Exclude: String?
+        public let ipv6Include: String?
+        public let ipv6Exclude: String?
         
         // Static IPv4 Configuration (optional, skips DHCP if set)
         public let staticIpv4Address: String?
@@ -163,6 +165,8 @@ public class SoftEtherBridge {
             acceptPushedRoutes: Bool = true,
             ipv4Include: String? = nil,
             ipv4Exclude: String? = nil,
+            ipv6Include: String? = nil,
+            ipv6Exclude: String? = nil,
             staticIpv4Address: String? = nil,
             staticIpv4Netmask: String? = nil,
             staticIpv4Gateway: String? = nil,
@@ -195,6 +199,8 @@ public class SoftEtherBridge {
             self.acceptPushedRoutes = acceptPushedRoutes
             self.ipv4Include = ipv4Include
             self.ipv4Exclude = ipv4Exclude
+            self.ipv6Include = ipv6Include
+            self.ipv6Exclude = ipv6Exclude
             self.staticIpv4Address = staticIpv4Address
             self.staticIpv4Netmask = staticIpv4Netmask
             self.staticIpv4Gateway = staticIpv4Gateway
@@ -264,6 +270,8 @@ public class SoftEtherBridge {
         let passwordHashCString = config.passwordHash.withCString { strdup($0) }!
         let ipv4IncludeCString = config.ipv4Include?.withCString { strdup($0) }
         let ipv4ExcludeCString = config.ipv4Exclude?.withCString { strdup($0) }
+        let ipv6IncludeCString = config.ipv6Include?.withCString { strdup($0) }
+        let ipv6ExcludeCString = config.ipv6Exclude?.withCString { strdup($0) }
         let customCaPemCString = config.customCaPem?.withCString { strdup($0) }
         let certFingerprintCString = config.certFingerprintSha256?.withCString { strdup($0) }
         
@@ -285,6 +293,8 @@ public class SoftEtherBridge {
             free(passwordHashCString)
             if let ptr = ipv4IncludeCString { free(ptr) }
             if let ptr = ipv4ExcludeCString { free(ptr) }
+            if let ptr = ipv6IncludeCString { free(ptr) }
+            if let ptr = ipv6ExcludeCString { free(ptr) }
             if let ptr = customCaPemCString { free(ptr) }
             if let ptr = certFingerprintCString { free(ptr) }
             if let ptr = staticIpv4AddrCString { free(ptr) }
@@ -329,6 +339,8 @@ public class SoftEtherBridge {
         cConfig.accept_pushed_routes = config.acceptPushedRoutes ? 1 : 0
         cConfig.ipv4_include = ipv4IncludeCString.map { UnsafePointer($0) }
         cConfig.ipv4_exclude = ipv4ExcludeCString.map { UnsafePointer($0) }
+        cConfig.ipv6_include = ipv6IncludeCString.map { UnsafePointer($0) }
+        cConfig.ipv6_exclude = ipv6ExcludeCString.map { UnsafePointer($0) }
         
         // Static IPv4 Configuration
         cConfig.static_ipv4_address = staticIpv4AddrCString.map { UnsafePointer($0) }

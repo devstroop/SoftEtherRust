@@ -164,6 +164,8 @@ class SoftEtherBridge {
         val acceptPushedRoutes: Boolean = true,
         val ipv4Include: String? = null,
         val ipv4Exclude: String? = null,
+        val ipv6Include: String? = null,
+        val ipv6Exclude: String? = null,
         // Static IPv4 Configuration (optional, skips DHCP if set)
         val staticIpv4Address: String? = null,
         val staticIpv4Netmask: String? = null,
@@ -234,6 +236,8 @@ class SoftEtherBridge {
         acceptPushedRoutes: Boolean,
         ipv4Include: String?,
         ipv4Exclude: String?,
+        ipv6Include: String?,
+        ipv6Exclude: String?,
         // Static IPv4 Configuration
         staticIpv4Address: String?,
         staticIpv4Netmask: String?,
@@ -291,6 +295,8 @@ class SoftEtherBridge {
             config.acceptPushedRoutes,
             config.ipv4Include,
             config.ipv4Exclude,
+            config.ipv6Include,
+            config.ipv6Exclude,
             config.staticIpv4Address,
             config.staticIpv4Netmask,
             config.staticIpv4Gateway,

@@ -104,6 +104,10 @@ pub struct SoftEtherConfig {
     pub ipv4_include: *const c_char,
     /// Comma-separated CIDRs to exclude from VPN routing (null-terminated UTF-8, can be null).
     pub ipv4_exclude: *const c_char,
+    /// Comma-separated IPv6 CIDRs to include in VPN routing (null-terminated UTF-8, can be null).
+    pub ipv6_include: *const c_char,
+    /// Comma-separated IPv6 CIDRs to exclude from VPN routing (null-terminated UTF-8, can be null).
+    pub ipv6_exclude: *const c_char,
 
     // Static IPv4 Configuration (optional, skips DHCP if set)
     /// Static IPv4 address (null-terminated UTF-8, e.g., "10.0.0.100", can be null for DHCP).

@@ -83,8 +83,10 @@ typedef struct {
     // Routing
     int default_route;            // Route all traffic through VPN (1 = yes, 0 = no)
     int accept_pushed_routes;     // Accept server-pushed routes (1 = yes, 0 = no)
-    const char* ipv4_include;     // Comma-separated CIDRs to include (nullable)
-    const char* ipv4_exclude;     // Comma-separated CIDRs to exclude (nullable)
+    const char* ipv4_include;     // Comma-separated IPv4 CIDRs to include (nullable)
+    const char* ipv4_exclude;     // Comma-separated IPv4 CIDRs to exclude (nullable)
+    const char* ipv6_include;     // Comma-separated IPv6 CIDRs to include (nullable)
+    const char* ipv6_exclude;     // Comma-separated IPv6 CIDRs to exclude (nullable)
     
     // Static IPv4 Configuration (optional, skips DHCP if set)
     const char* static_ipv4_address;  // Static IPv4 address, e.g., "10.0.0.100" (nullable for DHCP)

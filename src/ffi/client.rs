@@ -211,26 +211,25 @@ pub unsafe extern "C" fn softether_create(
     // Parse optional routing strings
     let ipv4_include_str = cstr_to_string(config.ipv4_include).unwrap_or_default();
     let ipv4_exclude_str = cstr_to_string(config.ipv4_exclude).unwrap_or_default();
+    let ipv6_include_str = cstr_to_string(config.ipv6_include).unwrap_or_default();
+    let ipv6_exclude_str = cstr_to_string(config.ipv6_exclude).unwrap_or_default();
 
-    // Parse CIDR lists (comma-separated)
-    let ipv4_include: Vec<String> = if ipv4_include_str.is_empty() {
-        vec![]
-    } else {
-        ipv4_include_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
+    // Helper to parse comma-separated CIDR lists
+    let parse_cidr_list = |s: &str| -> Vec<String> {
+        if s.is_empty() {
+            vec![]
+        } else {
+            s.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        }
     };
-    let ipv4_exclude: Vec<String> = if ipv4_exclude_str.is_empty() {
-        vec![]
-    } else {
-        ipv4_exclude_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    };
+
+    let ipv4_include = parse_cidr_list(&ipv4_include_str);
+    let ipv4_exclude = parse_cidr_list(&ipv4_exclude_str);
+    let ipv6_include = parse_cidr_list(&ipv6_include_str);
+    let ipv6_exclude = parse_cidr_list(&ipv6_exclude_str);
 
     // Parse optional certificate pinning fields
     let custom_ca_pem = if config.custom_ca_pem.is_null() {
@@ -319,8 +318,8 @@ pub unsafe extern "C" fn softether_create(
             accept_pushed_routes: config.accept_pushed_routes != 0,
             ipv4_include,
             ipv4_exclude,
-            ipv6_include: Vec::new(),
-            ipv6_exclude: Vec::new(),
+            ipv6_include,
+            ipv6_exclude,
         },
         static_ip,
     };
