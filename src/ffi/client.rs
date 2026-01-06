@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use super::callbacks::*;
 use super::types::*;
 use crate::client::{ConnectionManager, VpnConnection};
-use crate::packet::{DhcpClient, DhcpConfig, DhcpState};
+use crate::packet::{fragment_ipv4_packet, DhcpClient, DhcpConfig, DhcpState, FragmentResult};
 use crate::protocol::{
     decompress, is_compressed, AuthPack, AuthResult, AuthType, ConnectionOptions, HelloResponse,
     HttpCodec, HttpRequest, Pack, RedirectInfo, TunnelCodec, CONTENT_TYPE_PACK,
@@ -25,7 +25,7 @@ use crate::protocol::{
 const PACKET_QUEUE_SIZE: usize = 256;
 
 /// Internal client state.
-struct FfiClient {
+pub(crate) struct FfiClient {
     /// Configuration
     config: crate::config::VpnConfig,
     /// Callbacks
@@ -45,6 +45,12 @@ struct FfiClient {
     /// Channel to send packets TO the VPN
     tx_sender: Option<mpsc::Sender<Vec<u8>>>,
 }
+
+// Thread-safe wrapper
+type ClientHandle = Arc<Mutex<FfiClient>>;
+
+/// Type alias for external access (used by JNI layer)
+pub(crate) type FfiClientInternal = FfiClient;
 
 /// Thread-safe statistics
 struct FfiStats {
@@ -68,6 +74,11 @@ impl Default for FfiStats {
 }
 
 impl FfiClient {
+    /// Get the callback context pointer (for cleanup)
+    pub fn get_callback_context(&self) -> *mut std::ffi::c_void {
+        self.callbacks.context
+    }
+
     fn new(config: crate::config::VpnConfig, callbacks: SoftEtherCallbacks) -> Self {
         Self {
             config,
@@ -143,9 +154,6 @@ impl FfiClient {
         }
     }
 }
-
-// Thread-safe wrapper
-type ClientHandle = Arc<Mutex<FfiClient>>;
 
 /// Convert a C string to a Rust string.
 unsafe fn cstr_to_string(ptr: *const c_char) -> Option<String> {
@@ -325,12 +333,21 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
         }
     };
 
+    // Log initial state transition
+    if let Some(cb) = guard.callbacks.on_log {
+        if let Ok(cstr) =
+            std::ffi::CString::new("[RUST STATE] softether_connect: setting state to Connecting")
+        {
+            cb(guard.callbacks.context, 1, cstr.as_ptr());
+        }
+    }
+
     guard.set_state(SoftEtherState::Connecting);
     guard.notify_state(SoftEtherState::Connecting);
     guard.running.store(true, Ordering::SeqCst);
 
     // Create packet channel for TX (iOS -> VPN)
-    let (tx_send, tx_recv) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE_SIZE);
+    let (tx_send, mut tx_recv) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE_SIZE);
     guard.tx_sender = Some(tx_send);
 
     // Clone what we need for the async task
@@ -357,48 +374,139 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
             }
         }
 
-        let result = connect_and_run(
-            config,
-            running.clone(),
-            callbacks.clone(),
-            tx_recv,
-            atomic_state,
-        )
-        .await;
+        // Reconnection parameters
+        const MAX_RECONNECT_ATTEMPTS: u32 = 5;
+        const INITIAL_BACKOFF_MS: u64 = 1000;
+        const MAX_BACKOFF_MS: u64 = 30000;
+
+        let mut reconnect_attempts = 0u32;
+        let mut backoff_ms = INITIAL_BACKOFF_MS;
+
+        loop {
+            let result = connect_and_run(
+                config.clone(),
+                running.clone(),
+                callbacks.clone(),
+                tx_recv,
+                atomic_state.clone(),
+            )
+            .await;
+
+            // Check if we should stop (user disconnected)
+            if !running.load(Ordering::SeqCst) {
+                if let Some(cb) = callbacks.on_log {
+                    if let Ok(cstr) =
+                        std::ffi::CString::new("[RUST] User requested disconnect, not reconnecting")
+                    {
+                        cb(callbacks.context, 1, cstr.as_ptr());
+                    }
+                }
+                break;
+            }
+
+            // Check result and decide whether to reconnect
+            match &result {
+                Ok(()) => {
+                    // Normal disconnect
+                    if let Some(cb) = callbacks.on_log {
+                        if let Ok(cstr) = std::ffi::CString::new("[RUST] Connection ended normally")
+                        {
+                            cb(callbacks.context, 1, cstr.as_ptr());
+                        }
+                    }
+                    break;
+                }
+                Err(e) => {
+                    // Check if error is recoverable
+                    let should_reconnect = match e {
+                        crate::error::Error::AuthenticationFailed(_) => false,
+                        crate::error::Error::UserAlreadyLoggedIn => false,
+                        crate::error::Error::ServerError(_) => false,
+                        // Network errors - try to reconnect
+                        crate::error::Error::ConnectionFailed(_) => true,
+                        crate::error::Error::Timeout => true,
+                        crate::error::Error::Io(_) => true,
+                        crate::error::Error::Tls(_) => true,
+                        _ => false,
+                    };
+
+                    if !should_reconnect || reconnect_attempts >= MAX_RECONNECT_ATTEMPTS {
+                        if let Some(cb) = callbacks.on_log {
+                            let msg = if reconnect_attempts >= MAX_RECONNECT_ATTEMPTS {
+                                format!(
+                                    "[RUST] Max reconnection attempts ({}) reached, giving up",
+                                    MAX_RECONNECT_ATTEMPTS
+                                )
+                            } else {
+                                format!("[RUST] Non-recoverable error, not reconnecting: {}", e)
+                            };
+                            if let Ok(cstr) = std::ffi::CString::new(msg) {
+                                cb(callbacks.context, 3, cstr.as_ptr());
+                            }
+                        }
+                        break;
+                    }
+
+                    // Log reconnection attempt
+                    reconnect_attempts += 1;
+                    if let Some(cb) = callbacks.on_log {
+                        if let Ok(cstr) = std::ffi::CString::new(format!(
+                            "[RUST] Connection lost ({}), reconnecting in {}ms (attempt {}/{})",
+                            e, backoff_ms, reconnect_attempts, MAX_RECONNECT_ATTEMPTS
+                        )) {
+                            cb(callbacks.context, 2, cstr.as_ptr());
+                        }
+                    }
+
+                    // Update state to reconnecting
+                    atomic_state.store(SoftEtherState::Connecting as u8, Ordering::SeqCst);
+                    if let Some(cb) = callbacks.on_state_changed {
+                        cb(callbacks.context, SoftEtherState::Connecting);
+                    }
+
+                    // Wait before reconnecting (exponential backoff)
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+
+                    // Check again if we should stop
+                    if !running.load(Ordering::SeqCst) {
+                        break;
+                    }
+
+                    // Increase backoff for next attempt
+                    backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+
+                    // Recreate the packet channel for the new connection
+                    let (new_tx_send, new_tx_recv) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE_SIZE);
+                    tx_recv = new_tx_recv;
+
+                    // We can't update tx_sender in the handle from here, but the old sender
+                    // will fail and Android will stop sending. On reconnect success, we'd
+                    // need to notify Android of the new session anyway.
+                    // For now, we just continue - Android will get onConnected callback again.
+                    let _ = new_tx_send; // Drop the sender since we can't pass it back
+
+                    continue;
+                }
+            }
+        }
 
         // Notify disconnection
         running.store(false, Ordering::SeqCst);
 
-        let disconnect_result = match result {
-            Ok(()) => {
-                if let Some(cb) = callbacks.on_log {
-                    if let Ok(cstr) = std::ffi::CString::new("Connection ended normally") {
-                        cb(callbacks.context, 1, cstr.as_ptr());
-                    }
-                }
-                SoftEtherResult::Ok
+        // Log final disconnection state
+        if let Some(log_cb) = callbacks.on_log {
+            if let Ok(cstr) =
+                std::ffi::CString::new("[RUST STATE] Connection loop ended, notifying Disconnected")
+            {
+                log_cb(callbacks.context, 1, cstr.as_ptr());
             }
-            Err(ref e) => {
-                if let Some(cb) = callbacks.on_log {
-                    if let Ok(cstr) = std::ffi::CString::new(format!("Connection error: {}", e)) {
-                        cb(callbacks.context, 3, cstr.as_ptr());
-                    }
-                }
-                match e {
-                    crate::error::Error::AuthenticationFailed(_) => SoftEtherResult::AuthFailed,
-                    crate::error::Error::ConnectionFailed(_) => SoftEtherResult::ConnectionFailed,
-                    crate::error::Error::Timeout => SoftEtherResult::Timeout,
-                    crate::error::Error::UserAlreadyLoggedIn => SoftEtherResult::AuthFailed,
-                    _ => SoftEtherResult::InternalError,
-                }
-            }
-        };
+        }
 
         if let Some(cb) = callbacks.on_state_changed {
             cb(callbacks.context, SoftEtherState::Disconnected);
         }
         if let Some(cb) = callbacks.on_disconnected {
-            cb(callbacks.context, disconnect_result);
+            cb(callbacks.context, SoftEtherResult::Ok);
         }
     });
 
@@ -408,12 +516,37 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
     SoftEtherResult::Ok
 }
 
-/// Helper to update atomic state and notify callback
+/// Helper to update atomic state and notify callback (only if state changed)
 fn update_state(
     atomic_state: &Arc<AtomicU8>,
     callbacks: &SoftEtherCallbacks,
     state: SoftEtherState,
 ) {
+    // Only notify if state actually changed (prevents flicker)
+    let current = atomic_state.load(Ordering::SeqCst);
+    if current == state as u8 {
+        return;
+    }
+
+    // Log state transition for debugging
+    if let Some(log_cb) = callbacks.on_log {
+        let state_name = match state {
+            SoftEtherState::Disconnected => "Disconnected",
+            SoftEtherState::Connecting => "Connecting",
+            SoftEtherState::Handshaking => "Handshaking",
+            SoftEtherState::Authenticating => "Authenticating",
+            SoftEtherState::EstablishingTunnel => "EstablishingTunnel",
+            SoftEtherState::Connected => "Connected",
+            SoftEtherState::Disconnecting => "Disconnecting",
+            SoftEtherState::Error => "Error",
+        };
+        if let Ok(cstr) =
+            std::ffi::CString::new(format!("[RUST STATE] Transitioning to: {}", state_name))
+        {
+            log_cb(callbacks.context, 1, cstr.as_ptr());
+        }
+    }
+
     atomic_state.store(state as u8, Ordering::SeqCst);
     if let Some(cb) = callbacks.on_state_changed {
         cb(callbacks.context, state);
@@ -672,6 +805,19 @@ async fn connect_and_run(
         ),
     );
 
+    // Create tunnel encryption context BEFORE DHCP (needed for encrypted tunnel data)
+    let mut tunnel_crypto = if config.use_encrypt && !final_auth.session_key.is_empty() {
+        log_message(
+            &callbacks,
+            1,
+            "[RUST] Initializing RC4 tunnel encryption...",
+        );
+        crate::crypto::TunnelCrypto::new(&final_auth.session_key)
+    } else {
+        log_message(&callbacks, 1, "[RUST] Tunnel encryption disabled");
+        crate::crypto::TunnelCrypto::disabled()
+    };
+
     // Perform DHCP to get IP configuration
     log_message(&callbacks, 1, "[RUST] Starting DHCP...");
     update_state(
@@ -680,7 +826,14 @@ async fn connect_and_run(
         SoftEtherState::EstablishingTunnel,
     );
 
-    let dhcp_config = match perform_dhcp(&mut conn_mgr, mac, &callbacks, config.use_compress).await
+    let dhcp_config = match perform_dhcp(
+        &mut conn_mgr,
+        mac,
+        &callbacks,
+        config.use_compress,
+        &mut tunnel_crypto,
+    )
+    .await
     {
         Ok(config) => {
             log_message(
@@ -699,8 +852,53 @@ async fn connect_and_run(
         }
     };
 
+    // Attempt DHCPv6 for IPv6 address (optional, don't fail if it doesn't work)
+    log_message(
+        &callbacks,
+        1,
+        "[RUST] Attempting DHCPv6 for IPv6 address...",
+    );
+    let dhcpv6_config = match perform_dhcpv6(
+        &mut conn_mgr,
+        mac,
+        &callbacks,
+        config.use_compress,
+        &mut tunnel_crypto,
+    )
+    .await
+    {
+        Ok(config) => {
+            if let Some(addr) = config.address {
+                log_message(
+                    &callbacks,
+                    1,
+                    &format!(
+                        "[RUST] DHCPv6 complete: IPv6={}, DNS={:?}",
+                        addr, config.dns_servers
+                    ),
+                );
+            } else {
+                log_message(
+                    &callbacks,
+                    1,
+                    "[RUST] DHCPv6: No IPv6 address assigned (DNS only)",
+                );
+            }
+            Some(config)
+        }
+        Err(e) => {
+            log_message(
+                &callbacks,
+                2,
+                &format!("[RUST] DHCPv6 not available: {}", e),
+            );
+            None
+        }
+    };
+
     // Create session info from DHCP config (include MAC for Kotlin to use)
-    let session = create_session_from_dhcp(&dhcp_config, actual_server_ip, mac);
+    let session =
+        create_session_from_dhcp(&dhcp_config, actual_server_ip, mac, dhcpv6_config.as_ref());
 
     // Notify connected with session info
     log_message(&callbacks, 1, "[RUST] Notifying Android of connection...");
@@ -727,6 +925,7 @@ async fn connect_and_run(
         &mut tx_recv,
         mac,
         dhcp_config,
+        &mut tunnel_crypto,
     )
     .await
 }
@@ -736,6 +935,7 @@ fn create_session_from_dhcp(
     dhcp: &DhcpConfig,
     server_ip: Ipv4Addr,
     mac: [u8; 6],
+    dhcpv6_config: Option<&crate::packet::dhcpv6::Dhcpv6Config>,
 ) -> SoftEtherSession {
     let mut server_ip_str = [0 as std::ffi::c_char; 64];
     let ip_string = format!("{}", server_ip);
@@ -753,6 +953,21 @@ fn create_session_from_dhcp(
             | (octets[3] as u32)
     }
 
+    // Extract IPv6 fields
+    let (ipv6_addr, ipv6_prefix, dns1_v6, dns2_v6) = if let Some(v6) = dhcpv6_config {
+        let addr = if !v6.ip.is_unspecified() {
+            v6.ip.octets()
+        } else {
+            [0; 16]
+        };
+        let prefix = v6.prefix_len;
+        let dns1 = v6.dns1.map(|d| d.octets()).unwrap_or([0; 16]);
+        let dns2 = v6.dns2.map(|d| d.octets()).unwrap_or([0; 16]);
+        (addr, prefix, dns1, dns2)
+    } else {
+        ([0u8; 16], 0u8, [0u8; 16], [0u8; 16])
+    };
+
     SoftEtherSession {
         ip_address: ip_to_u32(dhcp.ip),
         subnet_mask: ip_to_u32(dhcp.netmask),
@@ -764,6 +979,11 @@ fn create_session_from_dhcp(
         server_build: 0,
         mac_address: mac,
         gateway_mac: [0; 6], // Will be learned dynamically
+        ipv6_address: ipv6_addr,
+        ipv6_prefix_len: ipv6_prefix,
+        _padding: [0; 3],
+        dns1_v6,
+        dns2_v6,
     }
 }
 
@@ -908,6 +1128,7 @@ async fn perform_dhcp(
     mac: [u8; 6],
     callbacks: &SoftEtherCallbacks,
     use_compress: bool,
+    tunnel_crypto: &mut crate::crypto::TunnelCrypto,
 ) -> crate::error::Result<DhcpConfig> {
     use tokio::time::timeout;
 
@@ -933,7 +1154,14 @@ async fn perform_dhcp(
         1,
         &format!("[RUST] Sending DHCP DISCOVER ({} bytes)", discover.len()),
     );
-    send_frame(conn_mgr, &discover, &mut send_buf, use_compress).await?;
+    send_frame(
+        conn_mgr,
+        &discover,
+        &mut send_buf,
+        use_compress,
+        tunnel_crypto,
+    )
+    .await?;
 
     // Wait for OFFER/ACK
     loop {
@@ -945,6 +1173,9 @@ async fn perform_dhcp(
 
         match timeout(Duration::from_secs(3), conn_mgr.read_any(&mut buf)).await {
             Ok(Ok((_conn_idx, n))) if n > 0 => {
+                // Decrypt if encryption is enabled
+                tunnel_crypto.decrypt(&mut buf[..n]);
+
                 // Decode tunnel frames
                 let frames = codec.feed(&buf[..n])?;
                 for frame in frames {
@@ -973,8 +1204,14 @@ async fn perform_dhcp(
                                     // Got OFFER, send REQUEST
                                     if let Some(request) = dhcp.build_request() {
                                         log_msg(callbacks, 1, "[RUST] Sending DHCP REQUEST");
-                                        send_frame(conn_mgr, &request, &mut send_buf, use_compress)
-                                            .await?;
+                                        send_frame(
+                                            conn_mgr,
+                                            &request,
+                                            &mut send_buf,
+                                            use_compress,
+                                            tunnel_crypto,
+                                        )
+                                        .await?;
                                     }
                                 }
                             }
@@ -997,11 +1234,25 @@ async fn perform_dhcp(
                 if dhcp.state() == DhcpState::DiscoverSent {
                     log_msg(callbacks, 2, "[RUST] DHCP timeout, retrying DISCOVER");
                     let discover = dhcp.build_discover();
-                    send_frame(conn_mgr, &discover, &mut send_buf, use_compress).await?;
+                    send_frame(
+                        conn_mgr,
+                        &discover,
+                        &mut send_buf,
+                        use_compress,
+                        tunnel_crypto,
+                    )
+                    .await?;
                 } else if dhcp.state() == DhcpState::RequestSent {
                     log_msg(callbacks, 2, "[RUST] DHCP timeout, retrying REQUEST");
                     if let Some(request) = dhcp.build_request() {
-                        send_frame(conn_mgr, &request, &mut send_buf, use_compress).await?;
+                        send_frame(
+                            conn_mgr,
+                            &request,
+                            &mut send_buf,
+                            use_compress,
+                            tunnel_crypto,
+                        )
+                        .await?;
                     }
                 }
             }
@@ -1028,12 +1279,177 @@ fn is_dhcp_response(frame: &[u8]) -> bool {
     dst_port == 68
 }
 
-/// Send an Ethernet frame through the tunnel
+/// Check if an Ethernet frame is a DHCPv6 response (UDP dst port 546)
+fn is_dhcpv6_response(frame: &[u8]) -> bool {
+    // Minimum: Ethernet(14) + IPv6(40) + UDP(8) + DHCPv6 minimal
+    if frame.len() < 66 {
+        return false;
+    }
+    // Check EtherType is IPv6 (0x86DD)
+    if frame[12] != 0x86 || frame[13] != 0xDD {
+        return false;
+    }
+    // Check Next Header is UDP (17)
+    if frame[20] != 17 {
+        return false;
+    }
+    // Check UDP destination port is 546 (DHCPv6 client)
+    let dst_port = u16::from_be_bytes([frame[54 + 2], frame[54 + 3]]);
+    dst_port == 546
+}
+
+/// Perform DHCPv6 through the tunnel to get IPv6 configuration (optional)
+async fn perform_dhcpv6(
+    conn_mgr: &mut ConnectionManager,
+    mac: [u8; 6],
+    callbacks: &SoftEtherCallbacks,
+    use_compress: bool,
+    tunnel_crypto: &mut crate::crypto::TunnelCrypto,
+) -> crate::error::Result<crate::packet::dhcpv6::Dhcpv6Config> {
+    use crate::packet::dhcpv6::{Dhcpv6Client, Dhcpv6State};
+    use tokio::time::timeout;
+
+    fn log_msg(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
+        if let Some(cb) = callbacks.on_log {
+            if let Ok(cstr) = std::ffi::CString::new(msg) {
+                cb(callbacks.context, level, cstr.as_ptr());
+            }
+        }
+    }
+
+    let mut client = Dhcpv6Client::new(mac);
+    let mut codec = TunnelCodec::new();
+    let mut buf = vec![0u8; 65536];
+    let mut send_buf = vec![0u8; 2048];
+
+    // Shorter timeout for DHCPv6 since it's optional
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+
+    // Build and send SOLICIT
+    let solicit = client.build_solicit();
+    log_msg(
+        callbacks,
+        1,
+        &format!("[RUST] Sending DHCPv6 SOLICIT ({} bytes)", solicit.len()),
+    );
+    send_frame(
+        conn_mgr,
+        &solicit,
+        &mut send_buf,
+        use_compress,
+        tunnel_crypto,
+    )
+    .await?;
+
+    loop {
+        if std::time::Instant::now() > deadline {
+            return Err(crate::error::Error::TimeoutMessage(
+                "DHCPv6 timeout - no response received".into(),
+            ));
+        }
+
+        match timeout(Duration::from_secs(3), conn_mgr.read_any(&mut buf)).await {
+            Ok(Ok((_conn_idx, n))) if n > 0 => {
+                // Decrypt if encryption is enabled
+                tunnel_crypto.decrypt(&mut buf[..n]);
+
+                // Decode tunnel frames
+                let frames = codec.feed(&buf[..n])?;
+                for frame in frames {
+                    if frame.is_keepalive() {
+                        continue;
+                    }
+                    if let Some(packets) = frame.packets() {
+                        for packet in packets {
+                            // Decompress if needed
+                            let packet_data: Vec<u8> = if is_compressed(packet) {
+                                match decompress(packet) {
+                                    Ok(decompressed) => decompressed,
+                                    Err(_) => continue,
+                                }
+                            } else {
+                                packet.to_vec()
+                            };
+
+                            // Check if this is a DHCPv6 response
+                            if is_dhcpv6_response(&packet_data) {
+                                log_msg(callbacks, 1, "[RUST] DHCPv6 response received");
+
+                                // process_response handles full Ethernet frames
+                                if client.process_response(&packet_data) {
+                                    // DHCPv6 complete!
+                                    return Ok(client.config().clone());
+                                } else if client.state() == Dhcpv6State::SolicitSent {
+                                    // Got ADVERTISE, now need to send REQUEST
+                                    if let Some(request) = client.build_request() {
+                                        log_msg(callbacks, 1, "[RUST] Sending DHCPv6 REQUEST");
+                                        send_frame(
+                                            conn_mgr,
+                                            &request,
+                                            &mut send_buf,
+                                            use_compress,
+                                            tunnel_crypto,
+                                        )
+                                        .await?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Ok(_)) => {
+                // Zero bytes - continue
+            }
+            Ok(Err(e)) => {
+                log_msg(
+                    callbacks,
+                    2,
+                    &format!("[RUST] Read error during DHCPv6: {}", e),
+                );
+            }
+            Err(_) => {
+                // Timeout, retry based on state
+                match client.state() {
+                    Dhcpv6State::Idle | Dhcpv6State::SolicitSent => {
+                        log_msg(callbacks, 2, "[RUST] DHCPv6 timeout, retrying SOLICIT");
+                        let solicit = client.build_solicit();
+                        send_frame(
+                            conn_mgr,
+                            &solicit,
+                            &mut send_buf,
+                            use_compress,
+                            tunnel_crypto,
+                        )
+                        .await?;
+                    }
+                    Dhcpv6State::RequestSent => {
+                        log_msg(callbacks, 2, "[RUST] DHCPv6 timeout, retrying REQUEST");
+                        if let Some(request) = client.build_request() {
+                            send_frame(
+                                conn_mgr,
+                                &request,
+                                &mut send_buf,
+                                use_compress,
+                                tunnel_crypto,
+                            )
+                            .await?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// Send an Ethernet frame through the tunnel with optional encryption
 async fn send_frame(
     conn_mgr: &mut ConnectionManager,
     frame: &[u8],
     buf: &mut [u8],
     use_compress: bool,
+    tunnel_crypto: &mut crate::crypto::TunnelCrypto,
 ) -> crate::error::Result<()> {
     use crate::protocol::compress;
 
@@ -1057,6 +1473,9 @@ async fn send_frame(
     buf[4..8].copy_from_slice(&(data_to_send.len() as u32).to_be_bytes());
     buf[8..8 + data_to_send.len()].copy_from_slice(&data_to_send);
 
+    // Encrypt if enabled
+    tunnel_crypto.encrypt(&mut buf[..total_len]);
+
     conn_mgr
         .write_all(&buf[..total_len])
         .await
@@ -1070,8 +1489,9 @@ async fn run_packet_loop(
     running: Arc<AtomicBool>,
     callbacks: SoftEtherCallbacks,
     tx_recv: &mut mpsc::Receiver<Vec<u8>>,
-    _mac: [u8; 6],
-    _dhcp_config: DhcpConfig,
+    mac: [u8; 6],
+    dhcp_config: DhcpConfig,
+    tunnel_crypto: &mut crate::crypto::TunnelCrypto,
 ) -> crate::error::Result<()> {
     fn log_msg(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
         if let Some(cb) = callbacks.on_log {
@@ -1085,12 +1505,49 @@ async fn run_packet_loop(
     let mut read_buf = vec![0u8; 65536];
     let keepalive_interval_secs = 5u64;
 
+    // Initialize DHCP handler for lease renewal
+    let mut dhcp_handler = crate::packet::DhcpHandler::new();
+    dhcp_handler.mark_configured(dhcp_config.clone());
+    let dhcp_client = crate::packet::DhcpClient::new(mac);
+
+    // Gateway MAC for unicast renewal (learned from DHCP config or ARP)
+    // For now, we'll use broadcast for rebinding if gateway MAC not available
+    let gateway_mac = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]; // TODO: learn from ARP
+
+    if dhcp_config.lease_time > 0 {
+        log_msg(
+            &callbacks,
+            1,
+            &format!(
+                "[RUST] DHCP lease: {}s, T1={}s, T2={}s",
+                dhcp_config.lease_time, dhcp_config.renewal_time, dhcp_config.rebinding_time
+            ),
+        );
+    }
+
+    // Log encryption status
+    if tunnel_crypto.is_enabled() {
+        log_msg(&callbacks, 1, "[RUST] RC4 tunnel encryption enabled");
+    } else {
+        log_msg(&callbacks, 1, "[RUST] Tunnel encryption disabled");
+    }
+
     log_msg(&callbacks, 1, "[RUST] Packet loop started");
+
+    // Helper to encrypt and send data
+    async fn encrypt_and_send(
+        conn_mgr: &mut ConnectionManager,
+        crypto: &mut crate::crypto::TunnelCrypto,
+        data: &[u8],
+    ) -> std::io::Result<()> {
+        let mut encrypted = data.to_vec();
+        crypto.encrypt(&mut encrypted);
+        conn_mgr.write_all(&encrypted).await
+    }
 
     // Send first keepalive immediately
     let keepalive = tunnel_codec.encode_keepalive();
-    conn_mgr
-        .write_all(&keepalive)
+    encrypt_and_send(conn_mgr, tunnel_crypto, &keepalive)
         .await
         .map_err(crate::error::Error::Io)?;
     let mut last_keepalive = std::time::Instant::now();
@@ -1099,11 +1556,65 @@ async fn run_packet_loop(
         // Check if we need to send keepalive
         if last_keepalive.elapsed() >= Duration::from_secs(keepalive_interval_secs) {
             let keepalive = tunnel_codec.encode_keepalive();
-            conn_mgr
-                .write_all(&keepalive)
+            encrypt_and_send(conn_mgr, tunnel_crypto, &keepalive)
                 .await
                 .map_err(crate::error::Error::Io)?;
             last_keepalive = std::time::Instant::now();
+        }
+
+        // Check for DHCP lease renewal (T1/T2)
+        if dhcp_handler.is_lease_expired() {
+            log_msg(&callbacks, 3, "[RUST] DHCP lease expired!");
+            // Lease expired - connection is no longer valid
+            return Err(crate::error::Error::ConnectionFailed(
+                "DHCP lease expired".to_string(),
+            ));
+        } else if dhcp_handler.needs_rebinding() && !dhcp_handler.is_in_progress() {
+            // T2 elapsed - try rebinding (broadcast)
+            dhcp_handler.start_rebinding();
+            log_msg(&callbacks, 2, "[RUST] Starting DHCP rebinding (T2 elapsed)");
+        } else if dhcp_handler.needs_renewal() && !dhcp_handler.is_in_progress() {
+            // T1 elapsed - try renewal (unicast to server)
+            dhcp_handler.start_renewal();
+            log_msg(
+                &callbacks,
+                1,
+                "[RUST] Starting DHCP lease renewal (T1 elapsed)",
+            );
+        }
+
+        // Send DHCP renewal/rebinding packets if needed
+        if dhcp_handler.should_send_renewal() {
+            if let Some(config) = dhcp_handler.config() {
+                if let Some(server_id) = config.server_id {
+                    let request =
+                        dhcp_client.build_renewal_request(config.ip, server_id, gateway_mac);
+                    let frames = vec![request.to_vec()];
+                    let encoded = tunnel_codec
+                        .encode(&frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
+                    encrypt_and_send(conn_mgr, tunnel_crypto, &encoded)
+                        .await
+                        .map_err(crate::error::Error::Io)?;
+                    dhcp_handler.mark_renewal_sent();
+                    log_msg(&callbacks, 1, "[RUST] Sent DHCP renewal request");
+                }
+            }
+        } else if dhcp_handler.should_send_rebinding() {
+            if let Some(config) = dhcp_handler.config() {
+                let request = dhcp_client.build_rebinding_request(config.ip);
+                let frames = vec![request.to_vec()];
+                let encoded =
+                    tunnel_codec.encode(&frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
+                encrypt_and_send(conn_mgr, tunnel_crypto, &encoded)
+                    .await
+                    .map_err(crate::error::Error::Io)?;
+                dhcp_handler.mark_renewal_sent();
+                log_msg(
+                    &callbacks,
+                    1,
+                    "[RUST] Sent DHCP rebinding request (broadcast)",
+                );
+            }
         }
 
         tokio::select! {
@@ -1113,8 +1624,12 @@ async fn run_packet_loop(
             Some(frame_data) = tx_recv.recv() => {
                 let frames = parse_length_prefixed_packets(&frame_data);
                 if !frames.is_empty() {
-                    let encoded = tunnel_codec.encode(&frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
-                    conn_mgr.write_all(&encoded).await.map_err(crate::error::Error::Io)?;
+                    // Process frames with potential IP fragmentation
+                    // MTU for IP packets: tunnel MTU minus Ethernet header (14 bytes)
+                    let ip_mtu = 1400 - 14; // Use a conservative MTU for fragmentation
+                    let processed_frames = fragment_outgoing_frames(&frames, ip_mtu);
+                    let encoded = tunnel_codec.encode(&processed_frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
+                    encrypt_and_send(conn_mgr, tunnel_crypto, &encoded).await.map_err(crate::error::Error::Io)?;
                 }
             }
 
@@ -1122,6 +1637,9 @@ async fn run_packet_loop(
             result = tokio::time::timeout(Duration::from_millis(500), conn_mgr.read_any(&mut read_buf)) => {
                 match result {
                     Ok(Ok((_conn_idx, n))) if n > 0 => {
+                        // Decrypt incoming data
+                        tunnel_crypto.decrypt(&mut read_buf[..n]);
+
                         if let Ok(frames) = tunnel_codec.decode(&read_buf[..n]) {
                             if !frames.is_empty() {
                                 // Build length-prefixed buffer for callback
@@ -1132,6 +1650,15 @@ async fn run_packet_loop(
                                     } else {
                                         frame.to_vec()
                                     };
+
+                                    // Check for DHCP response during renewal/rebinding
+                                    if dhcp_handler.is_in_progress() && is_dhcp_response(&frame_data) {
+                                        if let Some(new_config) = process_dhcp_renewal_response(&frame_data, dhcp_handler.xid()) {
+                                            dhcp_handler.handle_renewal_ack(new_config);
+                                            log_msg(&callbacks, 1, "[RUST] DHCP lease renewed successfully");
+                                        }
+                                    }
+
                                     let len = frame_data.len() as u16;
                                     buffer.extend_from_slice(&len.to_be_bytes());
                                     buffer.extend_from_slice(&frame_data);
@@ -1156,8 +1683,159 @@ async fn run_packet_loop(
         }
     }
 
+    // Send DHCP RELEASE before disconnecting (best effort)
+    if let Some(config) = dhcp_handler.config() {
+        if let Some(server_id) = config.server_id {
+            log_msg(&callbacks, 1, "[RUST] Sending DHCP RELEASE...");
+            let release = dhcp_client.build_release(config.ip, server_id, gateway_mac);
+            let frames = vec![release.to_vec()];
+            let encoded =
+                tunnel_codec.encode(&frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
+            // Best effort - don't fail if this doesn't work
+            let _ = encrypt_and_send(conn_mgr, tunnel_crypto, &encoded).await;
+        }
+    }
+
     log_msg(&callbacks, 1, "[RUST] Packet loop ended");
     Ok(())
+}
+
+/// Process a DHCP renewal response
+fn process_dhcp_renewal_response(frame: &[u8], expected_xid: u32) -> Option<DhcpConfig> {
+    use crate::packet::{DhcpConfig, DhcpMessageType, DhcpOption};
+
+    // DHCP starts at offset 42
+    let dhcp_start = 42;
+    if frame.len() < dhcp_start + 240 {
+        return None;
+    }
+
+    // Check transaction ID
+    let xid = u32::from_be_bytes([
+        frame[dhcp_start + 4],
+        frame[dhcp_start + 5],
+        frame[dhcp_start + 6],
+        frame[dhcp_start + 7],
+    ]);
+    if xid != expected_xid {
+        return None;
+    }
+
+    // Check magic cookie
+    let magic = u32::from_be_bytes([
+        frame[dhcp_start + 236],
+        frame[dhcp_start + 237],
+        frame[dhcp_start + 238],
+        frame[dhcp_start + 239],
+    ]);
+    if magic != 0x63825363 {
+        return None;
+    }
+
+    // Get yiaddr (offered IP)
+    let yiaddr = std::net::Ipv4Addr::new(
+        frame[dhcp_start + 16],
+        frame[dhcp_start + 17],
+        frame[dhcp_start + 18],
+        frame[dhcp_start + 19],
+    );
+
+    // Parse options
+    let mut option_start = dhcp_start + 240;
+    let mut message_type = None;
+    let mut config = DhcpConfig {
+        ip: yiaddr,
+        ..Default::default()
+    };
+
+    while option_start < frame.len() {
+        let opt_code = frame[option_start];
+        if opt_code == DhcpOption::End as u8 {
+            break;
+        }
+        if opt_code == DhcpOption::Pad as u8 {
+            option_start += 1;
+            continue;
+        }
+        if option_start + 1 >= frame.len() {
+            break;
+        }
+        let opt_len = frame[option_start + 1] as usize;
+        if option_start + 2 + opt_len > frame.len() {
+            break;
+        }
+        let opt_data = &frame[option_start + 2..option_start + 2 + opt_len];
+
+        match opt_code {
+            c if c == DhcpOption::MessageType as u8 && opt_len >= 1 => {
+                message_type = DhcpMessageType::try_from(opt_data[0]).ok();
+            }
+            c if c == DhcpOption::SubnetMask as u8 && opt_len >= 4 => {
+                config.netmask =
+                    std::net::Ipv4Addr::new(opt_data[0], opt_data[1], opt_data[2], opt_data[3]);
+            }
+            c if c == DhcpOption::Router as u8 && opt_len >= 4 => {
+                config.gateway = Some(std::net::Ipv4Addr::new(
+                    opt_data[0],
+                    opt_data[1],
+                    opt_data[2],
+                    opt_data[3],
+                ));
+            }
+            c if c == DhcpOption::DnsServer as u8 && opt_len >= 4 => {
+                config.dns1 = Some(std::net::Ipv4Addr::new(
+                    opt_data[0],
+                    opt_data[1],
+                    opt_data[2],
+                    opt_data[3],
+                ));
+                if opt_len >= 8 {
+                    config.dns2 = Some(std::net::Ipv4Addr::new(
+                        opt_data[4],
+                        opt_data[5],
+                        opt_data[6],
+                        opt_data[7],
+                    ));
+                }
+            }
+            c if c == DhcpOption::ServerIdentifier as u8 && opt_len >= 4 => {
+                config.server_id = Some(std::net::Ipv4Addr::new(
+                    opt_data[0],
+                    opt_data[1],
+                    opt_data[2],
+                    opt_data[3],
+                ));
+            }
+            c if c == DhcpOption::LeaseTime as u8 && opt_len >= 4 => {
+                config.lease_time =
+                    u32::from_be_bytes([opt_data[0], opt_data[1], opt_data[2], opt_data[3]]);
+            }
+            c if c == DhcpOption::RenewalTime as u8 && opt_len >= 4 => {
+                config.renewal_time =
+                    u32::from_be_bytes([opt_data[0], opt_data[1], opt_data[2], opt_data[3]]);
+            }
+            c if c == DhcpOption::RebindingTime as u8 && opt_len >= 4 => {
+                config.rebinding_time =
+                    u32::from_be_bytes([opt_data[0], opt_data[1], opt_data[2], opt_data[3]]);
+            }
+            _ => {}
+        }
+        option_start += 2 + opt_len;
+    }
+
+    // Only return config if we got an ACK
+    if message_type == Some(DhcpMessageType::Ack) {
+        // Compute default T1/T2 if not provided
+        if config.renewal_time == 0 && config.lease_time > 0 {
+            config.renewal_time = config.lease_time / 2;
+        }
+        if config.rebinding_time == 0 && config.lease_time > 0 {
+            config.rebinding_time = config.lease_time * 7 / 8;
+        }
+        Some(config)
+    } else {
+        None
+    }
 }
 
 /// Parse length-prefixed packets from a buffer
@@ -1174,6 +1852,70 @@ fn parse_length_prefixed_packets(data: &[u8]) -> Vec<Vec<u8>> {
             offset += len;
         } else {
             break;
+        }
+    }
+
+    result
+}
+
+/// Fragment outgoing Ethernet frames if IP packets exceed MTU
+///
+/// This function:
+/// 1. Extracts the IP packet from each Ethernet frame
+/// 2. Fragments IPv4 packets that exceed the MTU (if DF flag not set)
+/// 3. Re-wraps each fragment in Ethernet headers
+/// 4. Returns all resulting frames
+fn fragment_outgoing_frames(frames: &[Vec<u8>], ip_mtu: usize) -> Vec<Vec<u8>> {
+    let mut result = Vec::with_capacity(frames.len());
+
+    for frame in frames {
+        // Need at least Ethernet header (14) + minimal IP header (20)
+        if frame.len() < 34 {
+            result.push(frame.clone());
+            continue;
+        }
+
+        // Check if this is an IPv4 packet (EtherType 0x0800)
+        let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+        if ethertype != 0x0800 {
+            // Not IPv4 (could be IPv6 or ARP) - pass through unchanged
+            result.push(frame.clone());
+            continue;
+        }
+
+        // Extract Ethernet header and IP packet
+        let eth_header = &frame[0..14];
+        let ip_packet = &frame[14..];
+
+        // Try to fragment
+        match fragment_ipv4_packet(ip_packet, ip_mtu) {
+            FragmentResult::NoFragmentationNeeded => {
+                // Packet fits, send as-is
+                result.push(frame.clone());
+            }
+            FragmentResult::Fragmented(fragments) => {
+                // Re-wrap each fragment in Ethernet header
+                for frag in fragments {
+                    let mut eth_frame = Vec::with_capacity(14 + frag.len());
+                    eth_frame.extend_from_slice(eth_header);
+                    eth_frame.extend_from_slice(&frag);
+                    result.push(eth_frame);
+                }
+            }
+            FragmentResult::DontFragment => {
+                // DF flag is set - we should send ICMP "Fragmentation Needed"
+                // but for now, just drop the packet (it would fail anyway)
+                // In production, we might want to log this or send ICMP
+                tracing::debug!(
+                    "Dropping packet with DF flag set (size={}, mtu={})",
+                    ip_packet.len(),
+                    ip_mtu
+                );
+            }
+            FragmentResult::InvalidPacket => {
+                // Malformed packet - pass through anyway, let server handle it
+                result.push(frame.clone());
+            }
         }
     }
 
