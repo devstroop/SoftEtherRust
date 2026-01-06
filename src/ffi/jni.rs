@@ -268,6 +268,8 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
     accept_pushed_routes: jboolean,
     ipv4_include: JString,
     ipv4_exclude: JString,
+    ipv6_include: JString,
+    ipv6_exclude: JString,
     // Static IP Configuration
     static_ipv4_address: JString,
     static_ipv4_netmask: JString,
@@ -301,6 +303,8 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
     // Get optional routing strings
     let ipv4_include_str = get_string(&mut env, &ipv4_include).unwrap_or_default();
     let ipv4_exclude_str = get_string(&mut env, &ipv4_exclude).unwrap_or_default();
+    let ipv6_include_str = get_string(&mut env, &ipv6_include).unwrap_or_default();
+    let ipv6_exclude_str = get_string(&mut env, &ipv6_exclude).unwrap_or_default();
 
     // Get optional TLS strings
     let custom_ca_pem_str = get_string(&mut env, &custom_ca_pem).unwrap_or_default();
@@ -336,6 +340,8 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
     };
     let ipv4_include_cstr = to_cstring(&ipv4_include_str);
     let ipv4_exclude_cstr = to_cstring(&ipv4_exclude_str);
+    let ipv6_include_cstr = to_cstring(&ipv6_include_str);
+    let ipv6_exclude_cstr = to_cstring(&ipv6_exclude_str);
     let custom_ca_pem_cstr = to_cstring(&custom_ca_pem_str);
     let cert_fingerprint_cstr = to_cstring(&cert_fingerprint_str);
 
@@ -382,6 +388,14 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
             .map(|s| s.as_ptr())
             .unwrap_or(std::ptr::null()),
         ipv4_exclude: ipv4_exclude_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        ipv6_include: ipv6_include_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        ipv6_exclude: ipv6_exclude_cstr
             .as_ref()
             .map(|s| s.as_ptr())
             .unwrap_or(std::ptr::null()),
