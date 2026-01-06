@@ -725,6 +725,39 @@ async fn connect_and_run(
         }
     };
 
+    // Establish additional connections if max_connections > 1
+    if config.max_connections > 1 {
+        log_message(
+            &callbacks,
+            1,
+            &format!(
+                "[RUST] Multi-connection mode: establishing {} additional connections...",
+                config.max_connections - 1
+            ),
+        );
+        
+        if let Err(e) = conn_mgr.establish_additional_connections().await {
+            // Log but don't fail - we can continue with fewer connections
+            log_message(
+                &callbacks,
+                2,
+                &format!("[RUST] Warning: Failed to establish all additional connections: {e}"),
+            );
+        }
+        
+        let stats = conn_mgr.stats();
+        log_message(
+            &callbacks,
+            1,
+            &format!(
+                "[RUST] Connection pool: {}/{} connections active (half-connection mode: {})",
+                stats.healthy_connections,
+                config.max_connections,
+                if conn_mgr.is_half_connection() { "enabled" } else { "disabled" }
+            ),
+        );
+    }
+
     // Create session info from DHCP config (include MAC for Kotlin to use)
     let session = create_session_from_dhcp(&dhcp_config, actual_server_ip, mac);
 

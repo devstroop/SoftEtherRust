@@ -71,4 +71,6 @@ _All half-connection mode issues resolved._
 - ✅ iOS socket protection via setsockopt(SO_NET_SERVICE_TYPE, NET_SERVICE_TYPE_VV)
 - ✅ RC4 encryption in FFI/mobile packet loop (TunnelEncryption with encrypt/decrypt)
 - ✅ Android IP exclusion callback (exclude_ip for cluster redirects)
+- ✅ Multi-connection support for mobile (establish_additional_connections after DHCP)
+- ✅ Half-connection mode for mobile (auto-enabled when max_connections > 1)
 - ✅ Half-connection mode direction verified (TcpDirection 0=Both, 1=ServerToClient, 2=ClientToServer matches official C; primary always ClientToServer; can_send/can_recv filters connections correctly)

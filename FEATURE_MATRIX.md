@@ -8,8 +8,8 @@
 | **Authentication** | ✅ | ✅ | ✅ |
 | **DHCP** | ✅ | ✅ | ✅ |
 | **DHCPv6** | ✅ (code exists) | ✅ | ✅ |
-| **Multi-Connection** | ✅ | ❌ | ❌ |
-| **Half-Connection Mode** | ✅ | ❌ | ❌ |
+| **Multi-Connection** | ✅ | ✅ | ✅ |
+| **Half-Connection Mode** | ✅ | ✅ | ✅ |
 | **RC4 Encryption** | ✅ | ✅ | ✅ |
 | **Compression** | ✅ | ✅ | ✅ |
 | **UDP Acceleration** | ❌ (auth only) | ❌ (auth only) | ❌ (auth only) |
@@ -44,7 +44,7 @@
 
 ---
 
-### 2. Multi-Connection / Half-Connection Mode
+### 2. Multi-Connection / Half-Connection Mode ✅ COMPLETE
 
 **Desktop:**
 - ✅ `MultiConnectionManager` supports multiple TCP connections
@@ -53,9 +53,10 @@
 - ✅ Parallel receive from all connections
 
 **FFI/Mobile:**
-- Uses `ConnectionManager` but effectively single connection
-- No multi-connection negotiation
-- Not a critical gap (single connection works fine for mobile)
+- ✅ Uses same `ConnectionManager` from desktop implementation
+- ✅ Calls `establish_additional_connections()` after DHCP
+- ✅ Half-connection mode auto-enabled when `max_connections > 1`
+- ✅ Primary connection always ClientToServer (send), additional get directions from server
 
 ---
 
@@ -103,7 +104,7 @@
 |---------|---------|------------|
 | RC4 Encryption | `src/tunnel/runner.rs:TunnelEncryption` | `src/ffi/client.rs:TunnelEncryption` |
 | Compression | `src/protocol/tunnel.rs:compress/decompress` | Same (shared) |
-| Multi-Connection | `src/client/multi_connection.rs` | N/A |
+| Multi-Connection | `src/client/multi_connection.rs` | Same (shared) |
 | DHCP | `src/tunnel/runner.rs` (desktop), `src/ffi/client.rs:perform_dhcp` | Separate impls |
 | Auth | `src/protocol/auth.rs` | Same (shared) |
 | RC4 Crypto | `src/crypto/rc4.rs` | Same (shared) |
@@ -117,7 +118,3 @@
 1. **UDP acceleration data path**
    - Requires parallel UDP socket management
    - Deferred until TCP performance issues reported
-
-2. **Multi-connection for mobile**
-   - Single connection is sufficient for mobile use cases
-   - Would add complexity with minimal benefit
