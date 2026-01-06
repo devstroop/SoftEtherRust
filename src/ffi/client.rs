@@ -506,12 +506,18 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
     SoftEtherResult::Ok
 }
 
-/// Helper to update atomic state and notify callback
+/// Helper to update atomic state and notify callback (only if state changed)
 fn update_state(
     atomic_state: &Arc<AtomicU8>,
     callbacks: &SoftEtherCallbacks,
     state: SoftEtherState,
 ) {
+    // Only notify if state actually changed (prevents flicker)
+    let current = atomic_state.load(Ordering::SeqCst);
+    if current == state as u8 {
+        return;
+    }
+    
     // Log state transition for debugging
     if let Some(log_cb) = callbacks.on_log {
         let state_name = match state {
