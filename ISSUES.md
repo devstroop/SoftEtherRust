@@ -28,11 +28,36 @@ _All Android issues resolved._
 - Note: Auth negotiation is complete, but actual UDP send/recv requires tunnel runner changes
 - Official C: `UdpAccel` integrated with `SessionMain()`, parallel send/recv paths
 
+### 4.2 DHCPv6 Not Integrated
+- DHCPv6 packet structures exist in `src/packet/dhcp.rs`
+- Code is never called on any platform
+- Session IPv6 fields (`ipv6_address`, `dns1_v6`, `dns2_v6`) always zeroed
+- Impact: Medium - no IPv6 address assignment
+
+### 4.3 Reconnection Logic Missing (FFI/Mobile)
+- Desktop has retry logic for "User Already Logged In" errors (10-second delays)
+- Mobile FFI returns error on first failure
+- `reconnect_count` stat is never incremented
+- Impact: Low - mobile apps expected to handle reconnection externally
+
 ---
 
 ## 5. Performance
 
-_All performance issues resolved._
+### 5.1 Packet Statistics Not Incremented (FFI)
+- `bytes_sent`, `bytes_received`, `packets_sent`, `packets_received` not updated in packet loop
+- Only `packets_dropped` and `uptime_secs` work correctly
+- Impact: Low - stats API returns zeros for traffic counters
+
+### 5.2 ARP / Gateway MAC Learning Not Implemented (FFI)
+- Desktop learns gateway MAC via ARP responses
+- Mobile uses broadcast MAC (FF:FF:FF:FF:FF:FF) for all outbound frames
+- Impact: Low - works but suboptimal for some L2 scenarios
+
+### 5.3 QoS Packet Prioritization Not Implemented
+- `qos` config flag is parsed and sent to server
+- But actual VoIP packet prioritization logic not implemented
+- Impact: Low - VoIP packets not prioritized on client side
 
 ---
 
