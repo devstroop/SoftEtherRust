@@ -85,6 +85,20 @@ typedef struct {
     int accept_pushed_routes;     // Accept server-pushed routes (1 = yes, 0 = no)
     const char* ipv4_include;     // Comma-separated CIDRs to include (nullable)
     const char* ipv4_exclude;     // Comma-separated CIDRs to exclude (nullable)
+    
+    // Static IPv4 Configuration (optional, skips DHCP if set)
+    const char* static_ipv4_address;  // Static IPv4 address, e.g., "10.0.0.100" (nullable for DHCP)
+    const char* static_ipv4_netmask;  // Static IPv4 netmask, e.g., "255.255.255.0" (nullable)
+    const char* static_ipv4_gateway;  // Static IPv4 gateway (nullable)
+    const char* static_ipv4_dns1;     // Static IPv4 primary DNS (nullable)
+    const char* static_ipv4_dns2;     // Static IPv4 secondary DNS (nullable)
+    
+    // Static IPv6 Configuration (optional)
+    const char* static_ipv6_address;  // Static IPv6 address, e.g., "2001:db8::1" (nullable for SLAAC/DHCPv6)
+    unsigned int static_ipv6_prefix_len; // IPv6 prefix length (0-128, 0 = not set)
+    const char* static_ipv6_gateway;  // Static IPv6 gateway (nullable)
+    const char* static_ipv6_dns1;     // Static IPv6 primary DNS (nullable)
+    const char* static_ipv6_dns2;     // Static IPv6 secondary DNS (nullable)
 } SoftEtherConfig;
 
 // =============================================================================
@@ -92,7 +106,7 @@ typedef struct {
 // =============================================================================
 
 typedef struct {
-    uint32_t ip_address;          // Assigned IP (network byte order)
+    uint32_t ip_address;          // Assigned IPv4 (network byte order)
     uint32_t subnet_mask;         // Subnet mask (network byte order)
     uint32_t gateway;             // Gateway IP (network byte order)
     uint32_t dns1;                // Primary DNS (network byte order)
@@ -102,6 +116,11 @@ typedef struct {
     uint32_t server_build;        // Server build number
     uint8_t mac_address[6];       // MAC address assigned to this session
     uint8_t gateway_mac[6];       // Gateway MAC address (learned from ARP)
+    uint8_t ipv6_address[16];     // IPv6 address (0 if not assigned)
+    uint8_t ipv6_prefix_len;      // IPv6 prefix length (e.g., 64 or 128)
+    uint8_t _padding[3];          // Padding for alignment
+    uint8_t dns1_v6[16];          // Primary IPv6 DNS (0 if not available)
+    uint8_t dns2_v6[16];          // Secondary IPv6 DNS (0 if not available)
 } SoftEtherSession;
 
 // =============================================================================

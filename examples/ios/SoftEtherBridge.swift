@@ -127,6 +127,20 @@ public class SoftEtherBridge {
         public let ipv4Include: String?
         public let ipv4Exclude: String?
         
+        // Static IPv4 Configuration (optional, skips DHCP if set)
+        public let staticIpv4Address: String?
+        public let staticIpv4Netmask: String?
+        public let staticIpv4Gateway: String?
+        public let staticIpv4Dns1: String?
+        public let staticIpv4Dns2: String?
+        
+        // Static IPv6 Configuration (optional)
+        public let staticIpv6Address: String?
+        public let staticIpv6PrefixLen: UInt32
+        public let staticIpv6Gateway: String?
+        public let staticIpv6Dns1: String?
+        public let staticIpv6Dns2: String?
+        
         public init(
             server: String,
             port: UInt16 = 443,
@@ -148,7 +162,17 @@ public class SoftEtherBridge {
             defaultRoute: Bool = true,
             acceptPushedRoutes: Bool = true,
             ipv4Include: String? = nil,
-            ipv4Exclude: String? = nil
+            ipv4Exclude: String? = nil,
+            staticIpv4Address: String? = nil,
+            staticIpv4Netmask: String? = nil,
+            staticIpv4Gateway: String? = nil,
+            staticIpv4Dns1: String? = nil,
+            staticIpv4Dns2: String? = nil,
+            staticIpv6Address: String? = nil,
+            staticIpv6PrefixLen: UInt32 = 0,
+            staticIpv6Gateway: String? = nil,
+            staticIpv6Dns1: String? = nil,
+            staticIpv6Dns2: String? = nil
         ) {
             self.server = server
             self.port = port
@@ -171,6 +195,16 @@ public class SoftEtherBridge {
             self.acceptPushedRoutes = acceptPushedRoutes
             self.ipv4Include = ipv4Include
             self.ipv4Exclude = ipv4Exclude
+            self.staticIpv4Address = staticIpv4Address
+            self.staticIpv4Netmask = staticIpv4Netmask
+            self.staticIpv4Gateway = staticIpv4Gateway
+            self.staticIpv4Dns1 = staticIpv4Dns1
+            self.staticIpv4Dns2 = staticIpv4Dns2
+            self.staticIpv6Address = staticIpv6Address
+            self.staticIpv6PrefixLen = staticIpv6PrefixLen
+            self.staticIpv6Gateway = staticIpv6Gateway
+            self.staticIpv6Dns1 = staticIpv6Dns1
+            self.staticIpv6Dns2 = staticIpv6Dns2
         }
     }
     
@@ -233,6 +267,17 @@ public class SoftEtherBridge {
         let customCaPemCString = config.customCaPem?.withCString { strdup($0) }
         let certFingerprintCString = config.certFingerprintSha256?.withCString { strdup($0) }
         
+        // Static IP C strings
+        let staticIpv4AddrCString = config.staticIpv4Address?.withCString { strdup($0) }
+        let staticIpv4MaskCString = config.staticIpv4Netmask?.withCString { strdup($0) }
+        let staticIpv4GwCString = config.staticIpv4Gateway?.withCString { strdup($0) }
+        let staticIpv4Dns1CString = config.staticIpv4Dns1?.withCString { strdup($0) }
+        let staticIpv4Dns2CString = config.staticIpv4Dns2?.withCString { strdup($0) }
+        let staticIpv6AddrCString = config.staticIpv6Address?.withCString { strdup($0) }
+        let staticIpv6GwCString = config.staticIpv6Gateway?.withCString { strdup($0) }
+        let staticIpv6Dns1CString = config.staticIpv6Dns1?.withCString { strdup($0) }
+        let staticIpv6Dns2CString = config.staticIpv6Dns2?.withCString { strdup($0) }
+        
         defer {
             free(serverCString)
             free(hubCString)
@@ -242,6 +287,15 @@ public class SoftEtherBridge {
             if let ptr = ipv4ExcludeCString { free(ptr) }
             if let ptr = customCaPemCString { free(ptr) }
             if let ptr = certFingerprintCString { free(ptr) }
+            if let ptr = staticIpv4AddrCString { free(ptr) }
+            if let ptr = staticIpv4MaskCString { free(ptr) }
+            if let ptr = staticIpv4GwCString { free(ptr) }
+            if let ptr = staticIpv4Dns1CString { free(ptr) }
+            if let ptr = staticIpv4Dns2CString { free(ptr) }
+            if let ptr = staticIpv6AddrCString { free(ptr) }
+            if let ptr = staticIpv6GwCString { free(ptr) }
+            if let ptr = staticIpv6Dns1CString { free(ptr) }
+            if let ptr = staticIpv6Dns2CString { free(ptr) }
         }
         
         cConfig.server = UnsafePointer(serverCString)
@@ -275,6 +329,20 @@ public class SoftEtherBridge {
         cConfig.accept_pushed_routes = config.acceptPushedRoutes ? 1 : 0
         cConfig.ipv4_include = ipv4IncludeCString.map { UnsafePointer($0) }
         cConfig.ipv4_exclude = ipv4ExcludeCString.map { UnsafePointer($0) }
+        
+        // Static IPv4 Configuration
+        cConfig.static_ipv4_address = staticIpv4AddrCString.map { UnsafePointer($0) }
+        cConfig.static_ipv4_netmask = staticIpv4MaskCString.map { UnsafePointer($0) }
+        cConfig.static_ipv4_gateway = staticIpv4GwCString.map { UnsafePointer($0) }
+        cConfig.static_ipv4_dns1 = staticIpv4Dns1CString.map { UnsafePointer($0) }
+        cConfig.static_ipv4_dns2 = staticIpv4Dns2CString.map { UnsafePointer($0) }
+        
+        // Static IPv6 Configuration
+        cConfig.static_ipv6_address = staticIpv6AddrCString.map { UnsafePointer($0) }
+        cConfig.static_ipv6_prefix_len = config.staticIpv6PrefixLen
+        cConfig.static_ipv6_gateway = staticIpv6GwCString.map { UnsafePointer($0) }
+        cConfig.static_ipv6_dns1 = staticIpv6Dns1CString.map { UnsafePointer($0) }
+        cConfig.static_ipv6_dns2 = staticIpv6Dns2CString.map { UnsafePointer($0) }
         
         // Create C callbacks
         var cCallbacks = SoftEtherCallbacks()
@@ -338,8 +406,6 @@ public class SoftEtherBridge {
             serverBuild: cSession.server_build,
             macAddress: Array(withUnsafeBytes(of: cSession.mac_address) { Array($0) }),
             gatewayMac: Array(withUnsafeBytes(of: cSession.gateway_mac) { Array($0) })
-        )
-    }
         )
     }
     

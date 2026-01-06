@@ -259,6 +259,42 @@ pub unsafe extern "C" fn softether_create(
         }
     };
 
+    // Parse static IP configuration
+    let static_ip = {
+        let ipv4_address = cstr_to_string(config.static_ipv4_address);
+        let ipv4_netmask = cstr_to_string(config.static_ipv4_netmask);
+        let ipv4_gateway = cstr_to_string(config.static_ipv4_gateway);
+        let ipv4_dns1 = cstr_to_string(config.static_ipv4_dns1);
+        let ipv4_dns2 = cstr_to_string(config.static_ipv4_dns2);
+        let ipv6_address = cstr_to_string(config.static_ipv6_address);
+        let ipv6_prefix_len = if config.static_ipv6_prefix_len > 0 && config.static_ipv6_prefix_len <= 128 {
+            Some(config.static_ipv6_prefix_len as u8)
+        } else {
+            None
+        };
+        let ipv6_gateway = cstr_to_string(config.static_ipv6_gateway);
+        let ipv6_dns1 = cstr_to_string(config.static_ipv6_dns1);
+        let ipv6_dns2 = cstr_to_string(config.static_ipv6_dns2);
+
+        // Only create StaticIpConfig if at least one field is set
+        if ipv4_address.is_some() || ipv6_address.is_some() {
+            Some(crate::config::StaticIpConfig {
+                ipv4_address,
+                ipv4_netmask,
+                ipv4_gateway,
+                ipv4_dns1,
+                ipv4_dns2,
+                ipv6_address,
+                ipv6_prefix_len,
+                ipv6_gateway,
+                ipv6_dns1,
+                ipv6_dns2,
+            })
+        } else {
+            None
+        }
+    };
+
     // Create VPN config with all options
     let vpn_config = crate::config::VpnConfig {
         server,
@@ -286,6 +322,7 @@ pub unsafe extern "C" fn softether_create(
             ipv6_include: Vec::new(),
             ipv6_exclude: Vec::new(),
         },
+        static_ip,
     };
 
     // Parse callbacks

@@ -104,6 +104,30 @@ pub struct SoftEtherConfig {
     pub ipv4_include: *const c_char,
     /// Comma-separated CIDRs to exclude from VPN routing (null-terminated UTF-8, can be null).
     pub ipv4_exclude: *const c_char,
+
+    // Static IPv4 Configuration (optional, skips DHCP if set)
+    /// Static IPv4 address (null-terminated UTF-8, e.g., "10.0.0.100", can be null for DHCP).
+    pub static_ipv4_address: *const c_char,
+    /// Static IPv4 netmask (null-terminated UTF-8, e.g., "255.255.255.0", can be null).
+    pub static_ipv4_netmask: *const c_char,
+    /// Static IPv4 gateway (null-terminated UTF-8, can be null).
+    pub static_ipv4_gateway: *const c_char,
+    /// Static IPv4 primary DNS (null-terminated UTF-8, can be null).
+    pub static_ipv4_dns1: *const c_char,
+    /// Static IPv4 secondary DNS (null-terminated UTF-8, can be null).
+    pub static_ipv4_dns2: *const c_char,
+
+    // Static IPv6 Configuration (optional)
+    /// Static IPv6 address (null-terminated UTF-8, e.g., "2001:db8::1", can be null for SLAAC/DHCPv6).
+    pub static_ipv6_address: *const c_char,
+    /// Static IPv6 prefix length (0-128, 0 = not set).
+    pub static_ipv6_prefix_len: c_uint,
+    /// Static IPv6 gateway (null-terminated UTF-8, can be null).
+    pub static_ipv6_gateway: *const c_char,
+    /// Static IPv6 primary DNS (null-terminated UTF-8, can be null).
+    pub static_ipv6_dns1: *const c_char,
+    /// Static IPv6 secondary DNS (null-terminated UTF-8, can be null).
+    pub static_ipv6_dns2: *const c_char,
 }
 
 /// Session information returned after successful connection.
