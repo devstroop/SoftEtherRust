@@ -1,13 +1,15 @@
-//! Packet handling utilities for Ethernet, ARP, DHCP, and IP fragmentation.
+//! Packet handling utilities for Ethernet, ARP, DHCP, DHCPv6, and IP fragmentation.
 //!
 //! This module contains:
 //! - Ethernet frame utilities with zero-copy helpers
 //! - ARP handler for gateway MAC discovery  
-//! - DHCP client for IP address configuration
+//! - DHCP client for IPv4 address configuration
+//! - DHCPv6 client for IPv6 address configuration
 //! - IP packet fragmentation and reassembly
 
 pub mod arp;
 pub mod dhcp;
+pub mod dhcpv6;
 pub mod ethernet;
 pub mod fragment;
 
@@ -39,6 +41,11 @@ pub use ethernet::{
 
 pub use arp::{ArpHandler, ArpOperation, PendingArpReply};
 pub use dhcp::{DhcpClient, DhcpConfig, DhcpHandler, DhcpMessageType, DhcpOption, DhcpState};
+pub use dhcpv6::{
+    Dhcpv6Client, Dhcpv6Config, Dhcpv6Handler, Dhcpv6MessageType, Dhcpv6Option, Dhcpv6State,
+    Dhcpv6StatusCode, mac_to_link_local, solicited_node_multicast, ALL_DHCP_SERVERS,
+    DHCPV6_CLIENT_PORT, DHCPV6_SERVER_PORT,
+};
 pub use fragment::{
     fragment_ipv4_packet, FragmentKey, FragmentReassembler, FragmentResult, DEFAULT_FRAGMENT_MTU,
     MIN_MTU,
