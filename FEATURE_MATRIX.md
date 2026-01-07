@@ -154,8 +154,8 @@ All major features are now complete:
 | Server/Port/Hub | ✅ | ✅ | ✅ |
 | Username/PasswordHash | ✅ | ✅ | ✅ |
 | Skip TLS Verify | ✅ | ✅ | ✅ |
-| Custom CA PEM | ❌ | ✅ | ✅ |
-| Cert Fingerprint | ❌ | ✅ | ✅ |
+| Custom CA PEM | ✅ | ✅ | ✅ |
+| Cert Fingerprint | ✅ | ✅ | ✅ |
 | Max Connections | ✅ | ✅ | ✅ |
 | Timeout Seconds | ✅ | ✅ | ✅ |
 | MTU | ✅ | ✅ | ✅ |
@@ -168,6 +168,6 @@ All major features are now complete:
 | Default Route | ✅ | ✅ | ✅ |
 | Accept Pushed Routes | ✅ | ✅ | ✅ |
 | IPv4 Include/Exclude | ✅ | ✅ | ✅ |
-| IPv6 Include/Exclude | ❌ | ✅ | ✅ |
-| Static IPv4 | ❌ | ✅ | ✅ |
-| Static IPv6 | ❌ | ✅ | ✅ |
+| IPv6 Include/Exclude | ✅ | ✅ | ✅ |
+| Static IPv4 | ✅ | ✅ | ✅ |
+| Static IPv6 | ✅ | ✅ | ✅ |
