@@ -301,6 +301,92 @@ SoftEtherResult softether_hash_password(const char* password, const char* userna
  */
 int softether_base64_encode(const uint8_t* input, size_t input_len, char* output, size_t output_len);
 
+// =============================================================================
+// iOS/macOS Helper Functions
+// =============================================================================
+
+/**
+ * Get the library version (same as softether_version).
+ */
+const char* softether_ios_version(void);
+
+/**
+ * Convert IPv4 address to dotted decimal string.
+ *
+ * @param ip IPv4 address in network byte order
+ * @param buffer Output buffer (must be at least 16 bytes)
+ * @param buffer_len Size of output buffer
+ * @return Number of bytes written (excluding null terminator), or negative error code
+ */
+int softether_ios_ipv4_to_string(uint32_t ip, char* buffer, size_t buffer_len);
+
+/**
+ * Convert MAC address to colon-separated string.
+ *
+ * @param mac MAC address (6 bytes)
+ * @param buffer Output buffer (must be at least 18 bytes)
+ * @param buffer_len Size of output buffer
+ * @return Number of bytes written (excluding null terminator), or negative error code
+ */
+int softether_ios_mac_to_string(const uint8_t* mac, char* buffer, size_t buffer_len);
+
+/**
+ * Check if an IPv4 address is valid (not 0.0.0.0).
+ *
+ * @param ip IPv4 address in network byte order
+ * @return 1 if valid, 0 if invalid
+ */
+int softether_ios_is_valid_ipv4(uint32_t ip);
+
+/**
+ * Get session information (simplified for Swift).
+ * Returns pointer to internal session data that remains valid until the next call.
+ *
+ * @param handle Client handle
+ * @return Pointer to session data, or NULL if not connected
+ */
+const SoftEtherSession* softether_ios_get_session(SoftEtherHandle handle);
+
+/**
+ * Get statistics (simplified for Swift).
+ * Returns pointer to internal stats data that remains valid until the next call.
+ *
+ * @param handle Client handle
+ * @return Pointer to statistics data, or NULL on error
+ */
+const SoftEtherStats* softether_ios_get_stats(SoftEtherHandle handle);
+
+/**
+ * Format byte count as human-readable string (B, KB, MB, GB).
+ *
+ * @param bytes Number of bytes
+ * @param buffer Output buffer (must be at least 32 bytes)
+ * @param buffer_len Size of output buffer
+ * @return Number of bytes written (excluding null terminator), or negative error code
+ */
+int softether_ios_format_bytes(uint64_t bytes, char* buffer, size_t buffer_len);
+
+/**
+ * Check if the library is running on iOS (vs macOS).
+ *
+ * @return 1 if iOS, 0 otherwise
+ */
+int softether_ios_is_ios(void);
+
+/**
+ * Check if the library is running on macOS.
+ *
+ * @return 1 if macOS, 0 otherwise
+ */
+int softether_ios_is_macos(void);
+
+/**
+ * Get platform name ("ios" or "macos").
+ *
+ * @return Platform name as null-terminated string
+ */
+const char* softether_ios_platform(void);
+
 #ifdef __cplusplus
 }
 #endif
