@@ -80,8 +80,15 @@ pub use callbacks::*;
 pub use client::*;
 pub use types::*;
 
-#[cfg(feature = "jni")]
-mod jni;
+// Platform-specific modules
+#[cfg(feature = "android")]
+mod android;
 
-#[cfg(feature = "jni")]
-pub use jni::*;
+#[cfg(feature = "android")]
+pub use android::*;
+
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+mod ios;
+
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+pub use ios::*;

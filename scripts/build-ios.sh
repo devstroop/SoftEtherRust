@@ -69,7 +69,7 @@ build_ios() {
     
     # Device (arm64)
     log_info "  Building aarch64-apple-ios (deployment target: $IPHONEOS_DEPLOYMENT_TARGET)..."
-    cargo build --release --target aarch64-apple-ios --features ffi
+    cargo build --release --target aarch64-apple-ios --features ios
     
     # Create output directory
     mkdir -p target/ios

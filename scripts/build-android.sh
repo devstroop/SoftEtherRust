@@ -107,16 +107,16 @@ build_android() {
     
     # Build for each architecture
     log_info "  Building aarch64-linux-android (arm64-v8a)..."
-    cargo build --release --target aarch64-linux-android --features ffi,jni
+    cargo build --release --target aarch64-linux-android --features android
     
     log_info "  Building armv7-linux-androideabi (armeabi-v7a)..."
-    cargo build --release --target armv7-linux-androideabi --features ffi,jni
+    cargo build --release --target armv7-linux-androideabi --features android
     
     log_info "  Building x86_64-linux-android (x86_64)..."
-    cargo build --release --target x86_64-linux-android --features ffi,jni
+    cargo build --release --target x86_64-linux-android --features android
     
     log_info "  Building i686-linux-android (x86)..."
-    cargo build --release --target i686-linux-android --features ffi,jni
+    cargo build --release --target i686-linux-android --features android
     
     # Create output directories
     mkdir -p target/android/jniLibs/arm64-v8a
@@ -160,7 +160,7 @@ build_android_arm64() {
     export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$NDK_HOST/bin/aarch64-linux-android21-clang$LINKER_EXT"
     
     log_info "  Building aarch64-linux-android (arm64-v8a)..."
-    cargo build --release --target aarch64-linux-android --features ffi,jni
+    cargo build --release --target aarch64-linux-android --features android
     
     mkdir -p target/android/jniLibs/arm64-v8a
     cp target/aarch64-linux-android/release/libsoftether.so target/android/jniLibs/arm64-v8a/

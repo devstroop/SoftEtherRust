@@ -1,4 +1,4 @@
-//! JNI (Java Native Interface) bindings for Android.
+//! Android platform bindings via JNI (Java Native Interface).
 //!
 //! This module provides JNI-compatible functions that can be called directly
 //! from Kotlin/Java on Android. These functions wrap the C FFI layer.

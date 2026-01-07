@@ -17,7 +17,8 @@ crate-type = ["lib", "staticlib", "cdylib"]
 [features]
 default = []
 ffi = []
-jni = ["ffi", "dep:jni"]
+android = ["ffi", "dep:jni"]
+ios = ["ffi"]
 
 [dependencies]
 # Async runtime

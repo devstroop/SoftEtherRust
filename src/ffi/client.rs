@@ -878,7 +878,7 @@ async fn connect_and_run_inner(
 
     // Create session info from DHCP config (include MAC for Kotlin to use)
     let session =
-        create_session_from_dhcp(&dhcp_config, dhcpv6_config.as_ref(), actual_server_ip, mac);
+        create_session_from_dhcp(&dhcp_config, dhcpv6_config.as_ref(), actual_server_ip, server_ip, mac);
 
     // Notify connected with session info
     log_message(callbacks, 1, "[RUST] Notifying Android of connection...");
@@ -971,6 +971,7 @@ fn create_session_from_dhcp(
     dhcp: &DhcpConfig,
     dhcpv6: Option<&Dhcpv6Config>,
     server_ip: Ipv4Addr,
+    original_server_ip: Ipv4Addr,
     mac: [u8; 6],
 ) -> SoftEtherSession {
     let mut server_ip_str = [0 as std::ffi::c_char; 64];
@@ -978,6 +979,14 @@ fn create_session_from_dhcp(
     for (i, b) in ip_string.bytes().enumerate() {
         if i < 63 {
             server_ip_str[i] = b as std::ffi::c_char;
+        }
+    }
+
+    let mut original_ip_str = [0 as std::ffi::c_char; 64];
+    let orig_ip_string = format!("{original_server_ip}");
+    for (i, b) in orig_ip_string.bytes().enumerate() {
+        if i < 63 {
+            original_ip_str[i] = b as std::ffi::c_char;
         }
     }
 
@@ -1008,6 +1017,7 @@ fn create_session_from_dhcp(
         dns1: dhcp.dns1.map(ip_to_u32).unwrap_or(0),
         dns2: dhcp.dns2.map(ip_to_u32).unwrap_or(0),
         connected_server_ip: server_ip_str,
+        original_server_ip: original_ip_str,
         server_version: 0,
         server_build: 0,
         mac_address: mac,
@@ -1724,12 +1734,23 @@ async fn run_packet_loop(
             result = tokio::time::timeout(Duration::from_millis(500), conn_mgr.read_any(&mut read_buf)) => {
                 match result {
                     Ok(Ok((_conn_idx, n))) if n > 0 => {
+                        // Log raw receive for debugging
+                        log_msg(&callbacks, 1, &format!("[RUST] RX: {} bytes from server", n));
+                        
+                        // Log first 16 bytes as hex for debugging
+                        let hex_preview: String = read_buf[..n.min(16)].iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        log_msg(&callbacks, 1, &format!("[RUST] RX raw: {}", hex_preview));
+                        
                         // Decrypt if RC4 is enabled
                         if let Some(ref mut enc) = encryption {
                             enc.decrypt(&mut read_buf[..n]);
                         }
 
                         if let Ok(frames) = tunnel_codec.decode(&read_buf[..n]) {
+                            log_msg(&callbacks, 1, &format!("[RUST] RX: decoded {} frames", frames.len()));
                             if !frames.is_empty() {
                                 // Build length-prefixed buffer for callback
                                 let mut buffer = Vec::with_capacity(n + frames.len() * 2);
@@ -1741,6 +1762,13 @@ async fn run_packet_loop(
                                     } else {
                                         frame.to_vec()
                                     };
+                                    
+                                    // Log first 20 bytes of decompressed frame for debugging
+                                    let hex_preview: String = frame_data[..frame_data.len().min(20)].iter()
+                                        .map(|b| format!("{:02x}", b))
+                                        .collect::<Vec<_>>()
+                                        .join(" ");
+                                    log_msg(&callbacks, 1, &format!("[RUST] Frame {} bytes: {}", frame_data.len(), hex_preview));
 
                                     // Process ARP packets for gateway MAC learning
                                     if frame_data.len() >= 14 {
@@ -2400,6 +2428,7 @@ impl Clone for SoftEtherSession {
             dns1: self.dns1,
             dns2: self.dns2,
             connected_server_ip: self.connected_server_ip,
+            original_server_ip: self.original_server_ip,
             server_version: self.server_version,
             server_build: self.server_build,
             mac_address: self.mac_address,

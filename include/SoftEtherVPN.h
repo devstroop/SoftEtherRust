@@ -113,7 +113,8 @@ typedef struct {
     uint32_t gateway;             // Gateway IP (network byte order)
     uint32_t dns1;                // Primary DNS (network byte order)
     uint32_t dns2;                // Secondary DNS (network byte order)
-    char connected_server_ip[64]; // Actual server IP (for route exclusion)
+    char connected_server_ip[64]; // Actual server IP (cluster server, for route exclusion)
+    char original_server_ip[64];  // Original resolved server IP (before redirect, for route exclusion)
     uint32_t server_version;      // Server version
     uint32_t server_build;        // Server build number
     uint8_t mac_address[6];       // MAC address assigned to this session
