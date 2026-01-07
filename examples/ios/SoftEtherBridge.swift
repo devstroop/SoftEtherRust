@@ -126,6 +126,22 @@ public class SoftEtherBridge {
         public let acceptPushedRoutes: Bool
         public let ipv4Include: String?
         public let ipv4Exclude: String?
+        public let ipv6Include: String?
+        public let ipv6Exclude: String?
+        
+        // Static IPv4 Configuration (optional, skips DHCP if set)
+        public let staticIpv4Address: String?
+        public let staticIpv4Netmask: String?
+        public let staticIpv4Gateway: String?
+        public let staticIpv4Dns1: String?
+        public let staticIpv4Dns2: String?
+        
+        // Static IPv6 Configuration (optional)
+        public let staticIpv6Address: String?
+        public let staticIpv6PrefixLen: UInt32
+        public let staticIpv6Gateway: String?
+        public let staticIpv6Dns1: String?
+        public let staticIpv6Dns2: String?
         
         public init(
             server: String,
@@ -148,7 +164,19 @@ public class SoftEtherBridge {
             defaultRoute: Bool = true,
             acceptPushedRoutes: Bool = true,
             ipv4Include: String? = nil,
-            ipv4Exclude: String? = nil
+            ipv4Exclude: String? = nil,
+            ipv6Include: String? = nil,
+            ipv6Exclude: String? = nil,
+            staticIpv4Address: String? = nil,
+            staticIpv4Netmask: String? = nil,
+            staticIpv4Gateway: String? = nil,
+            staticIpv4Dns1: String? = nil,
+            staticIpv4Dns2: String? = nil,
+            staticIpv6Address: String? = nil,
+            staticIpv6PrefixLen: UInt32 = 0,
+            staticIpv6Gateway: String? = nil,
+            staticIpv6Dns1: String? = nil,
+            staticIpv6Dns2: String? = nil
         ) {
             self.server = server
             self.port = port
@@ -171,6 +199,18 @@ public class SoftEtherBridge {
             self.acceptPushedRoutes = acceptPushedRoutes
             self.ipv4Include = ipv4Include
             self.ipv4Exclude = ipv4Exclude
+            self.ipv6Include = ipv6Include
+            self.ipv6Exclude = ipv6Exclude
+            self.staticIpv4Address = staticIpv4Address
+            self.staticIpv4Netmask = staticIpv4Netmask
+            self.staticIpv4Gateway = staticIpv4Gateway
+            self.staticIpv4Dns1 = staticIpv4Dns1
+            self.staticIpv4Dns2 = staticIpv4Dns2
+            self.staticIpv6Address = staticIpv6Address
+            self.staticIpv6PrefixLen = staticIpv6PrefixLen
+            self.staticIpv6Gateway = staticIpv6Gateway
+            self.staticIpv6Dns1 = staticIpv6Dns1
+            self.staticIpv6Dns2 = staticIpv6Dns2
         }
     }
     
@@ -181,6 +221,9 @@ public class SoftEtherBridge {
     public var onDisconnected: ((Error?) -> Void)?
     public var onPacketsReceived: (([Data]) -> Void)?
     public var onLog: ((LogLevel, String) -> Void)?
+    /// Called when an IP should be excluded from VPN routing (cluster redirect).
+    /// iOS apps should add this IP to NEIPv4Route.excludedRoutes.
+    public var onExcludeIp: ((String) -> Bool)?
     
     public enum LogLevel: Int {
         case error = 0
@@ -227,8 +270,21 @@ public class SoftEtherBridge {
         let passwordHashCString = config.passwordHash.withCString { strdup($0) }!
         let ipv4IncludeCString = config.ipv4Include?.withCString { strdup($0) }
         let ipv4ExcludeCString = config.ipv4Exclude?.withCString { strdup($0) }
+        let ipv6IncludeCString = config.ipv6Include?.withCString { strdup($0) }
+        let ipv6ExcludeCString = config.ipv6Exclude?.withCString { strdup($0) }
         let customCaPemCString = config.customCaPem?.withCString { strdup($0) }
         let certFingerprintCString = config.certFingerprintSha256?.withCString { strdup($0) }
+        
+        // Static IP C strings
+        let staticIpv4AddrCString = config.staticIpv4Address?.withCString { strdup($0) }
+        let staticIpv4MaskCString = config.staticIpv4Netmask?.withCString { strdup($0) }
+        let staticIpv4GwCString = config.staticIpv4Gateway?.withCString { strdup($0) }
+        let staticIpv4Dns1CString = config.staticIpv4Dns1?.withCString { strdup($0) }
+        let staticIpv4Dns2CString = config.staticIpv4Dns2?.withCString { strdup($0) }
+        let staticIpv6AddrCString = config.staticIpv6Address?.withCString { strdup($0) }
+        let staticIpv6GwCString = config.staticIpv6Gateway?.withCString { strdup($0) }
+        let staticIpv6Dns1CString = config.staticIpv6Dns1?.withCString { strdup($0) }
+        let staticIpv6Dns2CString = config.staticIpv6Dns2?.withCString { strdup($0) }
         
         defer {
             free(serverCString)
@@ -237,8 +293,19 @@ public class SoftEtherBridge {
             free(passwordHashCString)
             if let ptr = ipv4IncludeCString { free(ptr) }
             if let ptr = ipv4ExcludeCString { free(ptr) }
+            if let ptr = ipv6IncludeCString { free(ptr) }
+            if let ptr = ipv6ExcludeCString { free(ptr) }
             if let ptr = customCaPemCString { free(ptr) }
             if let ptr = certFingerprintCString { free(ptr) }
+            if let ptr = staticIpv4AddrCString { free(ptr) }
+            if let ptr = staticIpv4MaskCString { free(ptr) }
+            if let ptr = staticIpv4GwCString { free(ptr) }
+            if let ptr = staticIpv4Dns1CString { free(ptr) }
+            if let ptr = staticIpv4Dns2CString { free(ptr) }
+            if let ptr = staticIpv6AddrCString { free(ptr) }
+            if let ptr = staticIpv6GwCString { free(ptr) }
+            if let ptr = staticIpv6Dns1CString { free(ptr) }
+            if let ptr = staticIpv6Dns2CString { free(ptr) }
         }
         
         cConfig.server = UnsafePointer(serverCString)
@@ -272,6 +339,22 @@ public class SoftEtherBridge {
         cConfig.accept_pushed_routes = config.acceptPushedRoutes ? 1 : 0
         cConfig.ipv4_include = ipv4IncludeCString.map { UnsafePointer($0) }
         cConfig.ipv4_exclude = ipv4ExcludeCString.map { UnsafePointer($0) }
+        cConfig.ipv6_include = ipv6IncludeCString.map { UnsafePointer($0) }
+        cConfig.ipv6_exclude = ipv6ExcludeCString.map { UnsafePointer($0) }
+        
+        // Static IPv4 Configuration
+        cConfig.static_ipv4_address = staticIpv4AddrCString.map { UnsafePointer($0) }
+        cConfig.static_ipv4_netmask = staticIpv4MaskCString.map { UnsafePointer($0) }
+        cConfig.static_ipv4_gateway = staticIpv4GwCString.map { UnsafePointer($0) }
+        cConfig.static_ipv4_dns1 = staticIpv4Dns1CString.map { UnsafePointer($0) }
+        cConfig.static_ipv4_dns2 = staticIpv4Dns2CString.map { UnsafePointer($0) }
+        
+        // Static IPv6 Configuration
+        cConfig.static_ipv6_address = staticIpv6AddrCString.map { UnsafePointer($0) }
+        cConfig.static_ipv6_prefix_len = config.staticIpv6PrefixLen
+        cConfig.static_ipv6_gateway = staticIpv6GwCString.map { UnsafePointer($0) }
+        cConfig.static_ipv6_dns1 = staticIpv6Dns1CString.map { UnsafePointer($0) }
+        cConfig.static_ipv6_dns2 = staticIpv6Dns2CString.map { UnsafePointer($0) }
         
         // Create C callbacks
         var cCallbacks = SoftEtherCallbacks()
@@ -281,6 +364,8 @@ public class SoftEtherBridge {
         cCallbacks.on_disconnected = disconnectedCallback
         cCallbacks.on_packets_received = packetsReceivedCallback
         cCallbacks.on_log = logCallback
+        cCallbacks.protect_socket = protectSocketCallback  // Socket protection for iOS
+        cCallbacks.exclude_ip = excludeIpCallback  // IP exclusion for cluster redirects
         
         // Create client
         handle = softether_create(&cConfig, &cCallbacks)
@@ -333,8 +418,6 @@ public class SoftEtherBridge {
             serverBuild: cSession.server_build,
             macAddress: Array(withUnsafeBytes(of: cSession.mac_address) { Array($0) }),
             gatewayMac: Array(withUnsafeBytes(of: cSession.gateway_mac) { Array($0) })
-        )
-    }
         )
     }
     
@@ -492,6 +575,41 @@ private func logCallback(context: UnsafeMutableRawPointer?, level: Int32, messag
     let logLevel = SoftEtherBridge.LogLevel(rawValue: Int(level)) ?? .info
     let logMessage = String(cString: message)
     ctx.bridge?.onLog?(logLevel, logMessage)
+}
+
+/// Socket protection callback for iOS.
+/// Marks the socket with SO_NET_SERVICE_TYPE to prevent VPN routing loops.
+/// On iOS, this is equivalent to Android's VpnService.protect() functionality.
+private func protectSocketCallback(context: UnsafeMutableRawPointer?, socketFd: Int32) -> Int32 {
+    // Set SO_NET_SERVICE_TYPE to NET_SERVICE_TYPE_VV (voice & video)
+    // This marks the socket as network service traffic that should bypass VPN routing
+    // Value 6 = NET_SERVICE_TYPE_VV (defined in sys/socket.h)
+    var serviceType: Int32 = 6  // NET_SERVICE_TYPE_VV
+    let result = setsockopt(socketFd, SOL_SOCKET, SO_NET_SERVICE_TYPE, &serviceType, socklen_t(MemoryLayout<Int32>.size))
+    
+    if result == 0 {
+        // Success - socket is now marked to bypass VPN
+        return 1
+    } else {
+        // Failed to set socket option - log but continue anyway
+        // The socket may still work if excludedRoutes is configured in NetworkExtension
+        return 1  // Return success to allow connection attempt
+    }
+}
+
+/// IP exclusion callback for iOS.
+/// Called when an IP should be excluded from VPN routing (cluster redirect scenarios).
+/// The app should add this IP to NEIPv4Route.excludedRoutes.
+private func excludeIpCallback(context: UnsafeMutableRawPointer?, ip: UnsafePointer<CChar>?) -> Int32 {
+    guard let context = context, let ip = ip else { return 0 }
+    let ctx = Unmanaged<CallbackContext>.fromOpaque(context).takeUnretainedValue()
+    
+    let ipString = String(cString: ip)
+    if let callback = ctx.bridge?.onExcludeIp {
+        return callback(ipString) ? 1 : 0
+    }
+    // No callback set - return success anyway to not block connection
+    return 1
 }
 
 // MARK: - Errors

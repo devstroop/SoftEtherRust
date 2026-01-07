@@ -15,8 +15,25 @@
     "default_route": false,
     "accept_pushed_routes": true,
     "ipv4_include": [],
-    "ipv4_exclude": []
+    "ipv4_exclude": [],
+    "ipv6_include": [],
+    "ipv6_exclude": []
   },
   "qos": false,
-  "timeout_seconds": 30
+  "timeout_seconds": 30,
+  
+  "_comment_static_ip": "Static IP configuration (optional). When set, DHCP is skipped.",
+  "static_ip": {
+    "_comment": "Set these fields to use a static IP instead of DHCP",
+    "ipv4_address": null,
+    "ipv4_netmask": null,
+    "ipv4_gateway": null,
+    "ipv4_dns1": null,
+    "ipv4_dns2": null,
+    "ipv6_address": null,
+    "ipv6_prefix_len": null,
+    "ipv6_gateway": null,
+    "ipv6_dns1": null,
+    "ipv6_dns2": null
+  }
 }

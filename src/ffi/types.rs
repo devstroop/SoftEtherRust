@@ -104,12 +104,40 @@ pub struct SoftEtherConfig {
     pub ipv4_include: *const c_char,
     /// Comma-separated CIDRs to exclude from VPN routing (null-terminated UTF-8, can be null).
     pub ipv4_exclude: *const c_char,
+    /// Comma-separated IPv6 CIDRs to include in VPN routing (null-terminated UTF-8, can be null).
+    pub ipv6_include: *const c_char,
+    /// Comma-separated IPv6 CIDRs to exclude from VPN routing (null-terminated UTF-8, can be null).
+    pub ipv6_exclude: *const c_char,
+
+    // Static IPv4 Configuration (optional, skips DHCP if set)
+    /// Static IPv4 address (null-terminated UTF-8, e.g., "10.0.0.100", can be null for DHCP).
+    pub static_ipv4_address: *const c_char,
+    /// Static IPv4 netmask (null-terminated UTF-8, e.g., "255.255.255.0", can be null).
+    pub static_ipv4_netmask: *const c_char,
+    /// Static IPv4 gateway (null-terminated UTF-8, can be null).
+    pub static_ipv4_gateway: *const c_char,
+    /// Static IPv4 primary DNS (null-terminated UTF-8, can be null).
+    pub static_ipv4_dns1: *const c_char,
+    /// Static IPv4 secondary DNS (null-terminated UTF-8, can be null).
+    pub static_ipv4_dns2: *const c_char,
+
+    // Static IPv6 Configuration (optional)
+    /// Static IPv6 address (null-terminated UTF-8, e.g., "2001:db8::1", can be null for SLAAC/DHCPv6).
+    pub static_ipv6_address: *const c_char,
+    /// Static IPv6 prefix length (0-128, 0 = not set).
+    pub static_ipv6_prefix_len: c_uint,
+    /// Static IPv6 gateway (null-terminated UTF-8, can be null).
+    pub static_ipv6_gateway: *const c_char,
+    /// Static IPv6 primary DNS (null-terminated UTF-8, can be null).
+    pub static_ipv6_dns1: *const c_char,
+    /// Static IPv6 secondary DNS (null-terminated UTF-8, can be null).
+    pub static_ipv6_dns2: *const c_char,
 }
 
 /// Session information returned after successful connection.
 #[repr(C)]
 pub struct SoftEtherSession {
-    /// Assigned IP address (network byte order).
+    /// Assigned IPv4 address (network byte order).
     pub ip_address: u32,
     /// Subnet mask (network byte order).
     pub subnet_mask: u32,
@@ -130,6 +158,16 @@ pub struct SoftEtherSession {
     pub mac_address: [u8; 6],
     /// Gateway MAC address (6 bytes, 0 if unknown).
     pub gateway_mac: [u8; 6],
+    /// IPv6 address (16 bytes, 0 if not assigned).
+    pub ipv6_address: [u8; 16],
+    /// IPv6 prefix length (e.g., 64 or 128).
+    pub ipv6_prefix_len: u8,
+    /// Padding for alignment.
+    pub _padding: [u8; 3],
+    /// Primary IPv6 DNS server (16 bytes, 0 if not available).
+    pub dns1_v6: [u8; 16],
+    /// Secondary IPv6 DNS server (16 bytes, 0 if not available).
+    pub dns2_v6: [u8; 16],
 }
 
 /// Packet buffer for sending/receiving.
@@ -174,8 +212,19 @@ pub struct SoftEtherStats {
 /// This is actually a pointer to the internal Rust struct.
 pub type SoftEtherHandle = *mut c_void;
 
-/// Null handle constant.
-pub const SOFTETHER_HANDLE_NULL: SoftEtherHandle = std::ptr::null_mut();
+/// Wrapper type for thread-safe static export of null handle.
+/// Raw pointers don't implement Sync, so we wrap in a newtype.
+#[repr(transparent)]
+pub struct NullHandle(pub *mut c_void);
+unsafe impl Sync for NullHandle {}
+
+/// Null handle constant exported for Swift interoperability.
+/// C macros aren't imported by Swift, so we export this as a proper symbol.
+#[no_mangle]
+pub static SOFTETHER_HANDLE_NULL: NullHandle = NullHandle(std::ptr::null_mut());
+
+/// Internal constant for use within Rust code.
+pub(crate) const NULL_HANDLE: SoftEtherHandle = std::ptr::null_mut();
 
 // Helper functions for FFI
 
@@ -208,6 +257,11 @@ impl Default for SoftEtherSession {
             server_build: 0,
             mac_address: [0; 6],
             gateway_mac: [0; 6],
+            ipv6_address: [0; 16],
+            ipv6_prefix_len: 0,
+            _padding: [0; 3],
+            dns1_v6: [0; 16],
+            dns2_v6: [0; 16],
         }
     }
 }

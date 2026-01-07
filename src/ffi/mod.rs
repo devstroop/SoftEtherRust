@@ -72,6 +72,8 @@
 
 mod callbacks;
 mod client;
+mod connection;
+mod packet_loop;
 mod types;
 
 pub use callbacks::*;

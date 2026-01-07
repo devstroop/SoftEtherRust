@@ -100,6 +100,13 @@ pub struct VpnConfig {
     // ─────────────────────────────────────────────────────────────────────────
     /// Routing configuration for VPN traffic.
     pub routing: RoutingConfig,
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Static IP Configuration (Optional)
+    // ─────────────────────────────────────────────────────────────────────────
+    /// Static IP configuration. When set, DHCP is skipped.
+    #[serde(default)]
+    pub static_ip: Option<StaticIpConfig>,
 }
 
 /// Routing configuration for VPN traffic.
@@ -142,6 +149,114 @@ impl Default for RoutingConfig {
             ipv6_include: Vec::new(),
             ipv6_exclude: Vec::new(),
         }
+    }
+}
+
+/// Static IP configuration for when DHCP is not used.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct StaticIpConfig {
+    // ─────────────────────────────────────────────────────────────────────────
+    // IPv4 Static Configuration
+    // ─────────────────────────────────────────────────────────────────────────
+    /// Static IPv4 address (e.g., "10.0.0.100").
+    #[serde(default)]
+    pub ipv4_address: Option<String>,
+
+    /// IPv4 subnet mask (e.g., "255.255.255.0").
+    #[serde(default)]
+    pub ipv4_netmask: Option<String>,
+
+    /// IPv4 gateway address (e.g., "10.0.0.1").
+    #[serde(default)]
+    pub ipv4_gateway: Option<String>,
+
+    /// Primary IPv4 DNS server.
+    #[serde(default)]
+    pub ipv4_dns1: Option<String>,
+
+    /// Secondary IPv4 DNS server.
+    #[serde(default)]
+    pub ipv4_dns2: Option<String>,
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // IPv6 Static Configuration
+    // ─────────────────────────────────────────────────────────────────────────
+    /// Static IPv6 address (e.g., "2001:db8::1").
+    #[serde(default)]
+    pub ipv6_address: Option<String>,
+
+    /// IPv6 prefix length (e.g., 64).
+    #[serde(default)]
+    pub ipv6_prefix_len: Option<u8>,
+
+    /// IPv6 gateway address.
+    #[serde(default)]
+    pub ipv6_gateway: Option<String>,
+
+    /// Primary IPv6 DNS server.
+    #[serde(default)]
+    pub ipv6_dns1: Option<String>,
+
+    /// Secondary IPv6 DNS server.
+    #[serde(default)]
+    pub ipv6_dns2: Option<String>,
+}
+
+impl StaticIpConfig {
+    /// Check if IPv4 static configuration is complete.
+    pub fn has_ipv4(&self) -> bool {
+        self.ipv4_address.is_some() && self.ipv4_netmask.is_some()
+    }
+
+    /// Check if IPv6 static configuration is complete.
+    pub fn has_ipv6(&self) -> bool {
+        self.ipv6_address.is_some() && self.ipv6_prefix_len.is_some()
+    }
+
+    /// Parse IPv4 address.
+    pub fn parse_ipv4_address(&self) -> Option<Ipv4Addr> {
+        self.ipv4_address.as_ref()?.parse().ok()
+    }
+
+    /// Parse IPv4 netmask.
+    pub fn parse_ipv4_netmask(&self) -> Option<Ipv4Addr> {
+        self.ipv4_netmask.as_ref()?.parse().ok()
+    }
+
+    /// Parse IPv4 gateway.
+    pub fn parse_ipv4_gateway(&self) -> Option<Ipv4Addr> {
+        self.ipv4_gateway.as_ref()?.parse().ok()
+    }
+
+    /// Parse IPv4 DNS1.
+    pub fn parse_ipv4_dns1(&self) -> Option<Ipv4Addr> {
+        self.ipv4_dns1.as_ref()?.parse().ok()
+    }
+
+    /// Parse IPv4 DNS2.
+    pub fn parse_ipv4_dns2(&self) -> Option<Ipv4Addr> {
+        self.ipv4_dns2.as_ref()?.parse().ok()
+    }
+
+    /// Parse IPv6 address.
+    pub fn parse_ipv6_address(&self) -> Option<std::net::Ipv6Addr> {
+        self.ipv6_address.as_ref()?.parse().ok()
+    }
+
+    /// Parse IPv6 gateway.
+    pub fn parse_ipv6_gateway(&self) -> Option<std::net::Ipv6Addr> {
+        self.ipv6_gateway.as_ref()?.parse().ok()
+    }
+
+    /// Parse IPv6 DNS1.
+    pub fn parse_ipv6_dns1(&self) -> Option<std::net::Ipv6Addr> {
+        self.ipv6_dns1.as_ref()?.parse().ok()
+    }
+
+    /// Parse IPv6 DNS2.
+    pub fn parse_ipv6_dns2(&self) -> Option<std::net::Ipv6Addr> {
+        self.ipv6_dns2.as_ref()?.parse().ok()
     }
 }
 
@@ -197,6 +312,8 @@ impl Default for VpnConfig {
             mtu: 1400,
             // Routing
             routing: RoutingConfig::default(),
+            // Static IP
+            static_ip: None,
         }
     }
 }

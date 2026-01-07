@@ -96,6 +96,8 @@ pub struct AuthResult {
     pub rc4_key_pair: Option<Rc4KeyPair>,
     /// Whether to use SSL/TLS layer for data encryption (when use_encrypt=true but UseFastRC4=false).
     pub use_ssl_data_encryption: bool,
+    /// UDP acceleration server response (if server supports it).
+    pub udp_accel_response: Option<UdpAccelServerResponse>,
 }
 
 /// Redirect information for cluster server setup.
@@ -121,6 +123,11 @@ impl RedirectInfo {
 impl AuthResult {
     /// Parse an authentication result from a Pack.
     pub fn from_pack(pack: &Pack) -> Result<Self> {
+        Self::from_pack_with_remote(pack, None)
+    }
+
+    /// Parse an authentication result from a Pack with optional remote IP for UDP accel.
+    pub fn from_pack_with_remote(pack: &Pack, remote_ip: Option<IpAddr>) -> Result<Self> {
         let error = pack.get_int("error").unwrap_or(0);
 
         if error != 0 {
@@ -134,6 +141,7 @@ impl AuthResult {
                 direction: 0,
                 rc4_key_pair: None,
                 use_ssl_data_encryption: false,
+                udp_accel_response: None,
             });
         }
 
@@ -158,6 +166,7 @@ impl AuthResult {
                 direction: 0,
                 rc4_key_pair: None,
                 use_ssl_data_encryption: false,
+                udp_accel_response: None,
             });
         }
 
@@ -173,6 +182,9 @@ impl AuthResult {
         // - If no RC4 keys but use_encrypt was requested -> UseSSLDataEncryption mode (TLS layer handles it)
         let use_ssl_data_encryption = rc4_key_pair.is_none();
 
+        // Parse UDP acceleration response if server supports it
+        let udp_accel_response = remote_ip.and_then(|ip| Self::parse_udp_accel_response(pack, ip));
+
         Ok(Self {
             success: true,
             error: 0,
@@ -182,6 +194,7 @@ impl AuthResult {
             direction,
             rc4_key_pair,
             use_ssl_data_encryption,
+            udp_accel_response,
         })
     }
 

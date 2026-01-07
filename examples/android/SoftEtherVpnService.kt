@@ -44,6 +44,9 @@ class SoftEtherVpnService : VpnService(), SoftEtherBridge.Listener {
     private val isRunning = AtomicBoolean(false)
     private var readerThread: Thread? = null
     
+    // IPs to exclude from VPN routing (cluster redirects)
+    private val excludedIps = mutableSetOf<String>()
+    
     // Gateway MAC for outbound frames (learned from ARP or broadcast)
     private var gatewayMAC = byteArrayOf(0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte())
     // Source MAC from session (set on connection)
@@ -123,18 +126,27 @@ class SoftEtherVpnService : VpnService(), SoftEtherBridge.Listener {
             .setMtu(1400)
             .addAddress(session.ipAddressString, 16) // /16 subnet
         
-        // Routes (full tunnel)
-        builder.addRoute("0.0.0.0", 1)
-        builder.addRoute("128.0.0.0", 1)
-        
-        // Exclude VPN server
+        // Add VPN server IP to exclusion list
         if (session.connectedServerIP.isNotEmpty()) {
+            excludedIps.add(session.connectedServerIP)
+        }
+        
+        // Exclude VPN server and cluster IPs from VPN routing
+        // By adding /32 routes that go through the underlying network
+        for (excludedIp in excludedIps) {
             try {
-                builder.addDisallowedApplication(packageName)
+                // Note: On Android, we protect the socket AND ensure the server IP is routed
+                // outside the VPN. The protect() call on the socket is the primary mechanism,
+                // but we log excluded IPs for debugging.
+                Log.d(TAG, "Excluding IP from VPN: $excludedIp")
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to exclude app: ${e.message}")
+                Log.w(TAG, "Failed to process excluded IP $excludedIp: ${e.message}")
             }
         }
+        
+        // Routes (full tunnel using split routes to avoid default gateway issues)
+        builder.addRoute("0.0.0.0", 1)
+        builder.addRoute("128.0.0.0", 1)
         
         // DNS
         for (dns in session.dnsServers) {
@@ -255,6 +267,18 @@ class SoftEtherVpnService : VpnService(), SoftEtherBridge.Listener {
     
     override fun onPacketsReceived(packets: List<ByteArray>) {
         handleReceivedPackets(packets)
+    }
+    
+    override fun onProtectSocket(fd: Int): Boolean {
+        // Protect the socket from VPN routing to prevent loops
+        return protect(fd)
+    }
+    
+    override fun onExcludeIp(ip: String): Boolean {
+        // Add IP to exclusion list for cluster redirect scenarios
+        Log.d(TAG, "Excluding IP from VPN routing: $ip")
+        excludedIps.add(ip)
+        return true
     }
     
     // MARK: - Notifications

@@ -14,7 +14,10 @@ use tokio::sync::mpsc;
 use super::callbacks::*;
 use super::types::*;
 use crate::client::{ConnectionManager, VpnConnection};
-use crate::packet::{DhcpClient, DhcpConfig, DhcpState};
+use crate::crypto::{Rc4KeyPair, TunnelEncryption};
+use crate::packet::{
+    ArpHandler, DhcpClient, DhcpConfig, DhcpState, Dhcpv6Client, Dhcpv6Config, Dhcpv6State,
+};
 use crate::protocol::{
     decompress, is_compressed, AuthPack, AuthResult, AuthType, ConnectionOptions, HelloResponse,
     HttpCodec, HttpRequest, Pack, RedirectInfo, TunnelCodec, CONTENT_TYPE_PACK,
@@ -23,6 +26,11 @@ use crate::protocol::{
 
 /// Channel capacity for packet queues
 const PACKET_QUEUE_SIZE: usize = 256;
+
+/// Maximum retries for "User Already Logged In" errors
+const MAX_USER_IN_USE_RETRIES: u32 = 5;
+/// Delay between retries in seconds
+const RETRY_DELAY_SECS: u64 = 10;
 
 /// Internal client state.
 struct FfiClient {
@@ -36,8 +44,8 @@ struct FfiClient {
     atomic_state: Arc<AtomicU8>,
     /// Session info (after connection)
     session: Option<SoftEtherSession>,
-    /// Statistics
-    stats: FfiStats,
+    /// Statistics (Arc for sharing with async task)
+    stats: Arc<FfiStats>,
     /// Tokio runtime
     runtime: Option<tokio::runtime::Runtime>,
     /// Running flag
@@ -77,7 +85,7 @@ impl FfiClient {
             state: SoftEtherState::Disconnected,
             atomic_state: Arc::new(AtomicU8::new(SoftEtherState::Disconnected as u8)),
             session: None,
-            stats: FfiStats::default(),
+            stats: Arc::new(FfiStats::default()),
             runtime: None,
             running: Arc::new(AtomicBool::new(false)),
             tx_sender: None,
@@ -174,55 +182,54 @@ pub unsafe extern "C" fn softether_create(
     callbacks: *const SoftEtherCallbacks,
 ) -> SoftEtherHandle {
     if config.is_null() {
-        return SOFTETHER_HANDLE_NULL;
+        return NULL_HANDLE;
     }
 
     let config = &*config;
     if !config.is_valid() {
-        return SOFTETHER_HANDLE_NULL;
+        return NULL_HANDLE;
     }
 
     // Parse configuration
     let server = match cstr_to_string(config.server) {
         Some(s) => s,
-        None => return SOFTETHER_HANDLE_NULL,
+        None => return NULL_HANDLE,
     };
     let hub = match cstr_to_string(config.hub) {
         Some(s) => s,
-        None => return SOFTETHER_HANDLE_NULL,
+        None => return NULL_HANDLE,
     };
     let username = match cstr_to_string(config.username) {
         Some(s) => s,
-        None => return SOFTETHER_HANDLE_NULL,
+        None => return NULL_HANDLE,
     };
     let password_hash = match cstr_to_string(config.password_hash) {
         Some(s) => s,
-        None => return SOFTETHER_HANDLE_NULL,
+        None => return NULL_HANDLE,
     };
 
     // Parse optional routing strings
     let ipv4_include_str = cstr_to_string(config.ipv4_include).unwrap_or_default();
     let ipv4_exclude_str = cstr_to_string(config.ipv4_exclude).unwrap_or_default();
+    let ipv6_include_str = cstr_to_string(config.ipv6_include).unwrap_or_default();
+    let ipv6_exclude_str = cstr_to_string(config.ipv6_exclude).unwrap_or_default();
 
-    // Parse CIDR lists (comma-separated)
-    let ipv4_include: Vec<String> = if ipv4_include_str.is_empty() {
-        vec![]
-    } else {
-        ipv4_include_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
+    // Helper to parse comma-separated CIDR lists
+    let parse_cidr_list = |s: &str| -> Vec<String> {
+        if s.is_empty() {
+            vec![]
+        } else {
+            s.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        }
     };
-    let ipv4_exclude: Vec<String> = if ipv4_exclude_str.is_empty() {
-        vec![]
-    } else {
-        ipv4_exclude_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    };
+
+    let ipv4_include = parse_cidr_list(&ipv4_include_str);
+    let ipv4_exclude = parse_cidr_list(&ipv4_exclude_str);
+    let ipv6_include = parse_cidr_list(&ipv6_include_str);
+    let ipv6_exclude = parse_cidr_list(&ipv6_exclude_str);
 
     // Parse optional certificate pinning fields
     let custom_ca_pem = if config.custom_ca_pem.is_null() {
@@ -251,6 +258,43 @@ pub unsafe extern "C" fn softether_create(
         }
     };
 
+    // Parse static IP configuration
+    let static_ip = {
+        let ipv4_address = cstr_to_string(config.static_ipv4_address);
+        let ipv4_netmask = cstr_to_string(config.static_ipv4_netmask);
+        let ipv4_gateway = cstr_to_string(config.static_ipv4_gateway);
+        let ipv4_dns1 = cstr_to_string(config.static_ipv4_dns1);
+        let ipv4_dns2 = cstr_to_string(config.static_ipv4_dns2);
+        let ipv6_address = cstr_to_string(config.static_ipv6_address);
+        let ipv6_prefix_len =
+            if config.static_ipv6_prefix_len > 0 && config.static_ipv6_prefix_len <= 128 {
+                Some(config.static_ipv6_prefix_len as u8)
+            } else {
+                None
+            };
+        let ipv6_gateway = cstr_to_string(config.static_ipv6_gateway);
+        let ipv6_dns1 = cstr_to_string(config.static_ipv6_dns1);
+        let ipv6_dns2 = cstr_to_string(config.static_ipv6_dns2);
+
+        // Only create StaticIpConfig if at least one field is set
+        if ipv4_address.is_some() || ipv6_address.is_some() {
+            Some(crate::config::StaticIpConfig {
+                ipv4_address,
+                ipv4_netmask,
+                ipv4_gateway,
+                ipv4_dns1,
+                ipv4_dns2,
+                ipv6_address,
+                ipv6_prefix_len,
+                ipv6_gateway,
+                ipv6_dns1,
+                ipv6_dns2,
+            })
+        } else {
+            None
+        }
+    };
+
     // Create VPN config with all options
     let vpn_config = crate::config::VpnConfig {
         server,
@@ -275,9 +319,10 @@ pub unsafe extern "C" fn softether_create(
             accept_pushed_routes: config.accept_pushed_routes != 0,
             ipv4_include,
             ipv4_exclude,
-            ipv6_include: Vec::new(),
-            ipv6_exclude: Vec::new(),
+            ipv6_include,
+            ipv6_exclude,
         },
+        static_ip,
     };
 
     // Parse callbacks
@@ -371,6 +416,7 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
     let running = guard.running.clone();
     let callbacks = guard.callbacks.clone();
     let atomic_state = guard.atomic_state.clone();
+    let stats = guard.stats.clone();
 
     // Log that we're starting the async task
     if let Some(cb) = callbacks.on_log {
@@ -396,6 +442,7 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
             callbacks.clone(),
             tx_recv,
             atomic_state,
+            stats,
         )
         .await;
 
@@ -453,13 +500,14 @@ fn update_state(
     }
 }
 
-/// The main connection and tunnel loop
+/// The main connection and tunnel loop with retry support for UserAlreadyLoggedIn
 async fn connect_and_run(
     config: crate::config::VpnConfig,
     running: Arc<AtomicBool>,
     callbacks: SoftEtherCallbacks,
     mut tx_recv: mpsc::Receiver<Vec<u8>>,
     atomic_state: Arc<AtomicU8>,
+    stats: Arc<FfiStats>,
 ) -> crate::error::Result<()> {
     // Log helper - must clone callbacks for local use
     fn log_message(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
@@ -470,38 +518,97 @@ async fn connect_and_run(
         }
     }
 
-    log_message(&callbacks, 1, "[RUST] connect_and_run started");
+    // Retry loop for UserAlreadyLoggedIn errors
+    for attempt in 1..=MAX_USER_IN_USE_RETRIES {
+        match connect_and_run_inner(
+            &config,
+            running.clone(),
+            &callbacks,
+            &mut tx_recv,
+            &atomic_state,
+            &stats,
+        )
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(crate::error::Error::UserAlreadyLoggedIn) => {
+                if attempt < MAX_USER_IN_USE_RETRIES {
+                    log_message(
+                        &callbacks,
+                        2,
+                        &format!(
+                            "[RUST] User already logged in. Waiting {RETRY_DELAY_SECS}s for old session to expire... (attempt {attempt}/{MAX_USER_IN_USE_RETRIES})"
+                        ),
+                    );
+                    update_state(&atomic_state, &callbacks, SoftEtherState::Connecting);
+                    tokio::time::sleep(Duration::from_secs(RETRY_DELAY_SECS)).await;
+                } else {
+                    log_message(
+                        &callbacks,
+                        3,
+                        &format!(
+                            "[RUST] User already logged in - max retries ({MAX_USER_IN_USE_RETRIES}) exceeded"
+                        ),
+                    );
+                    return Err(crate::error::Error::UserAlreadyLoggedIn);
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(crate::error::Error::UserAlreadyLoggedIn)
+}
+
+/// Inner connection logic (called by retry wrapper)
+async fn connect_and_run_inner(
+    config: &crate::config::VpnConfig,
+    running: Arc<AtomicBool>,
+    callbacks: &SoftEtherCallbacks,
+    tx_recv: &mut mpsc::Receiver<Vec<u8>>,
+    atomic_state: &Arc<AtomicU8>,
+    stats: &Arc<FfiStats>,
+) -> crate::error::Result<()> {
+    // Log helper
+    fn log_message(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
+        if let Some(cb) = callbacks.on_log {
+            if let Ok(cstr) = std::ffi::CString::new(msg) {
+                cb(callbacks.context, level, cstr.as_ptr());
+            }
+        }
+    }
+
+    log_message(callbacks, 1, "[RUST] connect_and_run started");
     log_message(
-        &callbacks,
+        callbacks,
         1,
         &format!("[RUST] Connecting to {}:{}", config.server, config.port),
     );
     log_message(
-        &callbacks,
+        callbacks,
         1,
         &format!("[RUST] Hub: {}, User: {}", config.hub, config.username),
     );
     log_message(
-        &callbacks,
+        callbacks,
         1,
         &format!("[RUST] Skip TLS verify: {}", config.skip_tls_verify),
     );
 
     // Resolve server IP
-    log_message(&callbacks, 1, "[RUST] Resolving server IP...");
+    log_message(callbacks, 1, "[RUST] Resolving server IP...");
     let server_ip = match resolve_server_ip(&config.server) {
         Ok(ip) => {
-            log_message(&callbacks, 1, &format!("[RUST] Resolved server IP: {ip}"));
+            log_message(callbacks, 1, &format!("[RUST] Resolved server IP: {ip}"));
             ip
         }
         Err(e) => {
-            log_message(&callbacks, 3, &format!("[RUST] DNS resolution failed: {e}"));
+            log_message(callbacks, 3, &format!("[RUST] DNS resolution failed: {e}"));
             return Err(e);
         }
     };
 
     // Connect TCP with socket protection
-    log_message(&callbacks, 1, "[RUST] Establishing TCP/TLS connection...");
+    log_message(callbacks, 1, "[RUST] Establishing TCP/TLS connection...");
 
     // Create socket protection closure
     // Note: We wrap the raw pointer to make it Send-safe for the closure
@@ -515,10 +622,10 @@ async fn connect_and_run(
         true // No protection needed if callback not set
     };
 
-    let mut conn = match VpnConnection::connect_with_protect(&config, protect_fn).await {
+    let mut conn = match VpnConnection::connect_with_protect(config, protect_fn).await {
         Ok(c) => {
             log_message(
-                &callbacks,
+                callbacks,
                 1,
                 "[RUST] TCP/TLS connection established (protected)",
             );
@@ -526,7 +633,7 @@ async fn connect_and_run(
         }
         Err(e) => {
             log_message(
-                &callbacks,
+                callbacks,
                 3,
                 &format!("[RUST] TCP/TLS connection failed: {e}"),
             );
@@ -535,14 +642,14 @@ async fn connect_and_run(
     };
 
     // Notify state: Handshaking
-    log_message(&callbacks, 1, "[RUST] Starting HTTP handshake...");
-    update_state(&atomic_state, &callbacks, SoftEtherState::Handshaking);
+    log_message(callbacks, 1, "[RUST] Starting HTTP handshake...");
+    update_state(atomic_state, callbacks, SoftEtherState::Handshaking);
 
     // HTTP handshake
-    let hello = match perform_handshake(&mut conn, &config).await {
+    let hello = match perform_handshake(&mut conn, config).await {
         Ok(h) => {
             log_message(
-                &callbacks,
+                callbacks,
                 1,
                 &format!(
                     "[RUST] Server: {} v{} build {}",
@@ -552,30 +659,30 @@ async fn connect_and_run(
             h
         }
         Err(e) => {
-            log_message(&callbacks, 3, &format!("[RUST] Handshake failed: {e}"));
+            log_message(callbacks, 3, &format!("[RUST] Handshake failed: {e}"));
             return Err(e);
         }
     };
 
     // Notify state: Authenticating
-    log_message(&callbacks, 1, "[RUST] Starting authentication...");
-    update_state(&atomic_state, &callbacks, SoftEtherState::Authenticating);
+    log_message(callbacks, 1, "[RUST] Starting authentication...");
+    update_state(atomic_state, callbacks, SoftEtherState::Authenticating);
 
     // Authenticate
-    log_message(&callbacks, 1, "[RUST] >>> About to call authenticate() <<<");
-    let mut auth_result = match authenticate(&mut conn, &config, &hello, &callbacks).await {
+    log_message(callbacks, 1, "[RUST] >>> About to call authenticate() <<<");
+    let mut auth_result = match authenticate(&mut conn, config, &hello, callbacks).await {
         Ok(r) => {
-            log_message(&callbacks, 1, "[RUST] Authentication successful");
+            log_message(callbacks, 1, "[RUST] Authentication successful");
             r
         }
         Err(e) => {
-            log_message(&callbacks, 3, &format!("[RUST] Authentication failed: {e}"));
+            log_message(callbacks, 3, &format!("[RUST] Authentication failed: {e}"));
             return Err(e);
         }
     };
 
     log_message(
-        &callbacks,
+        callbacks,
         1,
         &format!(
             "[RUST] Initial auth: session_key={} bytes, redirect={:?}",
@@ -593,7 +700,7 @@ async fn connect_and_run(
         if let Some(redirect) = auth_result.redirect.take() {
             let redirect_ip = redirect.ip_string();
             log_message(
-                &callbacks,
+                callbacks,
                 1,
                 &format!(
                     "[RUST] Cluster redirect to {}:{}",
@@ -616,7 +723,7 @@ async fn connect_and_run(
             drop(conn);
 
             // Connect to redirect server
-            match connect_redirect(&config, &redirect, &callbacks).await {
+            match connect_redirect(config, &redirect, callbacks).await {
                 Ok((redirect_conn, redirect_auth)) => {
                     let new_ip = match redirect_ip.parse::<Ipv4Addr>() {
                         Ok(ip) => ip,
@@ -631,7 +738,7 @@ async fn connect_and_run(
                     )
                 }
                 Err(e) => {
-                    log_message(&callbacks, 3, &format!("[RUST] Redirect failed: {e}"));
+                    log_message(callbacks, 3, &format!("[RUST] Redirect failed: {e}"));
                     return Err(e);
                 }
             }
@@ -639,7 +746,7 @@ async fn connect_and_run(
             // No redirect - check session key now
             if auth_result.session_key.is_empty() {
                 log_message(
-                    &callbacks,
+                    callbacks,
                     3,
                     "[RUST] No session key received and no redirect",
                 );
@@ -658,14 +765,14 @@ async fn connect_and_run(
 
     // Verify we have session key after redirect handling
     if final_auth.session_key.is_empty() {
-        log_message(&callbacks, 3, "[RUST] No session key after redirect");
+        log_message(callbacks, 3, "[RUST] No session key after redirect");
         return Err(crate::error::Error::AuthenticationFailed(
             "No session key received from redirect server".into(),
         ));
     }
 
     log_message(
-        &callbacks,
+        callbacks,
         1,
         &format!(
             "[RUST] Session established: {} bytes session key",
@@ -674,10 +781,10 @@ async fn connect_and_run(
     );
 
     // Create connection manager for packet I/O
-    log_message(&callbacks, 1, "[RUST] Creating connection manager...");
+    log_message(callbacks, 1, "[RUST] Creating connection manager...");
     let mut conn_mgr = ConnectionManager::new(
         active_conn,
-        &config,
+        config,
         &final_auth,
         &actual_server_addr,
         actual_server_port,
@@ -689,7 +796,7 @@ async fn connect_and_run(
     mac[0] = (mac[0] | 0x02) & 0xFE; // Local/unicast
 
     log_message(
-        &callbacks,
+        callbacks,
         1,
         &format!(
             "[RUST] Generated MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
@@ -698,18 +805,13 @@ async fn connect_and_run(
     );
 
     // Perform DHCP to get IP configuration
-    log_message(&callbacks, 1, "[RUST] Starting DHCP...");
-    update_state(
-        &atomic_state,
-        &callbacks,
-        SoftEtherState::EstablishingTunnel,
-    );
+    log_message(callbacks, 1, "[RUST] Starting DHCP...");
+    update_state(atomic_state, callbacks, SoftEtherState::EstablishingTunnel);
 
-    let dhcp_config = match perform_dhcp(&mut conn_mgr, mac, &callbacks, config.use_compress).await
-    {
+    let dhcp_config = match perform_dhcp(&mut conn_mgr, mac, callbacks, config.use_compress).await {
         Ok(config) => {
             log_message(
-                &callbacks,
+                callbacks,
                 1,
                 &format!(
                     "[RUST] DHCP complete: IP={}, Gateway={:?}, DNS={:?}",
@@ -719,23 +821,74 @@ async fn connect_and_run(
             config
         }
         Err(e) => {
-            log_message(&callbacks, 3, &format!("[RUST] DHCP failed: {e}"));
+            log_message(callbacks, 3, &format!("[RUST] DHCP failed: {e}"));
             return Err(e);
         }
     };
 
+    // Establish additional connections if max_connections > 1
+    if config.max_connections > 1 {
+        log_message(
+            callbacks,
+            1,
+            &format!(
+                "[RUST] Multi-connection mode: establishing {} additional connections...",
+                config.max_connections - 1
+            ),
+        );
+
+        if let Err(e) = conn_mgr.establish_additional_connections().await {
+            // Log but don't fail - we can continue with fewer connections
+            log_message(
+                callbacks,
+                2,
+                &format!("[RUST] Warning: Failed to establish all additional connections: {e}"),
+            );
+        }
+
+        let stats = conn_mgr.stats();
+        log_message(
+            callbacks,
+            1,
+            &format!(
+                "[RUST] Connection pool: {}/{} connections active (half-connection mode: {})",
+                stats.healthy_connections,
+                config.max_connections,
+                if conn_mgr.is_half_connection() {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            ),
+        );
+    }
+
+    // Try DHCPv6 for IPv6 address (optional - doesn't fail if server doesn't support it)
+    log_message(callbacks, 1, "[RUST] Attempting DHCPv6 for IPv6 address...");
+    let dhcpv6_config = perform_dhcpv6(&mut conn_mgr, mac, callbacks, config.use_compress).await;
+    if dhcpv6_config.is_some() {
+        log_message(
+            callbacks,
+            1,
+            "[RUST] DHCPv6 successful - dual-stack configured",
+        );
+    } else {
+        log_message(callbacks, 1, "[RUST] DHCPv6 not available - IPv4 only");
+    }
+
     // Create session info from DHCP config (include MAC for Kotlin to use)
-    let session = create_session_from_dhcp(&dhcp_config, actual_server_ip, mac);
+    let session =
+        create_session_from_dhcp(&dhcp_config, dhcpv6_config.as_ref(), actual_server_ip, mac);
 
     // Notify connected with session info
-    log_message(&callbacks, 1, "[RUST] Notifying Android of connection...");
+    log_message(callbacks, 1, "[RUST] Notifying Android of connection...");
     if let Some(cb) = callbacks.on_connected {
         cb(callbacks.context, &session);
     }
-    update_state(&atomic_state, &callbacks, SoftEtherState::Connected);
+    update_state(atomic_state, callbacks, SoftEtherState::Connected);
 
     log_message(
-        &callbacks,
+        callbacks,
         1,
         &format!(
             "[RUST] Connected! IP: {}, Server: {}",
@@ -743,22 +896,80 @@ async fn connect_and_run(
         ),
     );
 
+    // Log RC4 encryption status
+    if final_auth.rc4_key_pair.is_some() {
+        log_message(
+            callbacks,
+            1,
+            "[RUST] RC4 tunnel encryption enabled (UseFastRC4 mode)",
+        );
+    } else if config.use_encrypt {
+        log_message(
+            callbacks,
+            1,
+            "[RUST] Using TLS-layer encryption (UseSSLDataEncryption mode)",
+        );
+    } else {
+        log_message(callbacks, 1, "[RUST] Encryption disabled");
+    }
+
+    // Initialize UDP acceleration if server supports it
+    let mut udp_accel = if let Some(ref udp_response) = final_auth.udp_accel_response {
+        match crate::net::UdpAccel::new(None, true, false) {
+            Ok(mut accel) => {
+                if let Err(e) = accel.init_from_response(udp_response) {
+                    log_message(
+                        callbacks,
+                        2,
+                        &format!("[RUST] Failed to initialize UDP acceleration: {e}"),
+                    );
+                    None
+                } else {
+                    log_message(
+                        callbacks,
+                        1,
+                        &format!(
+                            "[RUST] UDP acceleration initialized: version={}, server={}:{}",
+                            accel.version, udp_response.server_ip, udp_response.server_port
+                        ),
+                    );
+                    Some(accel)
+                }
+            }
+            Err(e) => {
+                log_message(
+                    callbacks,
+                    2,
+                    &format!("[RUST] Failed to create UDP socket: {e}"),
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Run the packet loop
-    log_message(&callbacks, 1, "[RUST] Starting packet loop...");
+    log_message(callbacks, 1, "[RUST] Starting packet loop...");
     run_packet_loop(
         &mut conn_mgr,
         running,
-        callbacks,
-        &mut tx_recv,
+        callbacks.clone(),
+        tx_recv,
         mac,
         dhcp_config,
+        final_auth.rc4_key_pair.as_ref(),
+        config.qos,
+        udp_accel.as_mut(),
+        stats,
     )
     .await
 }
 
-/// Create session info from DHCP config
+/// Create session info from DHCP and optional DHCPv6 config
 fn create_session_from_dhcp(
     dhcp: &DhcpConfig,
+    dhcpv6: Option<&Dhcpv6Config>,
     server_ip: Ipv4Addr,
     mac: [u8; 6],
 ) -> SoftEtherSession {
@@ -778,6 +989,18 @@ fn create_session_from_dhcp(
             | (octets[3] as u32)
     }
 
+    // Extract IPv6 info if available
+    let (ipv6_address, ipv6_prefix_len, dns1_v6, dns2_v6) = if let Some(v6) = dhcpv6 {
+        (
+            v6.ip.octets(),
+            v6.prefix_len,
+            v6.dns1.map(|ip| ip.octets()).unwrap_or([0; 16]),
+            v6.dns2.map(|ip| ip.octets()).unwrap_or([0; 16]),
+        )
+    } else {
+        ([0; 16], 0, [0; 16], [0; 16])
+    };
+
     SoftEtherSession {
         ip_address: ip_to_u32(dhcp.ip),
         subnet_mask: ip_to_u32(dhcp.netmask),
@@ -789,6 +1012,11 @@ fn create_session_from_dhcp(
         server_build: 0,
         mac_address: mac,
         gateway_mac: [0; 6], // Will be learned dynamically
+        ipv6_address,
+        ipv6_prefix_len,
+        _padding: [0; 3],
+        dns1_v6,
+        dns2_v6,
     }
 }
 
@@ -1027,23 +1255,156 @@ async fn perform_dhcp(
     }
 }
 
-/// Check if an Ethernet frame is a DHCP response (UDP dst port 68)
-fn is_dhcp_response(frame: &[u8]) -> bool {
-    // Minimum: Ethernet(14) + IP(20) + UDP(8) + DHCP minimal
-    if frame.len() < 42 {
-        return false;
+// Use shared DHCP response checkers from packet module
+use crate::packet::{is_dhcp_response, is_dhcpv6_response};
+
+/// Perform DHCPv6 through the tunnel to get IPv6 configuration
+/// This is optional and may fail if the server doesn't support DHCPv6
+async fn perform_dhcpv6(
+    conn_mgr: &mut ConnectionManager,
+    mac: [u8; 6],
+    callbacks: &SoftEtherCallbacks,
+    use_compress: bool,
+) -> Option<Dhcpv6Config> {
+    use tokio::time::timeout;
+
+    fn log_msg(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
+        if let Some(cb) = callbacks.on_log {
+            if let Ok(cstr) = std::ffi::CString::new(msg) {
+                cb(callbacks.context, level, cstr.as_ptr());
+            }
+        }
     }
-    // Check EtherType is IPv4
-    if frame[12] != 0x08 || frame[13] != 0x00 {
-        return false;
+
+    let mut dhcpv6 = Dhcpv6Client::new(mac);
+    let mut codec = TunnelCodec::new();
+    let mut buf = vec![0u8; 65536];
+    let mut send_buf = vec![0u8; 2048];
+
+    // DHCPv6 has shorter timeout - it's optional
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+
+    // Send DHCPv6 SOLICIT
+    let solicit = dhcpv6.build_solicit();
+    log_msg(
+        callbacks,
+        1,
+        &format!("[RUST] Sending DHCPv6 SOLICIT ({} bytes)", solicit.len()),
+    );
+    if send_frame(conn_mgr, &solicit, &mut send_buf, use_compress)
+        .await
+        .is_err()
+    {
+        log_msg(callbacks, 2, "[RUST] Failed to send DHCPv6 SOLICIT");
+        return None;
     }
-    // Check IP protocol is UDP (17)
-    if frame[23] != 17 {
-        return false;
+
+    // Wait for ADVERTISE/REPLY
+    loop {
+        if std::time::Instant::now() > deadline {
+            log_msg(
+                callbacks,
+                2,
+                "[RUST] DHCPv6 timeout - server may not support IPv6",
+            );
+            return None;
+        }
+
+        match timeout(Duration::from_secs(2), conn_mgr.read_any(&mut buf)).await {
+            Ok(Ok((_conn_idx, n))) if n > 0 => {
+                // Decode tunnel frames
+                if let Ok(frames) = codec.feed(&buf[..n]) {
+                    for frame in frames {
+                        if frame.is_keepalive() {
+                            continue;
+                        }
+                        if let Some(packets) = frame.packets() {
+                            for packet in packets {
+                                // Decompress if needed
+                                let packet_data: Vec<u8> = if is_compressed(packet) {
+                                    match decompress(packet) {
+                                        Ok(decompressed) => decompressed,
+                                        Err(_) => continue,
+                                    }
+                                } else {
+                                    packet.to_vec()
+                                };
+
+                                // Check if this is a DHCPv6 response
+                                if is_dhcpv6_response(&packet_data) {
+                                    log_msg(callbacks, 1, "[RUST] DHCPv6 response received");
+                                    if dhcpv6.process_response(&packet_data) {
+                                        // Got REPLY with address
+                                        let config = dhcpv6.config().clone();
+                                        log_msg(
+                                            callbacks,
+                                            1,
+                                            &format!(
+                                                "[RUST] DHCPv6 complete: IP={}, DNS={:?}",
+                                                config.ip, config.dns1
+                                            ),
+                                        );
+                                        return Some(config);
+                                    } else if dhcpv6.state() == Dhcpv6State::SolicitSent {
+                                        // Got ADVERTISE, send REQUEST
+                                        if let Some(request) = dhcpv6.build_request() {
+                                            log_msg(callbacks, 1, "[RUST] Sending DHCPv6 REQUEST");
+                                            if send_frame(
+                                                conn_mgr,
+                                                &request,
+                                                &mut send_buf,
+                                                use_compress,
+                                            )
+                                            .await
+                                            .is_err()
+                                            {
+                                                log_msg(
+                                                    callbacks,
+                                                    2,
+                                                    "[RUST] Failed to send DHCPv6 REQUEST",
+                                                );
+                                                return None;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Ok(_)) => {
+                // Zero bytes - continue
+            }
+            Ok(Err(_)) => {
+                // Read error - give up on DHCPv6
+                return None;
+            }
+            Err(_) => {
+                // Timeout, retry
+                if dhcpv6.state() == Dhcpv6State::SolicitSent {
+                    log_msg(callbacks, 2, "[RUST] DHCPv6 timeout, retrying SOLICIT");
+                    let solicit = dhcpv6.build_solicit();
+                    if send_frame(conn_mgr, &solicit, &mut send_buf, use_compress)
+                        .await
+                        .is_err()
+                    {
+                        return None;
+                    }
+                } else if dhcpv6.state() == Dhcpv6State::RequestSent {
+                    log_msg(callbacks, 2, "[RUST] DHCPv6 timeout, retrying REQUEST");
+                    if let Some(request) = dhcpv6.build_request() {
+                        if send_frame(conn_mgr, &request, &mut send_buf, use_compress)
+                            .await
+                            .is_err()
+                        {
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
     }
-    // Check UDP destination port is 68 (DHCP client)
-    let dst_port = u16::from_be_bytes([frame[36], frame[37]]);
-    dst_port == 68
 }
 
 /// Send an Ethernet frame through the tunnel
@@ -1082,15 +1443,21 @@ async fn send_frame(
     Ok(())
 }
 
-/// Run the main packet forwarding loop
+/// Run the main packet forwarding loop with ARP handling, QoS, and optional UDP acceleration.
+#[allow(clippy::too_many_arguments)]
 async fn run_packet_loop(
     conn_mgr: &mut ConnectionManager,
     running: Arc<AtomicBool>,
     callbacks: SoftEtherCallbacks,
     tx_recv: &mut mpsc::Receiver<Vec<u8>>,
-    _mac: [u8; 6],
-    _dhcp_config: DhcpConfig,
+    mac: [u8; 6],
+    dhcp_config: DhcpConfig,
+    rc4_key_pair: Option<&Rc4KeyPair>,
+    qos_enabled: bool,
+    mut udp_accel: Option<&mut crate::net::UdpAccel>,
+    stats: &Arc<FfiStats>,
 ) -> crate::error::Result<()> {
+    use crate::packet::is_priority_packet;
     fn log_msg(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
         if let Some(cb) = callbacks.on_log {
             if let Ok(cstr) = std::ffi::CString::new(msg) {
@@ -1101,59 +1468,309 @@ async fn run_packet_loop(
 
     let mut tunnel_codec = TunnelCodec::new();
     let mut read_buf = vec![0u8; 65536];
+    let _udp_recv_buf = vec![0u8; 65536];
     let keepalive_interval_secs = 5u64;
+
+    // Set up ARP handler for gateway MAC learning
+    let mut arp = ArpHandler::new(mac);
+    let gateway = dhcp_config.gateway.unwrap_or(dhcp_config.ip);
+    arp.configure(dhcp_config.ip, gateway);
+
+    log_msg(
+        &callbacks,
+        1,
+        &format!(
+            "[RUST] ARP configured: my_ip={}, gateway_ip={}",
+            dhcp_config.ip, gateway
+        ),
+    );
+
+    // Create RC4 encryption state if keys are provided
+    let mut encryption = rc4_key_pair.map(TunnelEncryption::new);
+
+    // Send gratuitous ARP to announce our presence
+    let garp = arp.build_gratuitous_arp();
+    let encoded_garp = tunnel_codec.encode(&[&garp]);
+    let garp_to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
+        let mut data = encoded_garp.to_vec();
+        enc.encrypt(&mut data);
+        data
+    } else {
+        encoded_garp.to_vec()
+    };
+    conn_mgr
+        .write_all(&garp_to_send)
+        .await
+        .map_err(crate::error::Error::Io)?;
+    log_msg(&callbacks, 1, "[RUST] Sent gratuitous ARP");
+
+    // Send ARP request for gateway MAC
+    let gateway_arp = arp.build_gateway_request();
+    let encoded_gw = tunnel_codec.encode(&[&gateway_arp]);
+    let gw_to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
+        let mut data = encoded_gw.to_vec();
+        enc.encrypt(&mut data);
+        data
+    } else {
+        encoded_gw.to_vec()
+    };
+    conn_mgr
+        .write_all(&gw_to_send)
+        .await
+        .map_err(crate::error::Error::Io)?;
+    log_msg(&callbacks, 1, "[RUST] Sent gateway ARP request");
 
     log_msg(&callbacks, 1, "[RUST] Packet loop started");
 
-    // Send first keepalive immediately
+    // Track UDP acceleration state
+    let mut udp_ready_logged = false;
+    let mut last_udp_keepalive = std::time::Instant::now();
+    let udp_keepalive_interval = Duration::from_secs(2);
+
+    // Start UDP acceleration if available - send initial keepalives
+    if let Some(ref mut ua) = udp_accel {
+        log_msg(
+            &callbacks,
+            1,
+            "[RUST] Sending initial UDP keepalives to establish path...",
+        );
+        // Send a few keepalives to trigger server response
+        for _ in 0..3 {
+            if let Err(e) = ua.send_keepalive().await {
+                log_msg(
+                    &callbacks,
+                    2,
+                    &format!("[RUST] UDP initial keepalive failed: {e}"),
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    // Send first keepalive immediately (encrypt if RC4 is enabled)
     let keepalive = tunnel_codec.encode_keepalive();
+    let first_keepalive: Vec<u8> = if let Some(ref mut enc) = encryption {
+        let mut data = keepalive.to_vec();
+        enc.encrypt(&mut data);
+        data
+    } else {
+        keepalive.to_vec()
+    };
     conn_mgr
-        .write_all(&keepalive)
+        .write_all(&first_keepalive)
         .await
         .map_err(crate::error::Error::Io)?;
     let mut last_keepalive = std::time::Instant::now();
 
     while running.load(Ordering::SeqCst) {
-        // Check if we need to send keepalive
+        // Check if we need to send keepalive (TCP)
         if last_keepalive.elapsed() >= Duration::from_secs(keepalive_interval_secs) {
             let keepalive = tunnel_codec.encode_keepalive();
+            // Encrypt keepalive if RC4 is enabled
+            let to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
+                let mut data = keepalive.to_vec();
+                enc.encrypt(&mut data);
+                data
+            } else {
+                keepalive.to_vec()
+            };
             conn_mgr
-                .write_all(&keepalive)
+                .write_all(&to_send)
                 .await
                 .map_err(crate::error::Error::Io)?;
             last_keepalive = std::time::Instant::now();
         }
 
+        // Send UDP keepalives if UDP acceleration is active
+        if let Some(ref mut ua) = udp_accel {
+            if ua.is_send_ready() {
+                if !udp_ready_logged {
+                    log_msg(&callbacks, 1, "[RUST] UDP acceleration path is now active!");
+                    udp_ready_logged = true;
+                }
+                if last_udp_keepalive.elapsed() >= udp_keepalive_interval {
+                    if let Err(e) = ua.send_keepalive().await {
+                        log_msg(&callbacks, 2, &format!("[RUST] UDP keepalive failed: {e}"));
+                    }
+                    last_udp_keepalive = std::time::Instant::now();
+                }
+            } else {
+                udp_ready_logged = false; // Reset if UDP becomes inactive
+            }
+        }
+
         tokio::select! {
             biased;
 
-            // Packets from Android to send to VPN
+            // Packets from mobile app to send to VPN server
             Some(frame_data) = tx_recv.recv() => {
                 let frames = parse_length_prefixed_packets(&frame_data);
                 if !frames.is_empty() {
-                    let encoded = tunnel_codec.encode(&frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
-                    conn_mgr.write_all(&encoded).await.map_err(crate::error::Error::Io)?;
+                    // Rewrite destination MAC to use learned gateway MAC if available
+                    let gateway_mac = arp.gateway_mac_or_broadcast();
+                    let mut modified_frames: Vec<Vec<u8>> = frames.into_iter().map(|mut frame| {
+                        if frame.len() >= 14 {
+                            // Replace destination MAC (first 6 bytes)
+                            frame[0..6].copy_from_slice(&gateway_mac);
+                        }
+                        frame
+                    }).collect();
+
+                    // QoS: Sort priority packets to front if enabled
+                    // This ensures VoIP/real-time packets are sent first
+                    if qos_enabled && modified_frames.len() > 1 {
+                        modified_frames.sort_by(|a, b| {
+                            let a_prio = is_priority_packet(a);
+                            let b_prio = is_priority_packet(b);
+                            // Priority packets (true) should come first
+                            b_prio.cmp(&a_prio)
+                        });
+                    }
+
+                    // Calculate bytes being sent for stats
+                    let total_bytes: usize = modified_frames.iter().map(|f| f.len()).sum();
+                    let packet_count = modified_frames.len() as u64;
+
+                    // Try UDP acceleration first if ready
+                    let mut sent_via_udp = false;
+                    if let Some(ref mut ua) = udp_accel {
+                        if ua.is_send_ready() {
+                            // Send each frame via UDP (no tunnel framing needed)
+                            for frame in &modified_frames {
+                                if let Err(e) = ua.send(frame, false).await {
+                                    log_msg(&callbacks, 2, &format!("[RUST] UDP send failed: {e}"));
+                                    break;
+                                }
+                            }
+                            sent_via_udp = true;
+                        }
+                    }
+
+                    // Fallback to TCP if UDP not ready or not available
+                    if !sent_via_udp {
+                        // Encode frames into tunnel format
+                        let encoded = tunnel_codec.encode(&modified_frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
+
+                        // Encrypt if RC4 is enabled, otherwise send as-is
+                        let to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
+                            let mut data = encoded.to_vec();
+                            enc.encrypt(&mut data);
+                            data
+                        } else {
+                            encoded.to_vec()
+                        };
+
+                        conn_mgr.write_all(&to_send).await.map_err(crate::error::Error::Io)?;
+                    }
+
+                    // Update send statistics
+                    stats.packets_sent.fetch_add(packet_count, Ordering::Relaxed);
+                    stats.bytes_sent.fetch_add(total_bytes as u64, Ordering::Relaxed);
                 }
             }
 
-            // Data from VPN to send to Android
+            // UDP receive (if UDP acceleration is available)
+            result = async {
+                if let Some(ref ua) = udp_accel {
+                    ua.try_recv().await
+                } else {
+                    // No UDP - just wait forever (will be cancelled by other branches)
+                    std::future::pending::<crate::error::Result<Option<(Vec<u8>, std::net::SocketAddr)>>>().await
+                }
+            } => {
+                if let Ok(Some((raw_data, src_addr))) = result {
+                    // Process the received UDP packet through the accelerator
+                    if let Some(ref mut ua) = udp_accel {
+                        if let Some((frame_data, _compressed)) = ua.process_recv(&raw_data, src_addr) {
+                            // Process received UDP frame
+                            // Build length-prefixed buffer for callback
+                            let mut buffer = Vec::with_capacity(frame_data.len() + 2);
+
+                    // Process ARP packets for gateway MAC learning
+                    if frame_data.len() >= 14 {
+                        let ethertype = u16::from_be_bytes([frame_data[12], frame_data[13]]);
+                        if ethertype == 0x0806 {
+                            let had_mac = arp.has_gateway_mac();
+                            arp.process_arp(&frame_data);
+                            if !had_mac {
+                                if let Some(gw_mac) = arp.gateway_mac() {
+                                    log_msg(&callbacks, 1, &format!(
+                                        "[RUST] Learned gateway MAC (UDP): {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                                        gw_mac[0], gw_mac[1], gw_mac[2], gw_mac[3], gw_mac[4], gw_mac[5]
+                                    ));
+                                }
+                            }
+                        }
+                    }
+
+                    // Update receive statistics
+                    stats.packets_received.fetch_add(1, Ordering::Relaxed);
+                    stats.bytes_received.fetch_add(frame_data.len() as u64, Ordering::Relaxed);
+
+                    let len = frame_data.len() as u16;
+                    buffer.extend_from_slice(&len.to_be_bytes());
+                    buffer.extend_from_slice(&frame_data);
+
+                    if let Some(cb) = callbacks.on_packets_received {
+                        cb(callbacks.context, buffer.as_ptr(), buffer.len(), 1);
+                    }
+                        }
+                    }
+                }
+            }
+
+            // Data from VPN server to send to mobile app (TCP)
             result = tokio::time::timeout(Duration::from_millis(500), conn_mgr.read_any(&mut read_buf)) => {
                 match result {
                     Ok(Ok((_conn_idx, n))) if n > 0 => {
+                        // Decrypt if RC4 is enabled
+                        if let Some(ref mut enc) = encryption {
+                            enc.decrypt(&mut read_buf[..n]);
+                        }
+
                         if let Ok(frames) = tunnel_codec.decode(&read_buf[..n]) {
                             if !frames.is_empty() {
                                 // Build length-prefixed buffer for callback
                                 let mut buffer = Vec::with_capacity(n + frames.len() * 2);
+                                let mut total_bytes: u64 = 0;
                                 for frame in &frames {
+                                    // Decompress if needed
                                     let frame_data: Vec<u8> = if is_compressed(frame) {
                                         decompress(frame).unwrap_or_else(|_| frame.to_vec())
                                     } else {
                                         frame.to_vec()
                                     };
+
+                                    // Process ARP packets for gateway MAC learning
+                                    if frame_data.len() >= 14 {
+                                        let ethertype = u16::from_be_bytes([frame_data[12], frame_data[13]]);
+                                        if ethertype == 0x0806 {
+                                            // This is an ARP packet - process it
+                                            let had_mac = arp.has_gateway_mac();
+                                            arp.process_arp(&frame_data);
+                                            // Log if we just learned gateway MAC
+                                            if !had_mac {
+                                                if let Some(gw_mac) = arp.gateway_mac() {
+                                                    log_msg(&callbacks, 1, &format!(
+                                                        "[RUST] Learned gateway MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                                                        gw_mac[0], gw_mac[1], gw_mac[2], gw_mac[3], gw_mac[4], gw_mac[5]
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    total_bytes += frame_data.len() as u64;
                                     let len = frame_data.len() as u16;
                                     buffer.extend_from_slice(&len.to_be_bytes());
                                     buffer.extend_from_slice(&frame_data);
                                 }
+
+                                // Update receive statistics
+                                stats.packets_received.fetch_add(frames.len() as u64, Ordering::Relaxed);
+                                stats.bytes_received.fetch_add(total_bytes, Ordering::Relaxed);
+
                                 if let Some(cb) = callbacks.on_packets_received {
                                     cb(callbacks.context, buffer.as_ptr(), buffer.len(), frames.len() as u32);
                                 }
@@ -1429,7 +2046,17 @@ async fn authenticate(
                     &format!("[RUST] Response body: {} bytes", response.body.len()),
                 );
                 let pack = crate::protocol::Pack::deserialize(&response.body)?;
-                let result = AuthResult::from_pack(&pack)?;
+
+                // Resolve remote IP for UDP accel parsing
+                let remote_ip = if config.udp_accel {
+                    resolve_server_ip(&config.server)
+                        .map(std::net::IpAddr::V4)
+                        .ok()
+                } else {
+                    None
+                };
+
+                let result = AuthResult::from_pack_with_remote(&pack, remote_ip)?;
 
                 if result.error > 0 {
                     log_msg(
@@ -1446,16 +2073,9 @@ async fn authenticate(
                     )));
                 }
 
-                // Check if server supports UDP acceleration
+                // Log UDP acceleration status
                 if config.udp_accel {
-                    // Try to get remote IP for UDP accel parsing
-                    let remote_ip = resolve_server_ip(&config.server)
-                        .map(std::net::IpAddr::V4)
-                        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
-
-                    if let Some(udp_response) =
-                        AuthResult::parse_udp_accel_response(&pack, remote_ip)
-                    {
+                    if let Some(ref udp_response) = result.udp_accel_response {
                         log_msg(
                             callbacks,
                             1,
@@ -1464,8 +2084,6 @@ async fn authenticate(
                                 udp_response.version, udp_response.server_port, udp_response.use_encryption
                             ),
                         );
-                        // TODO: Initialize UDP accel with server params and integrate with tunnel runner
-                        // For now, we just log that the server supports it
                     } else {
                         log_msg(
                             callbacks,
@@ -1786,6 +2404,11 @@ impl Clone for SoftEtherSession {
             server_build: self.server_build,
             mac_address: self.mac_address,
             gateway_mac: self.gateway_mac,
+            ipv6_address: self.ipv6_address,
+            ipv6_prefix_len: self.ipv6_prefix_len,
+            _padding: self._padding,
+            dns1_v6: self.dns1_v6,
+            dns2_v6: self.dns2_v6,
         }
     }
 }
@@ -1815,6 +2438,7 @@ impl Clone for SoftEtherCallbacks {
             on_packets_received: self.on_packets_received,
             on_log: self.on_log,
             protect_socket: self.protect_socket,
+            exclude_ip: self.exclude_ip,
         }
     }
 }

@@ -34,7 +34,7 @@ use crate::adapter::WintunDevice;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use crate::client::ConcurrentReader;
 use crate::client::{ConnectionManager, VpnConnection};
-use crate::crypto::{Rc4, Rc4KeyPair};
+use crate::crypto::{Rc4KeyPair, TunnelEncryption};
 use crate::error::{Error, Result};
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use crate::packet::ArpHandler;
@@ -43,7 +43,9 @@ use crate::packet::BROADCAST_MAC;
 use crate::packet::{DhcpClient, DhcpConfig, DhcpState};
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use crate::protocol::decompress_into;
-use crate::protocol::{compress, compress_into, decompress, is_compressed, TunnelCodec};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use crate::protocol::compress_into;
+use crate::protocol::{compress, decompress, is_compressed, TunnelCodec};
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use super::DataLoopState;
@@ -111,40 +113,6 @@ pub struct TunnelRunner {
     running: Arc<AtomicBool>,
 }
 
-/// RC4 encryption state for tunnel data.
-///
-/// RC4 is a streaming cipher - each cipher instance maintains state
-/// and MUST NOT be reset between packets. Send and recv use separate ciphers.
-pub struct TunnelEncryption {
-    /// RC4 send cipher (for encrypting outgoing data).
-    send_cipher: Rc4,
-    /// RC4 recv cipher (for decrypting incoming data).
-    recv_cipher: Rc4,
-}
-
-impl TunnelEncryption {
-    /// Create from RC4 key pair (client mode).
-    pub fn new(key_pair: &Rc4KeyPair) -> Self {
-        let (send_cipher, recv_cipher) = key_pair.create_client_ciphers();
-        Self {
-            send_cipher,
-            recv_cipher,
-        }
-    }
-
-    /// Encrypt data in-place for sending.
-    #[inline]
-    pub fn encrypt(&mut self, data: &mut [u8]) {
-        self.send_cipher.process(data);
-    }
-
-    /// Decrypt data in-place after receiving.
-    #[inline]
-    pub fn decrypt(&mut self, data: &mut [u8]) {
-        self.recv_cipher.process(data);
-    }
-}
-
 impl TunnelRunner {
     /// Create a new tunnel runner.
     pub fn new(config: TunnelConfig) -> Self {
@@ -162,6 +130,7 @@ impl TunnelRunner {
     }
 
     /// Create encryption state if RC4 keys are configured.
+    #[allow(dead_code)]
     fn create_encryption(&self) -> Option<TunnelEncryption> {
         self.config.rc4_key_pair.as_ref().map(TunnelEncryption::new)
     }
@@ -301,6 +270,7 @@ impl TunnelRunner {
     /// Configure routes for VPN traffic.
     ///
     /// This sets up routing so traffic to the VPN subnet goes through the TUN device.
+    /// Currently only used when TUN adapter fully supports routing (Linux).
     #[allow(dead_code)]
     fn configure_routes(&self, tun: &impl TunAdapter, dhcp_config: &DhcpConfig) -> Result<()> {
         // CRITICAL: If default route is requested, add the VPN server host route FIRST
@@ -544,6 +514,7 @@ impl TunnelRunner {
     }
 
     /// Send an Ethernet frame through the tunnel with optional RC4 encryption.
+    #[allow(dead_code)]
     async fn send_frame_encrypted(
         &self,
         conn: &mut VpnConnection,

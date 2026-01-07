@@ -17,6 +17,7 @@ use super::constants::*;
 use crate::error::{Error, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::collections::HashMap;
+use unicase::UniCase;
 
 /// Pack value types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,11 +115,14 @@ pub struct PackElement {
 }
 
 /// SoftEther Pack - binary serialization format.
+///
+/// Uses case-insensitive keys via `UniCase` for efficient lookups
+/// without repeated string allocations.
 #[derive(Debug, Clone, Default)]
 pub struct Pack {
-    elements: HashMap<String, PackElement>,
+    elements: HashMap<UniCase<String>, PackElement>,
     // Maintain insertion order for deterministic serialization
-    order: Vec<String>,
+    order: Vec<UniCase<String>>,
 }
 
 impl Pack {
@@ -163,8 +167,8 @@ impl Pack {
 
     /// Add a raw value.
     fn add_value(&mut self, name: &str, value: PackValue) {
-        let name_lower = name.to_lowercase();
-        if let Some(elem) = self.elements.get_mut(&name_lower) {
+        let key = UniCase::new(name.to_string());
+        if let Some(elem) = self.elements.get_mut(&key) {
             elem.values.push(value);
         } else {
             let elem = PackElement {
@@ -172,8 +176,8 @@ impl Pack {
                 value_type: value.value_type(),
                 values: vec![value],
             };
-            self.order.push(name_lower.clone());
-            self.elements.insert(name_lower, elem);
+            self.order.push(key.clone());
+            self.elements.insert(key, elem);
         }
     }
 
@@ -207,22 +211,25 @@ impl Pack {
     }
 
     /// Get the first value for a name.
+    /// Uses case-insensitive lookup via UniCase (ASCII-only comparison).
     pub fn get_value(&self, name: &str) -> Option<&PackValue> {
         self.elements
-            .get(&name.to_lowercase())
+            .get(&UniCase::new(name.to_string()))
             .and_then(|e| e.values.first())
     }
 
     /// Get all values for a name.
+    /// Uses case-insensitive lookup via UniCase.
     pub fn get_values(&self, name: &str) -> Option<&[PackValue]> {
         self.elements
-            .get(&name.to_lowercase())
+            .get(&UniCase::new(name.to_string()))
             .map(|e| e.values.as_slice())
     }
 
     /// Check if an element exists.
+    /// Uses case-insensitive lookup via UniCase.
     pub fn contains(&self, name: &str) -> bool {
-        self.elements.contains_key(&name.to_lowercase())
+        self.elements.contains_key(&UniCase::new(name.to_string()))
     }
 
     /// Get the number of elements.
@@ -237,7 +244,7 @@ impl Pack {
 
     /// Get all element names (keys).
     pub fn keys(&self) -> impl Iterator<Item = &str> {
-        self.order.iter().map(|s| s.as_str())
+        self.order.iter().map(|s| s.as_ref())
     }
 
     // ========================================================================
@@ -333,9 +340,9 @@ impl Pack {
 
         for _ in 0..num_elements {
             let elem = Self::parse_element(buf)?;
-            let name_lower = elem.name.to_lowercase();
-            pack.order.push(name_lower.clone());
-            pack.elements.insert(name_lower, elem);
+            let key = UniCase::new(elem.name.clone());
+            pack.order.push(key.clone());
+            pack.elements.insert(key, elem);
         }
 
         Ok(pack)

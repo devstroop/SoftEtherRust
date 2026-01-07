@@ -163,7 +163,21 @@ class SoftEtherBridge {
         val defaultRoute: Boolean = true,
         val acceptPushedRoutes: Boolean = true,
         val ipv4Include: String? = null,
-        val ipv4Exclude: String? = null
+        val ipv4Exclude: String? = null,
+        val ipv6Include: String? = null,
+        val ipv6Exclude: String? = null,
+        // Static IPv4 Configuration (optional, skips DHCP if set)
+        val staticIpv4Address: String? = null,
+        val staticIpv4Netmask: String? = null,
+        val staticIpv4Gateway: String? = null,
+        val staticIpv4Dns1: String? = null,
+        val staticIpv4Dns2: String? = null,
+        // Static IPv6 Configuration (optional)
+        val staticIpv6Address: String? = null,
+        val staticIpv6PrefixLen: Int = 0,
+        val staticIpv6Gateway: String? = null,
+        val staticIpv6Dns1: String? = null,
+        val staticIpv6Dns2: String? = null
     )
     
     // MARK: - Callbacks
@@ -183,6 +197,8 @@ class SoftEtherBridge {
         fun onPacketsReceived(packets: List<ByteArray>)
         fun onLog(level: LogLevel, message: String) {}
         fun onProtectSocket(fd: Int): Boolean = false
+        /** Called when an IP should be excluded from VPN routing (cluster redirect). */
+        fun onExcludeIp(ip: String): Boolean = false
     }
     
     var listener: Listener? = null
@@ -219,7 +235,21 @@ class SoftEtherBridge {
         defaultRoute: Boolean,
         acceptPushedRoutes: Boolean,
         ipv4Include: String?,
-        ipv4Exclude: String?
+        ipv4Exclude: String?,
+        ipv6Include: String?,
+        ipv6Exclude: String?,
+        // Static IPv4 Configuration
+        staticIpv4Address: String?,
+        staticIpv4Netmask: String?,
+        staticIpv4Gateway: String?,
+        staticIpv4Dns1: String?,
+        staticIpv4Dns2: String?,
+        // Static IPv6 Configuration
+        staticIpv6Address: String?,
+        staticIpv6PrefixLen: Int,
+        staticIpv6Gateway: String?,
+        staticIpv6Dns1: String?,
+        staticIpv6Dns2: String?
     ): Long
     
     private external fun nativeDestroy(handle: Long)
@@ -264,7 +294,19 @@ class SoftEtherBridge {
             config.defaultRoute,
             config.acceptPushedRoutes,
             config.ipv4Include,
-            config.ipv4Exclude
+            config.ipv4Exclude,
+            config.ipv6Include,
+            config.ipv6Exclude,
+            config.staticIpv4Address,
+            config.staticIpv4Netmask,
+            config.staticIpv4Gateway,
+            config.staticIpv4Dns1,
+            config.staticIpv4Dns2,
+            config.staticIpv6Address,
+            config.staticIpv6PrefixLen,
+            config.staticIpv6Gateway,
+            config.staticIpv6Dns1,
+            config.staticIpv6Dns2
         )
         
         if (nativeHandle == 0L) {
@@ -469,6 +511,11 @@ class SoftEtherBridge {
     @Suppress("unused")  // Called from JNI
     private fun onProtectSocket(fd: Int): Boolean {
         return listener?.onProtectSocket(fd) ?: false
+    }
+    
+    @Suppress("unused")  // Called from JNI
+    private fun onExcludeIp(ip: String): Boolean {
+        return listener?.onExcludeIp(ip) ?: false
     }
     
     // MARK: - Cleanup

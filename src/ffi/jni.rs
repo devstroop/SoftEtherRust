@@ -201,6 +201,35 @@ extern "C" fn jni_protect_socket(context: *mut std::ffi::c_void, fd: i32) -> boo
     false
 }
 
+extern "C" fn jni_exclude_ip(context: *mut std::ffi::c_void, ip: *const std::ffi::c_char) -> bool {
+    if context.is_null() || ip.is_null() {
+        return false;
+    }
+
+    let ctx = unsafe { &*(context as *const JniCallbackContext) };
+    let ip_str = unsafe { std::ffi::CStr::from_ptr(ip) };
+    let ip_string = match ip_str.to_str() {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    if let Ok(mut env) = ctx.jvm.attach_current_thread() {
+        if let Ok(ip_jstring) = env.new_string(ip_string) {
+            if let Ok(result) = env.call_method(
+                &ctx.bridge_ref,
+                "onExcludeIp",
+                "(Ljava/lang/String;)Z",
+                &[JValue::Object(&ip_jstring)],
+            ) {
+                if let Ok(excluded) = result.z() {
+                    return excluded;
+                }
+            }
+        }
+    }
+    false
+}
+
 // =============================================================================
 // JNI Native Methods
 // =============================================================================
@@ -220,6 +249,8 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
     password_hash: JString,
     // TLS Settings
     skip_tls_verify: jboolean,
+    custom_ca_pem: JString,
+    cert_fingerprint_sha256: JString,
     // Connection Settings
     max_connections: jint,
     timeout_seconds: jint,
@@ -237,6 +268,19 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
     accept_pushed_routes: jboolean,
     ipv4_include: JString,
     ipv4_exclude: JString,
+    ipv6_include: JString,
+    ipv6_exclude: JString,
+    // Static IP Configuration
+    static_ipv4_address: JString,
+    static_ipv4_netmask: JString,
+    static_ipv4_gateway: JString,
+    static_ipv4_dns1: JString,
+    static_ipv4_dns2: JString,
+    static_ipv6_address: JString,
+    static_ipv6_prefix_len: jint,
+    static_ipv6_gateway: JString,
+    static_ipv6_dns1: JString,
+    static_ipv6_dns2: JString,
 ) -> jlong {
     // Get required strings
     let server_str = match get_string(&mut env, &server) {
@@ -259,6 +303,23 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
     // Get optional routing strings
     let ipv4_include_str = get_string(&mut env, &ipv4_include).unwrap_or_default();
     let ipv4_exclude_str = get_string(&mut env, &ipv4_exclude).unwrap_or_default();
+    let ipv6_include_str = get_string(&mut env, &ipv6_include).unwrap_or_default();
+    let ipv6_exclude_str = get_string(&mut env, &ipv6_exclude).unwrap_or_default();
+
+    // Get optional TLS strings
+    let custom_ca_pem_str = get_string(&mut env, &custom_ca_pem).unwrap_or_default();
+    let cert_fingerprint_str = get_string(&mut env, &cert_fingerprint_sha256).unwrap_or_default();
+
+    // Get optional static IP strings
+    let static_ipv4_address_str = get_string(&mut env, &static_ipv4_address).unwrap_or_default();
+    let static_ipv4_netmask_str = get_string(&mut env, &static_ipv4_netmask).unwrap_or_default();
+    let static_ipv4_gateway_str = get_string(&mut env, &static_ipv4_gateway).unwrap_or_default();
+    let static_ipv4_dns1_str = get_string(&mut env, &static_ipv4_dns1).unwrap_or_default();
+    let static_ipv4_dns2_str = get_string(&mut env, &static_ipv4_dns2).unwrap_or_default();
+    let static_ipv6_address_str = get_string(&mut env, &static_ipv6_address).unwrap_or_default();
+    let static_ipv6_gateway_str = get_string(&mut env, &static_ipv6_gateway).unwrap_or_default();
+    let static_ipv6_dns1_str = get_string(&mut env, &static_ipv6_dns1).unwrap_or_default();
+    let static_ipv6_dns2_str = get_string(&mut env, &static_ipv6_dns2).unwrap_or_default();
 
     // Create CStrings for FFI
     let server_cstr = match to_cstring(&server_str) {
@@ -279,6 +340,21 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
     };
     let ipv4_include_cstr = to_cstring(&ipv4_include_str);
     let ipv4_exclude_cstr = to_cstring(&ipv4_exclude_str);
+    let ipv6_include_cstr = to_cstring(&ipv6_include_str);
+    let ipv6_exclude_cstr = to_cstring(&ipv6_exclude_str);
+    let custom_ca_pem_cstr = to_cstring(&custom_ca_pem_str);
+    let cert_fingerprint_cstr = to_cstring(&cert_fingerprint_str);
+
+    // Create CStrings for static IP configuration
+    let static_ipv4_address_cstr = to_cstring(&static_ipv4_address_str);
+    let static_ipv4_netmask_cstr = to_cstring(&static_ipv4_netmask_str);
+    let static_ipv4_gateway_cstr = to_cstring(&static_ipv4_gateway_str);
+    let static_ipv4_dns1_cstr = to_cstring(&static_ipv4_dns1_str);
+    let static_ipv4_dns2_cstr = to_cstring(&static_ipv4_dns2_str);
+    let static_ipv6_address_cstr = to_cstring(&static_ipv6_address_str);
+    let static_ipv6_gateway_cstr = to_cstring(&static_ipv6_gateway_str);
+    let static_ipv6_dns1_cstr = to_cstring(&static_ipv6_dns1_str);
+    let static_ipv6_dns2_cstr = to_cstring(&static_ipv6_dns2_str);
 
     // Create config with all options
     let config = SoftEtherConfig {
@@ -288,6 +364,14 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
         username: username_cstr.as_ptr(),
         password_hash: password_hash_cstr.as_ptr(),
         skip_tls_verify: if skip_tls_verify != 0 { 1 } else { 0 },
+        custom_ca_pem: custom_ca_pem_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        cert_fingerprint_sha256: cert_fingerprint_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
         max_connections: max_connections as u32,
         timeout_seconds: timeout_seconds as u32,
         mtu: mtu as u32,
@@ -307,8 +391,53 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
             .as_ref()
             .map(|s| s.as_ptr())
             .unwrap_or(std::ptr::null()),
-        cert_fingerprint_sha256: std::ptr::null(),
-        custom_ca_pem: std::ptr::null(),
+        ipv6_include: ipv6_include_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        ipv6_exclude: ipv6_exclude_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        // Static IPv4 Configuration
+        static_ipv4_address: static_ipv4_address_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        static_ipv4_netmask: static_ipv4_netmask_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        static_ipv4_gateway: static_ipv4_gateway_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        static_ipv4_dns1: static_ipv4_dns1_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        static_ipv4_dns2: static_ipv4_dns2_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        // Static IPv6 Configuration
+        static_ipv6_address: static_ipv6_address_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        static_ipv6_prefix_len: static_ipv6_prefix_len as u32,
+        static_ipv6_gateway: static_ipv6_gateway_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        static_ipv6_dns1: static_ipv6_dns1_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
+        static_ipv6_dns2: static_ipv6_dns2_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null()),
     };
 
     // Get JVM for callbacks
@@ -336,6 +465,7 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
         on_packets_received: Some(jni_on_packets_received),
         on_log: Some(jni_on_log),
         protect_socket: Some(jni_protect_socket),
+        exclude_ip: Some(jni_exclude_ip),
     };
 
     // Create client
@@ -414,7 +544,7 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetState(
 /// Returns [ip_address, subnet_mask, gateway, dns1, dns2, server_version, server_build]
 #[no_mangle]
 pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetSession<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) -> jlongArray {
@@ -452,7 +582,7 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetSession
 /// Get session server IP as string.
 #[no_mangle]
 pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetSessionServerIP<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) -> JString<'local> {
@@ -480,7 +610,7 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetSession
 /// Get session MAC address as byte array.
 #[no_mangle]
 pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetSessionMAC<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) -> jbyteArray {
@@ -503,10 +633,10 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetSession
 }
 
 /// Get connection statistics as long array.
-/// Returns [bytes_sent, bytes_received, packets_sent, packets_received, uptime_secs, active_connections, reconnect_count]
+/// Returns [bytes_sent, bytes_received, packets_sent, packets_received, uptime_secs, active_connections, reconnect_count, packets_dropped]
 #[no_mangle]
 pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetStats<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) -> jlongArray {
@@ -521,7 +651,7 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetStats<'
         return std::ptr::null_mut();
     }
 
-    let data: [i64; 7] = [
+    let data: [i64; 8] = [
         stats.bytes_sent as i64,
         stats.bytes_received as i64,
         stats.packets_sent as i64,
@@ -529,9 +659,10 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeGetStats<'
         stats.uptime_secs as i64,
         stats.active_connections as i64,
         stats.reconnect_count as i64,
+        stats.packets_dropped as i64,
     ];
 
-    match env.new_long_array(7) {
+    match env.new_long_array(8) {
         Ok(arr) => {
             let _ = env.set_long_array_region(&arr, 0, &data);
             arr.into_raw()
@@ -571,7 +702,7 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeSendPacket
 /// Receive packets from VPN server (polling mode).
 #[no_mangle]
 pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeReceivePackets(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     handle: jlong,
     buffer: JByteArray,
@@ -656,7 +787,7 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_hashPassword<'lo
 /// Get library version.
 #[no_mangle]
 pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_getVersion<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> JString<'local> {
     let version = unsafe {
