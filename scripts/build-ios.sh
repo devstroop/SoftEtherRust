@@ -64,8 +64,11 @@ build_ios() {
     log_info "Building for iOS (device only)..."
     log_info "  Note: Simulator builds skipped - Network Extension not supported"
     
+    # Set iOS deployment target to match Xcode project
+    export IPHONEOS_DEPLOYMENT_TARGET=15.0
+    
     # Device (arm64)
-    log_info "  Building aarch64-apple-ios..."
+    log_info "  Building aarch64-apple-ios (deployment target: $IPHONEOS_DEPLOYMENT_TARGET)..."
     cargo build --release --target aarch64-apple-ios --features ffi
     
     # Create output directory
@@ -95,8 +98,15 @@ build_ios() {
     log_info "  Copied XCFramework to Frameworks/"
     
     # Copy header to extension
-    cp include/SoftEtherVPN.h "$PROJECT_ROOT/WorxVPNExtension/"
-    log_info "  Copied SoftEtherVPN.h to WorxVPNExtension/"
+    if [ -d "$PROJECT_ROOT/WorxVPNTunnel" ]; then
+        cp include/SoftEtherVPN.h "$PROJECT_ROOT/WorxVPNTunnel/"
+        log_info "  Copied SoftEtherVPN.h to WorxVPNTunnel/"
+    elif [ -d "$PROJECT_ROOT/WorxVPNExtension" ]; then
+        cp include/SoftEtherVPN.h "$PROJECT_ROOT/WorxVPNExtension/"
+        log_info "  Copied SoftEtherVPN.h to WorxVPNExtension/"
+    else
+        log_warn "  No extension directory found, header not copied"
+    fi
     
     log_info "Installation complete!"
 }
