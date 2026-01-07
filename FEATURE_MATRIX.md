@@ -145,3 +145,29 @@ All major features are now complete:
 - ✅ Packet statistics tracking
 - ✅ Reconnection logic for "User Already Logged In"
 
+---
+
+## Config Parameter Comparison
+
+| Parameter | Android | iOS | Rust FFI |
+|-----------|---------|-----|----------|
+| Server/Port/Hub | ✅ | ✅ | ✅ |
+| Username/PasswordHash | ✅ | ✅ | ✅ |
+| Skip TLS Verify | ✅ | ✅ | ✅ |
+| Custom CA PEM | ❌ | ✅ | ✅ |
+| Cert Fingerprint | ❌ | ✅ | ✅ |
+| Max Connections | ✅ | ✅ | ✅ |
+| Timeout Seconds | ✅ | ✅ | ✅ |
+| MTU | ✅ | ✅ | ✅ |
+| Encryption | ✅ | ✅ | ✅ |
+| Compression | ✅ | ✅ | ✅ |
+| UDP Acceleration | ✅ | ✅ | ✅ |
+| QoS | ✅ | ✅ | ✅ |
+| NAT Traversal | ✅ | ✅ | ✅ |
+| Monitor Mode | ✅ | ✅ | ✅ |
+| Default Route | ✅ | ✅ | ✅ |
+| Accept Pushed Routes | ✅ | ✅ | ✅ |
+| IPv4 Include/Exclude | ✅ | ✅ | ✅ |
+| IPv6 Include/Exclude | ❌ | ✅ | ✅ |
+| Static IPv4 | ❌ | ✅ | ✅ |
+| Static IPv6 | ❌ | ✅ | ✅ |
