@@ -3,6 +3,9 @@
 //! This module provides JNI-compatible functions that can be called directly
 //! from Kotlin/Java on Android. These functions wrap the C FFI layer.
 //!
+//! Similar to how ANE (Apple Network Extensions) provides iOS-specific helpers,
+//! JNI provides Android-specific bindings between Kotlin/Java and native code.
+//!
 //! # Package Name
 //! The JNI functions are named for package: `com.worxvpn.app.vpn`
 //! Class: `SoftEtherBridge`

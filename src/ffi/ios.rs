@@ -1,8 +1,8 @@
-//! iOS platform bindings.
+//! iOS platform bindings via ANE (Apple Network Extensions).
 //!
 //! This module provides iOS-specific helper functions that make Swift
-//! integration cleaner and more efficient. While Swift can call C FFI
-//! directly, these helpers reduce boilerplate in Swift code.
+//! integration cleaner and more efficient, similar to how JNI provides
+//! Android-specific bindings.
 //!
 //! # Architecture
 //!
@@ -11,12 +11,12 @@
 //! │                     iOS App                                 │
 //! │  ┌─────────────────────────────────────────────────────┐   │
 //! │  │              Swift (SoftEtherBridge.swift)          │   │
-//! │  │  - Calls iOS helper functions (this module)         │   │
+//! │  │  - Calls ANE helper functions (this module)         │   │
 //! │  │  - Simplified Swift API                             │   │
 //! │  └───────────────────────┬─────────────────────────────┘   │
 //! │                          │                                  │
 //! │  ┌───────────────────────▼─────────────────────────────┐   │
-//! │  │        iOS Helpers (ios.rs - this module)            │   │
+//! │  │          ANE Layer (ios.rs - this module)            │   │
 //! │  │  - softether_ios_*() functions                      │   │
 //! │  │  - Swift-friendly return types                      │   │
 //! │  │  - String handling helpers                          │   │

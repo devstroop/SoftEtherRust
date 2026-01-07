@@ -1,8 +1,9 @@
 //! FFI (Foreign Function Interface) module for mobile platforms.
 //!
-//! This module provides a C-compatible ABI that can be called from:
-//! - Swift (iOS) via direct C bindings
-//! - Kotlin/Java (Android) via JNI or direct C bindings
+//! This module provides a C-compatible ABI with platform-specific layers:
+//! - Swift (iOS) via ANE (Apple Network Extensions) helpers
+//! - Kotlin/Java (Android) via JNI (Java Native Interface) bindings
+//! - Other platforms via direct C FFI
 //!
 //! # Architecture
 //!
@@ -13,8 +14,12 @@
 //! │  │   Swift (iOS)   │      │ Kotlin (Android)│            │
 //! │  └────────┬────────┘      └────────┬────────┘            │
 //! │           │                        │                      │
+//! │  ┌────────▼────────┐      ┌────────▼────────┐            │
+//! │  │  ANE (ios.rs)   │      │  JNI (android.rs)│           │
+//! │  └────────┬────────┘      └────────┬────────┘            │
+//! │           │                        │                      │
 //! │  ┌────────▼────────────────────────▼────────┐            │
-//! │  │              C FFI Layer                  │            │
+//! │  │              C FFI Layer (Generic)        │            │
 //! │  │  - softether_create()                    │            │
 //! │  │  - softether_connect()                   │            │
 //! │  │  - softether_send_packet()               │            │

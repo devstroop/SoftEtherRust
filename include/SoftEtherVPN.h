@@ -302,7 +302,7 @@ SoftEtherResult softether_hash_password(const char* password, const char* userna
 int softether_base64_encode(const uint8_t* input, size_t input_len, char* output, size_t output_len);
 
 // =============================================================================
-// iOS/macOS Helper Functions
+// ANE (Apple Network Extensions) - iOS/macOS Helper Functions
 // =============================================================================
 
 /**
