@@ -808,6 +808,11 @@ async fn connect_and_run_inner(
     log_message(callbacks, 1, "[RUST] Starting DHCP...");
     update_state(atomic_state, callbacks, SoftEtherState::EstablishingTunnel);
 
+    // In half-connection mode, we need to temporarily enable bidirectional mode
+    // on the primary connection for DHCP, since additional connections aren't
+    // established yet. DHCP needs to both send and receive on the same connection.
+    let original_direction = conn_mgr.enable_primary_bidirectional();
+
     let dhcp_config = match perform_dhcp(&mut conn_mgr, mac, callbacks, config.use_compress).await {
         Ok(config) => {
             log_message(
@@ -821,10 +826,19 @@ async fn connect_and_run_inner(
             config
         }
         Err(e) => {
+            // Restore direction before returning error
+            if let Some(dir) = original_direction {
+                conn_mgr.restore_primary_direction(dir);
+            }
             log_message(callbacks, 3, &format!("[RUST] DHCP failed: {e}"));
             return Err(e);
         }
     };
+
+    // Restore primary connection direction after DHCP
+    if let Some(dir) = original_direction {
+        conn_mgr.restore_primary_direction(dir);
+    }
 
     // Establish additional connections if max_connections > 1
     if config.max_connections > 1 {
