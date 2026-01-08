@@ -301,7 +301,7 @@ impl Default for VpnConfig {
             server: String::new(),
             port: 443,
             hub: String::new(),
-            skip_tls_verify: true, // SoftEther often uses self-signed certs
+            skip_tls_verify: false,
             custom_ca_pem: None,
             cert_fingerprint_sha256: None,
             // Authentication

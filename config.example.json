@@ -3,7 +3,7 @@
   "server": "vpn.example.com",
   "port": 443,
   "hub": "DEFAULT",
-  "skip_tls_verify": true,
+  "skip_tls_verify": false,
 
   "_comment_auth": "=== Authentication ===",
   "username": "your_username",
