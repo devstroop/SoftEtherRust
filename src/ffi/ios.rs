@@ -34,8 +34,8 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
-use super::types::*;
 use super::client::*;
+use super::types::*;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 
@@ -62,7 +62,7 @@ pub extern "C" fn softether_ios_version() -> *const c_char {
 
 /// Convert IPv4 address (u32 network byte order) to dotted string.
 /// Buffer must be at least 16 bytes. Returns number of bytes written.
-/// 
+///
 /// This avoids Swift having to do the conversion itself.
 #[no_mangle]
 pub extern "C" fn softether_ios_ipv4_to_string(
@@ -80,7 +80,7 @@ pub extern "C" fn softether_ios_ipv4_to_string(
     let d = ip & 0xFF;
 
     let ip_str = format!("{}.{}.{}.{}", a, b, c, d);
-    
+
     if ip_str.len() + 1 > buffer_len {
         return -1;
     }
@@ -108,8 +108,7 @@ pub extern "C" fn softether_ios_mac_to_string(
     let mac_bytes = unsafe { std::slice::from_raw_parts(mac, 6) };
     let mac_str = format!(
         "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        mac_bytes[0], mac_bytes[1], mac_bytes[2],
-        mac_bytes[3], mac_bytes[4], mac_bytes[5]
+        mac_bytes[0], mac_bytes[1], mac_bytes[2], mac_bytes[3], mac_bytes[4], mac_bytes[5]
     );
 
     unsafe {
@@ -134,9 +133,7 @@ pub extern "C" fn softether_ios_is_valid_ipv4(ip: u32) -> c_int {
 /// This avoids Swift having to construct the entire SoftEtherSession struct.
 /// Returns NULL if not connected or handle is invalid.
 #[no_mangle]
-pub extern "C" fn softether_ios_get_session(
-    handle: SoftEtherHandle,
-) -> *const SoftEtherSession {
+pub extern "C" fn softether_ios_get_session(handle: SoftEtherHandle) -> *const SoftEtherSession {
     if handle.is_null() {
         return std::ptr::null();
     }
@@ -150,7 +147,7 @@ pub extern "C" fn softether_ios_get_session(
     SESSION_STORAGE.with(|storage| {
         let mut session = storage.borrow_mut();
         let result = unsafe { softether_get_session(handle, &mut *session as *mut _) };
-        
+
         if result == SoftEtherResult::Ok {
             &*session as *const SoftEtherSession
         } else {
@@ -161,9 +158,7 @@ pub extern "C" fn softether_ios_get_session(
 
 /// Simplified statistics getter.
 #[no_mangle]
-pub extern "C" fn softether_ios_get_stats(
-    handle: SoftEtherHandle,
-) -> *const SoftEtherStats {
+pub extern "C" fn softether_ios_get_stats(handle: SoftEtherHandle) -> *const SoftEtherStats {
     if handle.is_null() {
         return std::ptr::null();
     }
@@ -176,7 +171,7 @@ pub extern "C" fn softether_ios_get_stats(
     STATS_STORAGE.with(|storage| {
         let mut stats = storage.borrow_mut();
         let result = unsafe { softether_get_stats(handle, &mut *stats as *mut _) };
-        
+
         if result == SoftEtherResult::Ok {
             &*stats as *const SoftEtherStats
         } else {
@@ -293,9 +288,11 @@ mod tests {
             buffer.len(),
         );
         assert!(len > 0);
-        
+
         let result = unsafe {
-            CStr::from_ptr(buffer.as_ptr()).to_string_lossy().into_owned()
+            CStr::from_ptr(buffer.as_ptr())
+                .to_string_lossy()
+                .into_owned()
         };
         assert_eq!(result, "192.168.0.1");
     }
@@ -304,15 +301,13 @@ mod tests {
     fn test_mac_to_string() {
         let mac = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
         let mut buffer = [0i8; 18];
-        let len = softether_ios_mac_to_string(
-            mac.as_ptr(),
-            buffer.as_mut_ptr(),
-            buffer.len(),
-        );
+        let len = softether_ios_mac_to_string(mac.as_ptr(), buffer.as_mut_ptr(), buffer.len());
         assert!(len > 0);
-        
+
         let result = unsafe {
-            CStr::from_ptr(buffer.as_ptr()).to_string_lossy().into_owned()
+            CStr::from_ptr(buffer.as_ptr())
+                .to_string_lossy()
+                .into_owned()
         };
         assert_eq!(result, "00:11:22:33:44:55");
     }
@@ -320,17 +315,17 @@ mod tests {
     #[test]
     fn test_format_bytes() {
         let mut buffer = [0i8; 32];
-        
+
         // Test bytes
         softether_ios_format_bytes(500, buffer.as_mut_ptr(), buffer.len());
         let result = unsafe { CStr::from_ptr(buffer.as_ptr()).to_str().unwrap() };
         assert!(result.contains("B"));
-        
+
         // Test KB
         softether_ios_format_bytes(2048, buffer.as_mut_ptr(), buffer.len());
         let result = unsafe { CStr::from_ptr(buffer.as_ptr()).to_str().unwrap() };
         assert!(result.contains("KB"));
-        
+
         // Test MB
         softether_ios_format_bytes(5 * 1024 * 1024, buffer.as_mut_ptr(), buffer.len());
         let result = unsafe { CStr::from_ptr(buffer.as_ptr()).to_str().unwrap() };

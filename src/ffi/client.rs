@@ -893,8 +893,13 @@ async fn connect_and_run_inner(
     }
 
     // Create session info from DHCP config (include MAC for Kotlin to use)
-    let session =
-        create_session_from_dhcp(&dhcp_config, dhcpv6_config.as_ref(), actual_server_ip, server_ip, mac);
+    let session = create_session_from_dhcp(
+        &dhcp_config,
+        dhcpv6_config.as_ref(),
+        actual_server_ip,
+        server_ip,
+        mac,
+    );
 
     // Notify connected with session info
     log_message(callbacks, 1, "[RUST] Notifying Android of connection...");
@@ -1518,9 +1523,19 @@ async fn run_packet_loop(
     let mut encryption = rc4_key_pair.map(TunnelEncryption::new);
 
     // Log compression/encryption state
-    log_msg(&callbacks, 1, &format!("[RUST] Compression: {}, Encryption: {}", 
-        if use_compress { "enabled" } else { "disabled" },
-        if encryption.is_some() { "RC4" } else { "TLS-only" }));
+    log_msg(
+        &callbacks,
+        1,
+        &format!(
+            "[RUST] Compression: {}, Encryption: {}",
+            if use_compress { "enabled" } else { "disabled" },
+            if encryption.is_some() {
+                "RC4"
+            } else {
+                "TLS-only"
+            }
+        ),
+    );
 
     // Send gratuitous ARP to announce our presence
     let garp = arp.build_gratuitous_arp();
@@ -1612,12 +1627,12 @@ async fn run_packet_loop(
 
     while running.load(Ordering::SeqCst) {
         loop_count += 1;
-        
+
         // Only log loop iteration periodically to avoid log spam
         if loop_count == 1 {
             log_msg(&callbacks, 1, "[RUST] Packet loop started");
         }
-        
+
         // Check if we need to send keepalive (TCP)
         if last_keepalive.elapsed() >= Duration::from_secs(keepalive_interval_secs) {
             // Encrypt keepalive if RC4 is enabled
