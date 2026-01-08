@@ -128,7 +128,7 @@ jobs:
             macos-ios-cargo-release-
       
       - name: Build iOS
-        run: cargo build --release --target aarch64-apple-ios --features ffi
+        run: cargo build --release --target aarch64-apple-ios --features ios
       
       - name: Create XCFramework
         run: |
@@ -193,7 +193,7 @@ jobs:
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
           CC_aarch64_linux_android: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
           AR_aarch64_linux_android: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
-        run: cargo build --release --target aarch64-linux-android --features ffi,jni
+        run: cargo build --release --target aarch64-linux-android --features android
       
       - name: Build Android (armeabi-v7a)
         env:
@@ -201,7 +201,7 @@ jobs:
           CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang
           CC_armv7_linux_androideabi: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang
           AR_armv7_linux_androideabi: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
-        run: cargo build --release --target armv7-linux-androideabi --features ffi,jni
+        run: cargo build --release --target armv7-linux-androideabi --features android
       
       - name: Build Android (x86_64)
         env:
@@ -209,7 +209,7 @@ jobs:
           CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang
           CC_x86_64_linux_android: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang
           AR_x86_64_linux_android: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
-        run: cargo build --release --target x86_64-linux-android --features ffi,jni
+        run: cargo build --release --target x86_64-linux-android --features android
       
       - name: Build Android (x86)
         env:
@@ -217,7 +217,7 @@ jobs:
           CARGO_TARGET_I686_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android21-clang
           CC_i686_linux_android: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android21-clang
           AR_i686_linux_android: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
-        run: cargo build --release --target i686-linux-android --features ffi,jni
+        run: cargo build --release --target i686-linux-android --features android
       
       - name: Package Android libraries
         run: |
