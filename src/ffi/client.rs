@@ -308,7 +308,9 @@ pub unsafe extern "C" fn softether_create(
         max_connections: config.max_connections.clamp(1, 32) as u8,
         timeout_seconds: config.timeout_seconds.max(5) as u64,
         mtu: config.mtu.clamp(576, 1500) as u16,
-        use_encrypt: config.use_encrypt != 0,
+        // Always force encryption on - non-encrypted mode is not properly supported
+        // (server would switch to plain TCP which our TLS connection can't handle)
+        use_encrypt: true,
         use_compress: config.use_compress != 0,
         udp_accel: config.udp_accel != 0,
         qos: config.qos != 0,
