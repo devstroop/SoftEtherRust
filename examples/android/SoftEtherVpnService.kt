@@ -29,11 +29,41 @@ class SoftEtherVpnService : VpnService(), SoftEtherBridge.Listener {
         const val ACTION_CONNECT = "com.example.softether.CONNECT"
         const val ACTION_DISCONNECT = "com.example.softether.DISCONNECT"
         
+        // === Server ===
         const val EXTRA_SERVER = "server"
         const val EXTRA_PORT = "port"
         const val EXTRA_HUB = "hub"
+        const val EXTRA_SKIP_TLS_VERIFY = "skip_tls_verify"
+        const val EXTRA_CUSTOM_CA_PEM = "custom_ca_pem"
+        const val EXTRA_CERT_FINGERPRINT_SHA256 = "cert_fingerprint_sha256"
+        
+        // === Authentication ===
         const val EXTRA_USERNAME = "username"
         const val EXTRA_PASSWORD_HASH = "password_hash"
+        
+        // === Connection ===
+        const val EXTRA_MAX_CONNECTIONS = "max_connections"
+        const val EXTRA_HALF_CONNECTION = "half_connection"
+        const val EXTRA_TIMEOUT_SECONDS = "timeout_seconds"
+        const val EXTRA_MTU = "mtu"
+        
+        // === Session ===
+        const val EXTRA_NAT_TRAVERSAL = "nat_traversal"
+        const val EXTRA_USE_ENCRYPT = "use_encrypt"
+        const val EXTRA_USE_COMPRESS = "use_compress"
+        const val EXTRA_UDP_ACCEL = "udp_accel"
+        
+        // === Options ===
+        const val EXTRA_QOS = "qos"
+        const val EXTRA_MONITOR_MODE = "monitor_mode"
+        
+        // === Routing ===
+        const val EXTRA_DEFAULT_ROUTE = "default_route"
+        const val EXTRA_ACCEPT_PUSHED_ROUTES = "accept_pushed_routes"
+        const val EXTRA_IPV4_INCLUDE = "ipv4_include"
+        const val EXTRA_IPV4_EXCLUDE = "ipv4_exclude"
+        const val EXTRA_IPV6_INCLUDE = "ipv6_include"
+        const val EXTRA_IPV6_EXCLUDE = "ipv6_exclude"
     }
     
     private var bridge: SoftEtherBridge? = null
@@ -55,13 +85,7 @@ class SoftEtherVpnService : VpnService(), SoftEtherBridge.Listener {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_CONNECT -> {
-                val config = SoftEtherBridge.Configuration(
-                    server = intent.getStringExtra(EXTRA_SERVER) ?: return START_NOT_STICKY,
-                    port = intent.getIntExtra(EXTRA_PORT, 443),
-                    hub = intent.getStringExtra(EXTRA_HUB) ?: "VPN",
-                    username = intent.getStringExtra(EXTRA_USERNAME) ?: return START_NOT_STICKY,
-                    passwordHash = intent.getStringExtra(EXTRA_PASSWORD_HASH) ?: return START_NOT_STICKY
-                )
+                val config = parseConfigFromIntent(intent) ?: return START_NOT_STICKY
                 connect(config)
             }
             ACTION_DISCONNECT -> {
@@ -69,6 +93,50 @@ class SoftEtherVpnService : VpnService(), SoftEtherBridge.Listener {
             }
         }
         return START_STICKY
+    }
+    
+    /**
+     * Parse VPN configuration from intent extras.
+     * Required: server, hub, username, password_hash
+     */
+    private fun parseConfigFromIntent(intent: Intent): SoftEtherBridge.Configuration? {
+        val server = intent.getStringExtra(EXTRA_SERVER) ?: return null
+        val hub = intent.getStringExtra(EXTRA_HUB) ?: return null
+        val username = intent.getStringExtra(EXTRA_USERNAME) ?: return null
+        val passwordHash = intent.getStringExtra(EXTRA_PASSWORD_HASH) ?: return null
+        
+        return SoftEtherBridge.Configuration(
+            // Server
+            server = server,
+            port = intent.getIntExtra(EXTRA_PORT, 443),
+            hub = hub,
+            skipTlsVerify = intent.getBooleanExtra(EXTRA_SKIP_TLS_VERIFY, false),
+            customCaPem = intent.getStringExtra(EXTRA_CUSTOM_CA_PEM),
+            certFingerprintSha256 = intent.getStringExtra(EXTRA_CERT_FINGERPRINT_SHA256),
+            // Authentication
+            username = username,
+            passwordHash = passwordHash,
+            // Connection
+            maxConnections = intent.getIntExtra(EXTRA_MAX_CONNECTIONS, 1),
+            halfConnection = intent.getBooleanExtra(EXTRA_HALF_CONNECTION, false),
+            timeoutSeconds = intent.getIntExtra(EXTRA_TIMEOUT_SECONDS, 30),
+            mtu = intent.getIntExtra(EXTRA_MTU, 1400),
+            // Session
+            natTraversal = intent.getBooleanExtra(EXTRA_NAT_TRAVERSAL, false),
+            useEncrypt = intent.getBooleanExtra(EXTRA_USE_ENCRYPT, true),
+            useCompress = intent.getBooleanExtra(EXTRA_USE_COMPRESS, false),
+            udpAccel = intent.getBooleanExtra(EXTRA_UDP_ACCEL, false),
+            // Options
+            qos = intent.getBooleanExtra(EXTRA_QOS, false),
+            monitorMode = intent.getBooleanExtra(EXTRA_MONITOR_MODE, false),
+            // Routing
+            defaultRoute = intent.getBooleanExtra(EXTRA_DEFAULT_ROUTE, true),
+            acceptPushedRoutes = intent.getBooleanExtra(EXTRA_ACCEPT_PUSHED_ROUTES, true),
+            ipv4Include = intent.getStringExtra(EXTRA_IPV4_INCLUDE),
+            ipv4Exclude = intent.getStringExtra(EXTRA_IPV4_EXCLUDE),
+            ipv6Include = intent.getStringExtra(EXTRA_IPV6_INCLUDE),
+            ipv6Exclude = intent.getStringExtra(EXTRA_IPV6_EXCLUDE)
+        )
     }
     
     private fun connect(config: SoftEtherBridge.Configuration) {

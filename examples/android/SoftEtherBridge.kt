@@ -135,44 +135,91 @@ class SoftEtherBridge {
         val reconnectCount: Int
     )
     
+    /**
+     * VPN Configuration structured by logical sections.
+     *
+     * @property server VPN server hostname or IP address
+     * @property port Server port (default: 443)
+     * @property hub Virtual Hub name
+     * @property username Username for authentication
+     * @property passwordHash Pre-computed SHA-0 password hash (40 hex chars)
+     *
+     * ## Server/TLS Settings
+     * @property skipTlsVerify Skip TLS certificate verification (default: false)
+     * @property customCaPem Custom CA certificate in PEM format
+     * @property certFingerprintSha256 Server cert SHA-256 fingerprint for pinning (64 hex chars)
+     *
+     * ## Connection Settings
+     * @property maxConnections Max TCP connections (1-32, default: 1)
+     * @property halfConnection Half-duplex mode - each connection is one direction only (default: false)
+     *   Requires maxConnections >= 2 to function properly.
+     * @property timeoutSeconds Connection timeout in seconds (default: 30)
+     * @property mtu MTU size for TUN device (default: 1400)
+     *
+     * ## Session/Protocol Features
+     * @property natTraversal NAT traversal mode (default: false = bridge mode)
+     * @property useEncrypt Enable RC4 encryption inside TLS tunnel (default: true)
+     *   Note: TLS is ALWAYS used. This controls optional additional RC4 layer for defense in depth.
+     * @property useCompress Enable compression (default: false)
+     * @property udpAccel Enable UDP acceleration (default: false)
+     * @property qos Enable VoIP/QoS prioritization (default: false)
+     * @property monitorMode Request monitor mode for packet capture (default: false)
+     *
+     * ## Routing
+     * @property defaultRoute Route all traffic through VPN (default: true)
+     * @property acceptPushedRoutes Accept DHCP-pushed routes (default: true)
+     * @property ipv4Include IPv4 networks to route through VPN (comma-separated CIDRs)
+     * @property ipv4Exclude IPv4 networks to exclude from VPN (comma-separated CIDRs)
+     * @property ipv6Include IPv6 networks to route through VPN (comma-separated CIDRs)
+     * @property ipv6Exclude IPv6 networks to exclude from VPN (comma-separated CIDRs)
+     *
+     * ## Static IP Configuration (optional, skips DHCP if set)
+     */
     data class Configuration(
+        // === Server ===
         val server: String,
         val port: Int = 443,
         val hub: String,
+        val skipTlsVerify: Boolean = false,
+        val customCaPem: String? = null,
+        val certFingerprintSha256: String? = null,
+
+        // === Authentication ===
         val username: String,
         val passwordHash: String,
-        // TLS Settings
-        val skipTlsVerify: Boolean = false,
-        /** Custom CA certificate in PEM format for server verification. */
-        val customCaPem: String? = null,
-        /** Server certificate SHA-256 fingerprint for pinning (64 hex chars). */
-        val certFingerprintSha256: String? = null,
-        // Connection Settings
+
+        // === Connection ===
         val maxConnections: Int = 1,
+        val halfConnection: Boolean = false,
         val timeoutSeconds: Int = 30,
         val mtu: Int = 1400,
-        // Protocol Features
+
+        // === Session ===
+        val natTraversal: Boolean = false,
         val useEncrypt: Boolean = true,
         val useCompress: Boolean = false,
         val udpAccel: Boolean = false,
+
+        // === Options ===
         val qos: Boolean = false,
-        // Session Mode
-        val natTraversal: Boolean = true,
         val monitorMode: Boolean = false,
-        // Routing
+
+        // === Routing ===
         val defaultRoute: Boolean = true,
         val acceptPushedRoutes: Boolean = true,
         val ipv4Include: String? = null,
         val ipv4Exclude: String? = null,
         val ipv6Include: String? = null,
         val ipv6Exclude: String? = null,
-        // Static IPv4 Configuration (optional, skips DHCP if set)
+
+        // === Static IPv4 Configuration ===
         val staticIpv4Address: String? = null,
         val staticIpv4Netmask: String? = null,
         val staticIpv4Gateway: String? = null,
         val staticIpv4Dns1: String? = null,
         val staticIpv4Dns2: String? = null,
-        // Static IPv6 Configuration (optional)
+
+        // === Static IPv6 Configuration ===
         val staticIpv6Address: String? = null,
         val staticIpv6PrefixLen: Int = 0,
         val staticIpv6Gateway: String? = null,
@@ -210,41 +257,43 @@ class SoftEtherBridge {
     // MARK: - Native Methods
     
     private external fun nativeCreate(
+        // === Server ===
         server: String,
         port: Int,
         hub: String,
-        username: String,
-        passwordHash: String,
-        // TLS Settings
         skipTlsVerify: Boolean,
         customCaPem: String?,
         certFingerprintSha256: String?,
-        // Connection Settings
+        // === Authentication ===
+        username: String,
+        passwordHash: String,
+        // === Connection ===
         maxConnections: Int,
+        halfConnection: Boolean,
         timeoutSeconds: Int,
         mtu: Int,
-        // Protocol Features
+        // === Session ===
+        natTraversal: Boolean,
         useEncrypt: Boolean,
         useCompress: Boolean,
         udpAccel: Boolean,
+        // === Options ===
         qos: Boolean,
-        // Session Mode
-        natTraversal: Boolean,
         monitorMode: Boolean,
-        // Routing
+        // === Routing ===
         defaultRoute: Boolean,
         acceptPushedRoutes: Boolean,
         ipv4Include: String?,
         ipv4Exclude: String?,
         ipv6Include: String?,
         ipv6Exclude: String?,
-        // Static IPv4 Configuration
+        // === Static IPv4 Configuration ===
         staticIpv4Address: String?,
         staticIpv4Netmask: String?,
         staticIpv4Gateway: String?,
         staticIpv4Dns1: String?,
         staticIpv4Dns2: String?,
-        // Static IPv6 Configuration
+        // === Static IPv6 Configuration ===
         staticIpv6Address: String?,
         staticIpv6PrefixLen: Int,
         staticIpv6Gateway: String?,
@@ -274,34 +323,43 @@ class SoftEtherBridge {
         }
         
         nativeHandle = nativeCreate(
+            // Server
             config.server,
             config.port,
             config.hub,
-            config.username,
-            config.passwordHash,
             config.skipTlsVerify,
             config.customCaPem,
             config.certFingerprintSha256,
+            // Authentication
+            config.username,
+            config.passwordHash,
+            // Connection
             config.maxConnections,
+            config.halfConnection,
             config.timeoutSeconds,
             config.mtu,
+            // Session
+            config.natTraversal,
             config.useEncrypt,
             config.useCompress,
             config.udpAccel,
+            // Options
             config.qos,
-            config.natTraversal,
             config.monitorMode,
+            // Routing
             config.defaultRoute,
             config.acceptPushedRoutes,
             config.ipv4Include,
             config.ipv4Exclude,
             config.ipv6Include,
             config.ipv6Exclude,
+            // Static IPv4
             config.staticIpv4Address,
             config.staticIpv4Netmask,
             config.staticIpv4Gateway,
             config.staticIpv4Dns1,
             config.staticIpv4Dns2,
+            // Static IPv6
             config.staticIpv6Address,
             config.staticIpv6PrefixLen,
             config.staticIpv6Gateway,

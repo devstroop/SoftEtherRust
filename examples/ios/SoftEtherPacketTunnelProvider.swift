@@ -2,6 +2,40 @@
 //
 // This shows how to integrate the Rust-based SoftEther client
 // with iOS Network Extension.
+//
+// Provider Configuration Keys (pass via NETunnelProviderProtocol.providerConfiguration):
+//
+// === Server (Required) ===
+// - server: String - VPN server hostname or IP address
+// - port: Int - Server port (default: 443)
+// - hub: String - Virtual Hub name
+// - skip_tls_verify: Bool - Skip TLS certificate verification (default: false)
+// - custom_ca_pem: String? - Custom CA certificate in PEM format
+// - cert_fingerprint_sha256: String? - Server cert SHA-256 fingerprint for pinning
+//
+// === Authentication (Required) ===
+// - username: String - Username for authentication
+// - passwordHash: String - Pre-computed SHA-0 password hash (40 hex chars)
+//
+// === Connection ===
+// - max_connections: Int - Max TCP connections (1-32, default: 1)
+// - half_connection: Bool - Half-duplex mode (default: false)
+// - timeout_seconds: Int - Connection timeout (default: 30)
+// - mtu: Int - MTU size for TUN device (default: 1400)
+//
+// === Session ===
+// - nat_traversal: Bool - NAT traversal mode (default: false = bridge mode)
+// - use_encrypt: Bool - Enable RC4 encryption inside TLS tunnel (default: true)
+// - use_compress: Bool - Enable compression (default: false)
+// - udp_accel: Bool - Enable UDP acceleration (default: false)
+//
+// === Options ===
+// - qos: Bool - Enable VoIP/QoS prioritization (default: false)
+// - monitor_mode: Bool - Request monitor mode (default: false)
+//
+// === Routing ===
+// - default_route: Bool - Route all traffic through VPN (default: true)
+// - accept_pushed_routes: Bool - Accept DHCP-pushed routes (default: true)
 
 import NetworkExtension
 import os.log
@@ -11,6 +45,9 @@ class SoftEtherPacketTunnelProvider: NEPacketTunnelProvider {
     private let logger = Logger(subsystem: "com.example.vpn", category: "SoftEtherTunnel")
     private var bridge: SoftEtherBridge?
     private var pendingCompletion: ((Error?) -> Void)?
+    
+    // IPs to exclude from VPN routing (cluster redirects)
+    private var excludedIps = Set<String>()
     
     // MARK: - Lifecycle
     
@@ -44,6 +81,12 @@ class SoftEtherPacketTunnelProvider: NEPacketTunnelProvider {
             self?.handleReceivedPackets(packets)
         }
         
+        vpnBridge.onExcludeIp = { [weak self] ip in
+            self?.logger.info("Excluding IP from VPN: \(ip)")
+            self?.excludedIps.insert(ip)
+            return true
+        }
+        
         self.bridge = vpnBridge
         
         // Connect
@@ -68,17 +111,39 @@ class SoftEtherPacketTunnelProvider: NEPacketTunnelProvider {
         guard let tunnelConfig = protocolConfiguration as? NETunnelProviderProtocol,
               let config = tunnelConfig.providerConfiguration,
               let server = config["server"] as? String,
+              let hub = config["hub"] as? String,
               let username = config["username"] as? String,
               let passwordHash = config["passwordHash"] as? String else {
             return nil
         }
         
         return SoftEtherBridge.Configuration(
+            // Server
             server: server,
             port: UInt16(config["port"] as? Int ?? 443),
-            hub: config["hub"] as? String ?? "VPN",
+            hub: hub,
+            skipTlsVerify: config["skip_tls_verify"] as? Bool ?? false,
+            customCaPem: config["custom_ca_pem"] as? String,
+            certFingerprintSha256: config["cert_fingerprint_sha256"] as? String,
+            // Authentication
             username: username,
-            passwordHash: passwordHash
+            passwordHash: passwordHash,
+            // Connection
+            maxConnections: UInt8(config["max_connections"] as? Int ?? 1),
+            halfConnection: config["half_connection"] as? Bool ?? false,
+            timeoutSeconds: UInt32(config["timeout_seconds"] as? Int ?? 30),
+            mtu: UInt32(config["mtu"] as? Int ?? 1400),
+            // Session
+            natTraversal: config["nat_traversal"] as? Bool ?? false,
+            useEncrypt: config["use_encrypt"] as? Bool ?? true,
+            useCompress: config["use_compress"] as? Bool ?? false,
+            udpAccel: config["udp_accel"] as? Bool ?? false,
+            // Options
+            qos: config["qos"] as? Bool ?? false,
+            monitorMode: config["monitor_mode"] as? Bool ?? false,
+            // Routing
+            defaultRoute: config["default_route"] as? Bool ?? true,
+            acceptPushedRoutes: config["accept_pushed_routes"] as? Bool ?? true
         )
     }
     
@@ -94,15 +159,26 @@ class SoftEtherPacketTunnelProvider: NEPacketTunnelProvider {
             addresses: [session.ipAddressString],
             subnetMasks: [session.subnetMaskString]
         )
+        
+        // Include routes (split tunnel using 0/1 and 128/1 to avoid replacing default gateway)
         ipv4.includedRoutes = [
             NEIPv4Route(destinationAddress: "0.0.0.0", subnetMask: "128.0.0.0"),
             NEIPv4Route(destinationAddress: "128.0.0.0", subnetMask: "128.0.0.0")
         ]
+        
+        // Exclude routes: VPN server IP + any cluster redirect IPs
+        var excludedRoutes: [NEIPv4Route] = []
         if !session.connectedServerIP.isEmpty {
-            ipv4.excludedRoutes = [
+            excludedRoutes.append(
                 NEIPv4Route(destinationAddress: session.connectedServerIP, subnetMask: "255.255.255.255")
-            ]
+            )
         }
+        for excludedIp in excludedIps {
+            excludedRoutes.append(
+                NEIPv4Route(destinationAddress: excludedIp, subnetMask: "255.255.255.255")
+            )
+        }
+        ipv4.excludedRoutes = excludedRoutes
         settings.ipv4Settings = ipv4
         
         // DNS
@@ -158,9 +234,13 @@ class SoftEtherPacketTunnelProvider: NEPacketTunnelProvider {
     private func sendPacketsToServer(_ ipPackets: [Data]) {
         guard let bridge = bridge, let session = bridge.session else { return }
         
-        // Get gateway MAC (would need to be tracked from ARP)
-        let gatewayMAC: [UInt8] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
-        let srcMAC: [UInt8] = [0x5E, 0x00, 0x00, 0x00, 0x00, 0x01]
+        // Use gateway MAC from session (learned from ARP) or broadcast if not available
+        let gatewayMAC = session.gatewayMac.isEmpty || session.gatewayMac == [0, 0, 0, 0, 0, 0]
+            ? [UInt8](repeating: 0xFF, count: 6)
+            : session.gatewayMac
+        
+        // Use session MAC address for source
+        let srcMAC = session.macAddress
         
         // Convert L3 IP packets to L2 Ethernet frames
         var frames: [Data] = []
@@ -173,6 +253,13 @@ class SoftEtherPacketTunnelProvider: NEPacketTunnelProvider {
             frames.append(frame)
         }
         
-        try? bridge.sendPackets(frames)
+        do {
+            try bridge.sendPackets(frames)
+        } catch BridgeError.queueFull {
+            // Backpressure - drop packets (common under heavy load)
+            logger.debug("Queue full, dropping \(ipPackets.count) packets")
+        } catch {
+            logger.warning("Send failed: \(error.localizedDescription)")
+        }
     }
 }

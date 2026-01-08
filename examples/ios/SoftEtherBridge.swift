@@ -92,36 +92,76 @@ public class SoftEtherBridge {
         public let reconnectCount: UInt32
     }
     
+    /// VPN Configuration structured by logical sections.
+    ///
+    /// ## Server
+    /// - `server`: VPN server hostname or IP address
+    /// - `port`: Server port (default: 443)
+    /// - `hub`: Virtual Hub name
+    /// - `skipTlsVerify`: Skip TLS certificate verification (default: false)
+    /// - `customCaPem`: Custom CA certificate in PEM format
+    /// - `certFingerprintSha256`: Server cert SHA-256 fingerprint for pinning
+    ///
+    /// ## Authentication
+    /// - `username`: Username for authentication
+    /// - `passwordHash`: Pre-computed SHA-0 password hash (40 hex chars)
+    ///
+    /// ## Connection
+    /// - `maxConnections`: Max TCP connections (1-32, default: 1)
+    /// - `halfConnection`: Half-duplex mode (requires maxConnections >= 2)
+    /// - `timeoutSeconds`: Connection timeout in seconds (default: 30)
+    /// - `mtu`: MTU size for TUN device (default: 1400)
+    ///
+    /// ## Session
+    /// - `natTraversal`: NAT traversal mode (default: false = bridge mode)
+    /// - `useEncrypt`: Enable RC4 encryption inside TLS tunnel (default: true)
+    ///   Note: TLS is ALWAYS used. This controls optional additional RC4 layer.
+    /// - `useCompress`: Enable compression (default: false)
+    /// - `udpAccel`: Enable UDP acceleration (default: false)
+    ///
+    /// ## Options
+    /// - `qos`: Enable VoIP/QoS prioritization (default: false)
+    /// - `monitorMode`: Request monitor mode for packet capture (default: false)
+    ///
+    /// ## Routing
+    /// - `defaultRoute`: Route all traffic through VPN (default: true)
+    /// - `acceptPushedRoutes`: Accept DHCP-pushed routes (default: true)
+    /// - `ipv4Include/ipv4Exclude`: IPv4 networks to include/exclude (comma-separated CIDRs)
+    /// - `ipv6Include/ipv6Exclude`: IPv6 networks to include/exclude (comma-separated CIDRs)
+    ///
+    /// ## Static IP (optional, skips DHCP if set)
+    /// - IPv4: `staticIpv4Address`, `staticIpv4Netmask`, `staticIpv4Gateway`, `staticIpv4Dns1/2`
+    /// - IPv6: `staticIpv6Address`, `staticIpv6PrefixLen`, `staticIpv6Gateway`, `staticIpv6Dns1/2`
     public struct Configuration {
+        // === Server ===
         public let server: String
         public let port: UInt16
         public let hub: String
+        public let skipTlsVerify: Bool
+        public let customCaPem: String?
+        public let certFingerprintSha256: String?
+        
+        // === Authentication ===
         public let username: String
         public let passwordHash: String
         
-        // TLS Settings
-        public let skipTlsVerify: Bool
-        /// Custom CA certificate in PEM format for server verification.
-        public let customCaPem: String?
-        /// Server certificate SHA-256 fingerprint for pinning (64 hex chars).
-        public let certFingerprintSha256: String?
-        
-        // Connection Settings
+        // === Connection ===
         public let maxConnections: UInt8
+        public let halfConnection: Bool
         public let timeoutSeconds: UInt32
         public let mtu: UInt32
         
-        // Protocol Features
+        // === Session ===
+        public let natTraversal: Bool
         public let useEncrypt: Bool
         public let useCompress: Bool
         public let udpAccel: Bool
-        public let qos: Bool
         
-        // Session Mode
-        public let natTraversal: Bool
+        // === Options ===
+        public let qos: Bool
         public let monitorMode: Bool
         
-        // Routing
+        // === Routing ===
         public let defaultRoute: Bool
         public let acceptPushedRoutes: Bool
         public let ipv4Include: String?
@@ -129,14 +169,14 @@ public class SoftEtherBridge {
         public let ipv6Include: String?
         public let ipv6Exclude: String?
         
-        // Static IPv4 Configuration (optional, skips DHCP if set)
+        // === Static IPv4 Configuration ===
         public let staticIpv4Address: String?
         public let staticIpv4Netmask: String?
         public let staticIpv4Gateway: String?
         public let staticIpv4Dns1: String?
         public let staticIpv4Dns2: String?
         
-        // Static IPv6 Configuration (optional)
+        // === Static IPv6 Configuration ===
         public let staticIpv6Address: String?
         public let staticIpv6PrefixLen: UInt32
         public let staticIpv6Gateway: String?
@@ -144,34 +184,43 @@ public class SoftEtherBridge {
         public let staticIpv6Dns2: String?
         
         public init(
+            // Server
             server: String,
             port: UInt16 = 443,
             hub: String,
-            username: String,
-            passwordHash: String,
             skipTlsVerify: Bool = false,
             customCaPem: String? = nil,
             certFingerprintSha256: String? = nil,
+            // Authentication
+            username: String,
+            passwordHash: String,
+            // Connection
             maxConnections: UInt8 = 1,
+            halfConnection: Bool = false,
             timeoutSeconds: UInt32 = 30,
             mtu: UInt32 = 1400,
+            // Session
+            natTraversal: Bool = false,
             useEncrypt: Bool = true,
             useCompress: Bool = false,
             udpAccel: Bool = false,
+            // Options
             qos: Bool = false,
-            natTraversal: Bool = true,
             monitorMode: Bool = false,
+            // Routing
             defaultRoute: Bool = true,
             acceptPushedRoutes: Bool = true,
             ipv4Include: String? = nil,
             ipv4Exclude: String? = nil,
             ipv6Include: String? = nil,
             ipv6Exclude: String? = nil,
+            // Static IPv4
             staticIpv4Address: String? = nil,
             staticIpv4Netmask: String? = nil,
             staticIpv4Gateway: String? = nil,
             staticIpv4Dns1: String? = nil,
             staticIpv4Dns2: String? = nil,
+            // Static IPv6
             staticIpv6Address: String? = nil,
             staticIpv6PrefixLen: UInt32 = 0,
             staticIpv6Gateway: String? = nil,
@@ -181,19 +230,20 @@ public class SoftEtherBridge {
             self.server = server
             self.port = port
             self.hub = hub
-            self.username = username
-            self.passwordHash = passwordHash
             self.skipTlsVerify = skipTlsVerify
             self.customCaPem = customCaPem
             self.certFingerprintSha256 = certFingerprintSha256
+            self.username = username
+            self.passwordHash = passwordHash
             self.maxConnections = maxConnections
+            self.halfConnection = halfConnection
             self.timeoutSeconds = timeoutSeconds
             self.mtu = mtu
+            self.natTraversal = natTraversal
             self.useEncrypt = useEncrypt
             self.useCompress = useCompress
             self.udpAccel = udpAccel
             self.qos = qos
-            self.natTraversal = natTraversal
             self.monitorMode = monitorMode
             self.defaultRoute = defaultRoute
             self.acceptPushedRoutes = acceptPushedRoutes
@@ -321,17 +371,18 @@ public class SoftEtherBridge {
         
         // Connection Settings
         cConfig.max_connections = UInt32(config.maxConnections)
+        cConfig.half_connection = config.halfConnection ? 1 : 0
         cConfig.timeout_seconds = config.timeoutSeconds
         cConfig.mtu = config.mtu
         
-        // Protocol Features
+        // Session Settings
+        cConfig.nat_traversal = config.natTraversal ? 1 : 0
         cConfig.use_encrypt = config.useEncrypt ? 1 : 0
         cConfig.use_compress = config.useCompress ? 1 : 0
         cConfig.udp_accel = config.udpAccel ? 1 : 0
-        cConfig.qos = config.qos ? 1 : 0
         
-        // Session Mode
-        cConfig.nat_traversal = config.natTraversal ? 1 : 0
+        // Options
+        cConfig.qos = config.qos ? 1 : 0
         cConfig.monitor_mode = config.monitorMode ? 1 : 0
         
         // Routing

@@ -1,9 +1,11 @@
 {
-  "_comment": "=== Server ===",
+  "_comment_server": "=== Server ===",
   "server": "vpn.example.com",
   "port": 443,
   "hub": "DEFAULT",
   "skip_tls_verify": false,
+  "custom_ca_pem": null,
+  "cert_fingerprint_sha256": null,
 
   "_comment_auth": "=== Authentication ===",
   "username": "your_username",
@@ -15,6 +17,7 @@
   "half_connection": false,
 
   "_comment_session": "=== Session ===",
+  "_comment_session_info": "TLS is ALWAYS used. use_encrypt controls optional RC4 encryption inside TLS tunnel.",
   "nat_traversal": false,
   "use_encrypt": true,
   "use_compress": false,
