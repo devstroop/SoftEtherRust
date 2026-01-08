@@ -1817,7 +1817,7 @@ async fn run_packet_loop(
                                 // Build length-prefixed buffer for callback
                                 let mut buffer = Vec::with_capacity(n + frames.len() * 2);
                                 let mut total_bytes: u64 = 0;
-                                for (_frame_idx, frame) in frames.iter().enumerate() {
+                                for frame in frames.iter() {
                                     // Decompress if needed
                                     let frame_data: Vec<u8> = if is_compressed(frame) {
                                         match decompress(frame) {
