@@ -312,6 +312,8 @@ impl VpnClient {
         let options = ConnectionOptions {
             max_connections: self.config.max_connections,
             half_connection: self.config.half_connection,
+            // Note: TLS is ALWAYS used. use_encrypt controls additional RC4 encryption
+            // inside the TLS tunnel, not TLS itself.
             use_encrypt: self.config.use_encrypt,
             use_compress: self.config.use_compress,
             udp_accel: self.config.udp_accel,
@@ -470,6 +472,8 @@ impl VpnClient {
         let options = ConnectionOptions {
             max_connections: self.config.max_connections,
             half_connection: self.config.half_connection,
+            // Note: TLS is ALWAYS used. use_encrypt controls additional RC4 encryption
+            // inside the TLS tunnel, not TLS itself.
             use_encrypt: self.config.use_encrypt,
             use_compress: self.config.use_compress,
             udp_accel: self.config.udp_accel,

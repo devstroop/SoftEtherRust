@@ -309,9 +309,10 @@ pub unsafe extern "C" fn softether_create(
         half_connection: config.half_connection != 0,
         timeout_seconds: config.timeout_seconds.max(5) as u64,
         mtu: config.mtu.clamp(576, 1500) as u16,
-        // Always force encryption on - non-encrypted mode is not properly supported
-        // (server would switch to plain TCP which our TLS connection can't handle)
-        use_encrypt: true,
+        // Note: TLS is ALWAYS used for the connection. use_encrypt controls whether
+        // additional RC4 encryption is applied to packets inside the TLS tunnel.
+        // When use_encrypt=false, data is still protected by TLS, just without extra RC4.
+        use_encrypt: config.use_encrypt != 0,
         use_compress: config.use_compress != 0,
         udp_accel: config.udp_accel != 0,
         qos: config.qos != 0,

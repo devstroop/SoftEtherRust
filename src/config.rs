@@ -82,7 +82,9 @@ pub struct VpnConfig {
     pub nat_traversal: bool,
 
     /// Enable tunnel data encryption (RC4, default: true).
-    /// Encrypts VPN packets inside the TLS tunnel (defense in depth).
+    /// When enabled, VPN packets are RC4-encrypted inside the TLS tunnel (defense in depth).
+    /// Note: TLS encryption is ALWAYS used - this controls optional additional RC4 encryption.
+    /// Disabling this may slightly improve performance but data is still protected by TLS.
     pub use_encrypt: bool,
 
     /// Enable compression (default: false).
@@ -437,7 +439,8 @@ mod tests {
     fn test_default_config() {
         let config = VpnConfig::default();
         assert_eq!(config.port, 443);
-        assert!(config.skip_tls_verify); // Default: skip TLS verify (self-signed)
+        assert!(!config.skip_tls_verify); // Default: verify TLS (secure by default)
+        assert!(!config.qos); // Default: QoS disabled
         assert_eq!(config.timeout_seconds, 30);
     }
 
