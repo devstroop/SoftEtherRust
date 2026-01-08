@@ -960,6 +960,7 @@ async fn connect_and_run_inner(
         dhcp_config,
         final_auth.rc4_key_pair.as_ref(),
         config.qos,
+        config.use_compress,
         udp_accel.as_mut(),
         stats,
     )
@@ -1464,10 +1465,12 @@ async fn run_packet_loop(
     dhcp_config: DhcpConfig,
     rc4_key_pair: Option<&Rc4KeyPair>,
     qos_enabled: bool,
+    use_compress: bool,
     mut udp_accel: Option<&mut crate::net::UdpAccel>,
     stats: &Arc<FfiStats>,
 ) -> crate::error::Result<()> {
     use crate::packet::is_priority_packet;
+    use crate::protocol::compress;
     fn log_msg(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
         if let Some(cb) = callbacks.on_log {
             if let Ok(cstr) = std::ffi::CString::new(msg) {
@@ -1498,9 +1501,20 @@ async fn run_packet_loop(
     // Create RC4 encryption state if keys are provided
     let mut encryption = rc4_key_pair.map(TunnelEncryption::new);
 
+    // Log compression/encryption state
+    log_msg(&callbacks, 1, &format!("[RUST] Compression: {}, Encryption: {}", 
+        if use_compress { "enabled" } else { "disabled" },
+        if encryption.is_some() { "RC4" } else { "TLS-only" }));
+
     // Send gratuitous ARP to announce our presence
     let garp = arp.build_gratuitous_arp();
-    let encoded_garp = tunnel_codec.encode(&[&garp]);
+    let garp_bytes = garp.to_vec();
+    let garp_data: Vec<u8> = if use_compress {
+        compress(&garp_bytes).unwrap_or_else(|_| garp_bytes.clone())
+    } else {
+        garp_bytes
+    };
+    let encoded_garp = tunnel_codec.encode(&[&garp_data]);
     let garp_to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
         let mut data = encoded_garp.to_vec();
         enc.encrypt(&mut data);
@@ -1516,7 +1530,13 @@ async fn run_packet_loop(
 
     // Send ARP request for gateway MAC
     let gateway_arp = arp.build_gateway_request();
-    let encoded_gw = tunnel_codec.encode(&[&gateway_arp]);
+    let gateway_arp_bytes = gateway_arp.to_vec();
+    let gateway_arp_data: Vec<u8> = if use_compress {
+        compress(&gateway_arp_bytes).unwrap_or_else(|_| gateway_arp_bytes.clone())
+    } else {
+        gateway_arp_bytes
+    };
+    let encoded_gw = tunnel_codec.encode(&[&gateway_arp_data]);
     let gw_to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
         let mut data = encoded_gw.to_vec();
         enc.encrypt(&mut data);
@@ -1576,6 +1596,7 @@ async fn run_packet_loop(
     while running.load(Ordering::SeqCst) {
         // Check if we need to send keepalive (TCP)
         if last_keepalive.elapsed() >= Duration::from_secs(keepalive_interval_secs) {
+            log_msg(&callbacks, 1, "[RUST] Sending TCP keepalive...");
             let keepalive = tunnel_codec.encode_keepalive();
             // Encrypt keepalive if RC4 is enabled
             let to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
@@ -1585,10 +1606,13 @@ async fn run_packet_loop(
             } else {
                 keepalive.to_vec()
             };
-            conn_mgr
-                .write_all(&to_send)
-                .await
-                .map_err(crate::error::Error::Io)?;
+            match conn_mgr.write_all(&to_send).await {
+                Ok(()) => log_msg(&callbacks, 1, "[RUST] TCP keepalive sent"),
+                Err(e) => {
+                    log_msg(&callbacks, 3, &format!("[RUST] TCP keepalive failed: {e}"));
+                    return Err(crate::error::Error::Io(e));
+                }
+            }
             last_keepalive = std::time::Instant::now();
         }
 
@@ -1615,10 +1639,15 @@ async fn run_packet_loop(
 
             // Packets from mobile app to send to VPN server
             Some(frame_data) = tx_recv.recv() => {
+                log_msg(&callbacks, 1, &format!("[RUST] TX: received {} bytes from app", frame_data.len()));
                 let frames = parse_length_prefixed_packets(&frame_data);
+                log_msg(&callbacks, 1, &format!("[RUST] TX: parsed {} frames", frames.len()));
                 if !frames.is_empty() {
                     // Rewrite destination MAC to use learned gateway MAC if available
                     let gateway_mac = arp.gateway_mac_or_broadcast();
+                    log_msg(&callbacks, 1, &format!("[RUST] TX: using gateway MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", 
+                        gateway_mac[0], gateway_mac[1], gateway_mac[2], 
+                        gateway_mac[3], gateway_mac[4], gateway_mac[5]));
                     let mut modified_frames: Vec<Vec<u8>> = frames.into_iter().map(|mut frame| {
                         if frame.len() >= 14 {
                             // Replace destination MAC (first 6 bytes)
@@ -1659,8 +1688,17 @@ async fn run_packet_loop(
 
                     // Fallback to TCP if UDP not ready or not available
                     if !sent_via_udp {
+                        // Compress frames if enabled
+                        let frames_to_encode: Vec<Vec<u8>> = if use_compress {
+                            modified_frames.iter().map(|f| {
+                                compress(f).unwrap_or_else(|_| f.clone())
+                            }).collect()
+                        } else {
+                            modified_frames
+                        };
+
                         // Encode frames into tunnel format
-                        let encoded = tunnel_codec.encode(&modified_frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
+                        let encoded = tunnel_codec.encode(&frames_to_encode.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
 
                         // Encrypt if RC4 is enabled, otherwise send as-is
                         let to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
@@ -1672,6 +1710,7 @@ async fn run_packet_loop(
                         };
 
                         conn_mgr.write_all(&to_send).await.map_err(crate::error::Error::Io)?;
+                        log_msg(&callbacks, 1, &format!("[RUST] TX: sent {} bytes to server ({} frames)", to_send.len(), packet_count));
                     }
 
                     // Update send statistics
@@ -1819,7 +1858,7 @@ async fn run_packet_loop(
         }
     }
 
-    log_msg(&callbacks, 1, "[RUST] Packet loop ended");
+    log_msg(&callbacks, 1, &format!("[RUST] Packet loop ended (running={})", running.load(Ordering::SeqCst)));
     Ok(())
 }
 
