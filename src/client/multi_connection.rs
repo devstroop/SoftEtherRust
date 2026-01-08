@@ -139,7 +139,7 @@ impl ConnectionManager {
         actual_server: &str,
         actual_port: u16,
     ) -> Self {
-        let half_connection = config.max_connections > 1;
+        let half_connection = config.half_connection;
 
         // In half-connection mode, the PRIMARY connection is ALWAYS ClientToServer (sending)
         // as per SoftEther Protocol.c: "The direction of the first socket is client to server"

@@ -323,6 +323,9 @@ impl AuthResult {
 pub struct ConnectionOptions {
     /// Maximum number of TCP connections (1-32).
     pub max_connections: u8,
+    /// Enable half-connection (half-duplex) mode.
+    /// When true, each TCP connection is used for one direction only.
+    pub half_connection: bool,
     /// Enable encryption for tunnel data (RC4).
     pub use_encrypt: bool,
     /// Enable compression.
@@ -341,6 +344,7 @@ impl Default for ConnectionOptions {
     fn default() -> Self {
         Self {
             max_connections: 1,
+            half_connection: false,
             use_encrypt: true,
             use_compress: false,
             udp_accel: false,
@@ -408,9 +412,8 @@ impl AuthPack {
         pack.add_int("max_connection", options.max_connections as u32);
         pack.add_bool("use_encrypt", options.use_encrypt);
         pack.add_bool("use_compress", options.use_compress);
-        // half_connection only makes sense with max_connections >= 2
-        // For now we only support 1 connection, so always false
-        pack.add_bool("half_connection", options.max_connections >= 2);
+        // half_connection: each TCP connection handles one direction only
+        pack.add_bool("half_connection", options.half_connection);
         pack.add_bool("require_bridge_routing_mode", options.bridge_mode);
         pack.add_bool("require_monitor_mode", options.monitor_mode);
         pack.add_bool("qos", options.qos);
@@ -541,8 +544,8 @@ impl AuthPack {
         pack.add_int("max_connection", options.max_connections as u32);
         pack.add_bool("use_encrypt", options.use_encrypt);
         pack.add_bool("use_compress", options.use_compress);
-        // half_connection only makes sense with max_connections >= 2
-        pack.add_bool("half_connection", options.max_connections >= 2);
+        // half_connection: each TCP connection handles one direction only
+        pack.add_bool("half_connection", options.half_connection);
         pack.add_bool("require_bridge_routing_mode", options.bridge_mode);
         pack.add_bool("require_monitor_mode", options.monitor_mode);
         pack.add_bool("qos", options.qos);

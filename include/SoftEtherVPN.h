@@ -67,6 +67,9 @@ typedef struct {
     
     // Connection Settings
     unsigned int max_connections; // Max TCP connections (1-32, default 1)
+    int half_connection;          // Half-connection (half-duplex) mode (1 = yes, 0 = no)
+                                  // When enabled, each TCP connection handles one direction only.
+                                  // Requires max_connections >= 2.
     unsigned int timeout_seconds; // Connection timeout in seconds (default 30)
     unsigned int mtu;             // MTU size (576-1500, default 1400)
     

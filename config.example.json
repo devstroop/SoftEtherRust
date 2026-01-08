@@ -10,6 +10,7 @@
   "use_compress": true,
   "udp_accel": false,
   "max_connections": 1,
+  "half_connection": false,
   "mtu": 1400,
   "routing": {
     "default_route": false,
@@ -21,10 +22,7 @@
   },
   "qos": false,
   "timeout_seconds": 30,
-  
-  "_comment_static_ip": "Static IP configuration (optional). When set, DHCP is skipped.",
   "static_ip": {
-    "_comment": "Set these fields to use a static IP instead of DHCP",
     "ipv4_address": null,
     "ipv4_netmask": null,
     "ipv4_gateway": null,

@@ -306,6 +306,7 @@ pub unsafe extern "C" fn softether_create(
         custom_ca_pem,
         cert_fingerprint_sha256,
         max_connections: config.max_connections.clamp(1, 32) as u8,
+        half_connection: config.half_connection != 0,
         timeout_seconds: config.timeout_seconds.max(5) as u64,
         mtu: config.mtu.clamp(576, 1500) as u16,
         // Always force encryption on - non-encrypted mode is not properly supported
@@ -1106,6 +1107,7 @@ async fn connect_redirect(
     // Build connection options
     let options = ConnectionOptions {
         max_connections: config.max_connections,
+        half_connection: config.half_connection,
         use_encrypt: config.use_encrypt,
         use_compress: config.use_compress,
         udp_accel: false,
@@ -1994,6 +1996,7 @@ async fn authenticate(
 
     let options = ConnectionOptions {
         max_connections: config.max_connections,
+        half_connection: config.half_connection,
         use_encrypt: config.use_encrypt,
         use_compress: config.use_compress,
         udp_accel: config.udp_accel,

@@ -91,6 +91,14 @@ pub struct VpnConfig {
     /// Higher values can improve throughput but use more resources.
     pub max_connections: u8,
 
+    /// Enable half-connection (half-duplex) mode (default: false).
+    /// When true, each TCP connection is used for one direction only:
+    /// - Requires max_connections >= 2 to function properly
+    /// - Connection 1: client → server (upload)
+    /// - Connection 2: server → client (download)
+    /// When false (full-duplex), each connection handles both directions.
+    pub half_connection: bool,
+
     /// MTU size for the TUN device (default: 1400).
     /// Used for packet handling, not sent to server.
     pub mtu: u16,
@@ -309,6 +317,7 @@ impl Default for VpnConfig {
             monitor_mode: false,
             // Performance
             max_connections: 1,
+            half_connection: false,
             mtu: 1400,
             // Routing
             routing: RoutingConfig::default(),
@@ -379,6 +388,13 @@ impl VpnConfig {
         }
         if self.port == 0 {
             return Err(crate::Error::Config("Invalid port number".into()));
+        }
+        // Warn if half_connection is enabled but max_connections < 2
+        if self.half_connection && self.max_connections < 2 {
+            return Err(crate::Error::Config(
+                "half_connection requires max_connections >= 2 (one connection per direction)"
+                    .into(),
+            ));
         }
         Ok(())
     }
@@ -508,5 +524,32 @@ mod tests {
         assert!(!config.routing.accept_pushed_routes);
         assert_eq!(config.routing.ipv4_include.len(), 1);
         assert_eq!(config.routing.ipv4_exclude.len(), 1);
+    }
+
+    #[test]
+    fn test_half_connection_validation() {
+        // half_connection=false with max_connections=1 should be OK
+        let mut config = VpnConfig::new(
+            "vpn.example.com".into(),
+            "VPN".into(),
+            "user".into(),
+            "0000000000000000000000000000000000000001".into(),
+        );
+        config.max_connections = 1;
+        config.half_connection = false;
+        assert!(config.validate().is_ok());
+
+        // half_connection=true with max_connections=1 should fail
+        config.half_connection = true;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("half_connection requires max_connections >= 2"));
+
+        // half_connection=true with max_connections=2 should be OK
+        config.max_connections = 2;
+        assert!(config.validate().is_ok());
     }
 }
