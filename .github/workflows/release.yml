@@ -246,16 +246,10 @@ jobs:
           cp -r examples/android dist/libsoftether-android/examples || true
           cd dist && zip -r ../libsoftether-android.zip libsoftether-android
       
-      - name: Generate checksums
-        run: |
-          sha256sum libsoftether-android.zip > libsoftether-android.zip.sha256
-      
       - name: Upload to Release
         uses: softprops/action-gh-release@v1
         with:
-          files: |
-            libsoftether-android.zip
-            libsoftether-android.zip.sha256
+          files: libsoftether-android.zip
           draft: true
 
   # Finalize release after all builds complete
