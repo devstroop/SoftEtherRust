@@ -44,6 +44,6 @@
   },
 
   "_comment_options": "=== Options ===",
-  "qos": true,
+  "qos": false,
   "monitor_mode": false
 }

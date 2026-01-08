@@ -321,7 +321,7 @@ impl Default for VpnConfig {
             routing: RoutingConfig::default(),
             static_ip: None,
             // Options
-            qos: true,
+            qos: false,
             monitor_mode: false,
         }
     }
