@@ -24,8 +24,8 @@ use crate::protocol::{
     CONTENT_TYPE_SIGNATURE, SIGNATURE_TARGET, VPN_SIGNATURE, VPN_TARGET,
 };
 
-/// Channel capacity for packet queues
-const PACKET_QUEUE_SIZE: usize = 256;
+/// Channel capacity for packet queues - larger buffer for better throughput
+const PACKET_QUEUE_SIZE: usize = 128;
 
 /// Maximum retries for "User Already Logged In" errors
 const MAX_USER_IN_USE_RETRIES: u32 = 5;
@@ -1592,13 +1592,20 @@ async fn run_packet_loop(
         .await
         .map_err(crate::error::Error::Io)?;
     let mut last_keepalive = std::time::Instant::now();
+    let mut loop_count = 0u64;
 
     while running.load(Ordering::SeqCst) {
+        loop_count += 1;
+        
+        // Only log loop iteration periodically to avoid log spam
+        if loop_count == 1 {
+            log_msg(&callbacks, 1, "[RUST] Packet loop started");
+        }
+        
         // Check if we need to send keepalive (TCP)
         if last_keepalive.elapsed() >= Duration::from_secs(keepalive_interval_secs) {
-            log_msg(&callbacks, 1, "[RUST] Sending TCP keepalive...");
-            let keepalive = tunnel_codec.encode_keepalive();
             // Encrypt keepalive if RC4 is enabled
+            let keepalive = tunnel_codec.encode_keepalive();
             let to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
                 let mut data = keepalive.to_vec();
                 enc.encrypt(&mut data);
@@ -1606,12 +1613,9 @@ async fn run_packet_loop(
             } else {
                 keepalive.to_vec()
             };
-            match conn_mgr.write_all(&to_send).await {
-                Ok(()) => log_msg(&callbacks, 1, "[RUST] TCP keepalive sent"),
-                Err(e) => {
-                    log_msg(&callbacks, 3, &format!("[RUST] TCP keepalive failed: {e}"));
-                    return Err(crate::error::Error::Io(e));
-                }
+            if let Err(e) = conn_mgr.write_all(&to_send).await {
+                log_msg(&callbacks, 3, &format!("[RUST] Keepalive failed: {e}"));
+                return Err(crate::error::Error::Io(e));
             }
             last_keepalive = std::time::Instant::now();
         }
@@ -1639,15 +1643,10 @@ async fn run_packet_loop(
 
             // Packets from mobile app to send to VPN server
             Some(frame_data) = tx_recv.recv() => {
-                log_msg(&callbacks, 1, &format!("[RUST] TX: received {} bytes from app", frame_data.len()));
                 let frames = parse_length_prefixed_packets(&frame_data);
-                log_msg(&callbacks, 1, &format!("[RUST] TX: parsed {} frames", frames.len()));
                 if !frames.is_empty() {
                     // Rewrite destination MAC to use learned gateway MAC if available
                     let gateway_mac = arp.gateway_mac_or_broadcast();
-                    log_msg(&callbacks, 1, &format!("[RUST] TX: using gateway MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", 
-                        gateway_mac[0], gateway_mac[1], gateway_mac[2], 
-                        gateway_mac[3], gateway_mac[4], gateway_mac[5]));
                     let mut modified_frames: Vec<Vec<u8>> = frames.into_iter().map(|mut frame| {
                         if frame.len() >= 14 {
                             // Replace destination MAC (first 6 bytes)
@@ -1709,8 +1708,11 @@ async fn run_packet_loop(
                             encoded.to_vec()
                         };
 
-                        conn_mgr.write_all(&to_send).await.map_err(crate::error::Error::Io)?;
-                        log_msg(&callbacks, 1, &format!("[RUST] TX: sent {} bytes to server ({} frames)", to_send.len(), packet_count));
+                        // Write to TCP - don't use timeout, let TCP flow control handle backpressure
+                        if let Err(e) = conn_mgr.write_all(&to_send).await {
+                            log_msg(&callbacks, 3, &format!("[RUST] TX error: {}", e));
+                            return Err(crate::error::Error::Io(e));
+                        }
                     }
 
                     // Update send statistics
@@ -1773,41 +1775,27 @@ async fn run_packet_loop(
             result = tokio::time::timeout(Duration::from_millis(500), conn_mgr.read_any(&mut read_buf)) => {
                 match result {
                     Ok(Ok((_conn_idx, n))) if n > 0 => {
-                        // Log raw receive for debugging
-                        log_msg(&callbacks, 1, &format!("[RUST] RX: {} bytes from server", n));
-                        
-                        // Log first 16 bytes as hex for debugging
-                        let hex_preview: String = read_buf[..n.min(16)].iter()
-                            .map(|b| format!("{:02x}", b))
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        log_msg(&callbacks, 1, &format!("[RUST] RX raw: {}", hex_preview));
-                        
                         // Decrypt if RC4 is enabled
                         if let Some(ref mut enc) = encryption {
                             enc.decrypt(&mut read_buf[..n]);
                         }
 
-                        if let Ok(frames) = tunnel_codec.decode(&read_buf[..n]) {
-                            log_msg(&callbacks, 1, &format!("[RUST] RX: decoded {} frames", frames.len()));
+                        match tunnel_codec.decode(&read_buf[..n]) {
+                            Ok(frames) => {
                             if !frames.is_empty() {
                                 // Build length-prefixed buffer for callback
                                 let mut buffer = Vec::with_capacity(n + frames.len() * 2);
                                 let mut total_bytes: u64 = 0;
-                                for frame in &frames {
+                                for (_frame_idx, frame) in frames.iter().enumerate() {
                                     // Decompress if needed
                                     let frame_data: Vec<u8> = if is_compressed(frame) {
-                                        decompress(frame).unwrap_or_else(|_| frame.to_vec())
+                                        match decompress(frame) {
+                                            Ok(d) => d,
+                                            Err(_) => frame.to_vec(),
+                                        }
                                     } else {
                                         frame.to_vec()
                                     };
-                                    
-                                    // Log first 20 bytes of decompressed frame for debugging
-                                    let hex_preview: String = frame_data[..frame_data.len().min(20)].iter()
-                                        .map(|b| format!("{:02x}", b))
-                                        .collect::<Vec<_>>()
-                                        .join(" ");
-                                    log_msg(&callbacks, 1, &format!("[RUST] Frame {} bytes: {}", frame_data.len(), hex_preview));
 
                                     // Process ARP packets for gateway MAC learning
                                     if frame_data.len() >= 14 {
@@ -1842,6 +1830,10 @@ async fn run_packet_loop(
                                     cb(callbacks.context, buffer.as_ptr(), buffer.len(), frames.len() as u32);
                                 }
                             }
+                            }
+                            Err(e) => {
+                                log_msg(&callbacks, 3, &format!("[RUST] RX decode error: {:?}", e));
+                            }
                         }
                     }
                     Ok(Ok(_)) => {
@@ -1852,13 +1844,15 @@ async fn run_packet_loop(
                         log_msg(&callbacks, 3, &format!("[RUST] Read error: {e}"));
                         return Err(crate::error::Error::Io(e));
                     }
-                    Err(_) => {} // Timeout - fine, loop to check keepalive
+                    Err(_) => {
+                        // Timeout - this is normal, no need to log
+                    }
                 }
             }
         }
     }
 
-    log_msg(&callbacks, 1, &format!("[RUST] Packet loop ended (running={})", running.load(Ordering::SeqCst)));
+    log_msg(&callbacks, 1, "[RUST] Packet loop ended");
     Ok(())
 }
 
