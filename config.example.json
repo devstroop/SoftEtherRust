@@ -1,16 +1,26 @@
 {
+  "_comment": "=== Server ===",
   "server": "vpn.example.com",
   "port": 443,
   "hub": "DEFAULT",
+  "skip_tls_verify": true,
+
+  "_comment_auth": "=== Authentication ===",
   "username": "your_username",
   "password_hash": "0000000000000000000000000000000000000000",
-  "skip_tls_verify": true,
-  "nat_traversal": false,
-  "use_encrypt": true,
-  "use_compress": true,
-  "udp_accel": false,
+
+  "_comment_conn": "=== Connection ===",
+  "timeout_seconds": 30,
   "max_connections": 1,
   "half_connection": false,
+
+  "_comment_session": "=== Session ===",
+  "nat_traversal": false,
+  "use_encrypt": true,
+  "use_compress": false,
+  "udp_accel": false,
+
+  "_comment_tunnel": "=== Tunnel ===",
   "mtu": 1400,
   "routing": {
     "default_route": false,
@@ -20,8 +30,6 @@
     "ipv6_include": [],
     "ipv6_exclude": []
   },
-  "qos": false,
-  "timeout_seconds": 30,
   "static_ip": {
     "ipv4_address": null,
     "ipv4_netmask": null,
@@ -33,5 +41,9 @@
     "ipv6_gateway": null,
     "ipv6_dns1": null,
     "ipv6_dns2": null
-  }
+  },
+
+  "_comment_options": "=== Options ===",
+  "qos": true,
+  "monitor_mode": false
 }

@@ -6,11 +6,19 @@ use std::path::Path;
 use std::time::Duration;
 
 /// VPN client configuration.
+///
+/// The configuration is organized into logical sections:
+/// - **Server**: Server address, port, hub, and TLS settings
+/// - **Authentication**: Username and password hash
+/// - **Connection**: Timeout, max connections, and half-duplex mode
+/// - **Session**: Protocol features (encryption, compression, UDP accel)
+/// - **Tunnel**: MTU, routing, and static IP configuration
+/// - **Options**: QoS, monitor mode, and other optional features
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VpnConfig {
     // ─────────────────────────────────────────────────────────────────────────
-    // Connection
+    // Server
     // ─────────────────────────────────────────────────────────────────────────
     /// VPN server hostname or IP address.
     pub server: String,
@@ -21,22 +29,6 @@ pub struct VpnConfig {
     /// Virtual Hub name.
     pub hub: String,
 
-    /// Connection timeout in seconds (default: 30).
-    pub timeout_seconds: u64,
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Authentication
-    // ─────────────────────────────────────────────────────────────────────────
-    /// Username for authentication.
-    pub username: String,
-
-    /// Pre-computed password hash (40-char hex string of SHA-0 hash).
-    /// Generate using: vpnclient hash -u <username> -p <password>
-    pub password_hash: String,
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // TLS
-    // ─────────────────────────────────────────────────────────────────────────
     /// Skip TLS certificate verification (default: true).
     /// Set to false to require valid server certificates.
     /// Most SoftEther servers use self-signed certificates.
@@ -54,39 +46,21 @@ pub struct VpnConfig {
     pub cert_fingerprint_sha256: Option<String>,
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Tunnel Features
+    // Authentication
     // ─────────────────────────────────────────────────────────────────────────
-    /// Enable tunnel data encryption (RC4, default: true).
-    /// Encrypts VPN packets inside the TLS tunnel (defense in depth).
-    pub use_encrypt: bool,
+    /// Username for authentication.
+    pub username: String,
 
-    /// Enable compression (default: false).
-    /// Reduces bandwidth but increases CPU usage.
-    pub use_compress: bool,
-
-    /// Enable UDP acceleration (default: false).
-    /// Uses UDP for data when possible (faster but may be blocked).
-    pub udp_accel: bool,
-
-    /// Enable VoIP/QoS prioritization (default: true).
-    /// When enabled, VoIP packets get higher priority.
-    pub qos: bool,
+    /// Pre-computed password hash (40-char hex string of SHA-0 hash).
+    /// Generate using: vpnclient hash -u <username> -p <password>
+    pub password_hash: String,
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Session Mode
+    // Connection
     // ─────────────────────────────────────────────────────────────────────────
-    /// Use NAT traversal mode (default: false = bridge/routing mode).
-    /// - false: Bridge mode - request bridge/routing permissions (L2 setups)
-    /// - true: NAT mode - no bridge routing requested
-    pub nat_traversal: bool,
+    /// Connection timeout in seconds (default: 30).
+    pub timeout_seconds: u64,
 
-    /// Request monitor mode for packet capture (default: false).
-    /// Requires special server permissions.
-    pub monitor_mode: bool,
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Performance
-    // ─────────────────────────────────────────────────────────────────────────
     /// Maximum number of TCP connections (1-32, default: 1).
     /// Higher values can improve throughput but use more resources.
     pub max_connections: u8,
@@ -99,22 +73,50 @@ pub struct VpnConfig {
     /// When false (full-duplex), each connection handles both directions.
     pub half_connection: bool,
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Session
+    // ─────────────────────────────────────────────────────────────────────────
+    /// Use NAT traversal mode (default: false = bridge/routing mode).
+    /// - false: Bridge mode - request bridge/routing permissions (L2 setups)
+    /// - true: NAT mode - no bridge routing requested
+    pub nat_traversal: bool,
+
+    /// Enable tunnel data encryption (RC4, default: true).
+    /// Encrypts VPN packets inside the TLS tunnel (defense in depth).
+    pub use_encrypt: bool,
+
+    /// Enable compression (default: false).
+    /// Reduces bandwidth but increases CPU usage.
+    pub use_compress: bool,
+
+    /// Enable UDP acceleration (default: false).
+    /// Uses UDP for data when possible (faster but may be blocked).
+    pub udp_accel: bool,
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Tunnel
+    // ─────────────────────────────────────────────────────────────────────────
     /// MTU size for the TUN device (default: 1400).
     /// Used for packet handling, not sent to server.
     pub mtu: u16,
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Routing
-    // ─────────────────────────────────────────────────────────────────────────
     /// Routing configuration for VPN traffic.
     pub routing: RoutingConfig,
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Static IP Configuration (Optional)
-    // ─────────────────────────────────────────────────────────────────────────
     /// Static IP configuration. When set, DHCP is skipped.
     #[serde(default)]
     pub static_ip: Option<StaticIpConfig>,
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Options
+    // ─────────────────────────────────────────────────────────────────────────
+    /// Enable VoIP/QoS prioritization (default: true).
+    /// When enabled, VoIP packets get higher priority.
+    pub qos: bool,
+
+    /// Request monitor mode for packet capture (default: false).
+    /// Requires special server permissions.
+    pub monitor_mode: bool,
 }
 
 /// Routing configuration for VPN traffic.
@@ -295,34 +297,32 @@ impl RoutingConfig {
 impl Default for VpnConfig {
     fn default() -> Self {
         Self {
-            // Connection
+            // Server
             server: String::new(),
             port: 443,
             hub: String::new(),
-            timeout_seconds: 30,
-            // Authentication
-            username: String::new(),
-            password_hash: String::new(),
-            // TLS
             skip_tls_verify: true, // SoftEther often uses self-signed certs
             custom_ca_pem: None,
             cert_fingerprint_sha256: None,
-            // Tunnel Features
+            // Authentication
+            username: String::new(),
+            password_hash: String::new(),
+            // Connection
+            timeout_seconds: 30,
+            max_connections: 1,
+            half_connection: false,
+            // Session
+            nat_traversal: false, // Bridge mode by default (common for L2 setups)
             use_encrypt: true,
             use_compress: false,
             udp_accel: false,
-            qos: true,
-            // Session Mode
-            nat_traversal: false, // Bridge mode by default (common for L2 setups)
-            monitor_mode: false,
-            // Performance
-            max_connections: 1,
-            half_connection: false,
+            // Tunnel
             mtu: 1400,
-            // Routing
             routing: RoutingConfig::default(),
-            // Static IP
             static_ip: None,
+            // Options
+            qos: true,
+            monitor_mode: false,
         }
     }
 }
