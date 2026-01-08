@@ -104,6 +104,7 @@ pub fn create_session_from_dhcp(
         dns1: dhcp.dns1.map(ip_to_u32).unwrap_or(0),
         dns2: dhcp.dns2.map(ip_to_u32).unwrap_or(0),
         connected_server_ip: server_ip_str,
+        original_server_ip: [0; 64], // Not available in this context
         server_version: 0,
         server_build: 0,
         mac_address: mac,

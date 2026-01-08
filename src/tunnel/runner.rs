@@ -41,10 +41,10 @@ use crate::packet::ArpHandler;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use crate::packet::BROADCAST_MAC;
 use crate::packet::{DhcpClient, DhcpConfig, DhcpState};
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-use crate::protocol::decompress_into;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::protocol::compress_into;
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+use crate::protocol::decompress_into;
 use crate::protocol::{compress, decompress, is_compressed, TunnelCodec};
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]

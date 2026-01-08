@@ -235,7 +235,7 @@ public class SoftEtherBridge {
     
     // MARK: - Private
     
-    private var handle: SoftEtherHandle = SOFTETHER_HANDLE_NULL
+    private var handle: SoftEtherHandle?
     private var callbackContext = CallbackContext()
     
     // MARK: - Lifecycle
@@ -244,9 +244,9 @@ public class SoftEtherBridge {
     
     deinit {
         disconnect()
-        if handle != SOFTETHER_HANDLE_NULL {
-            softether_destroy(handle)
-            handle = SOFTETHER_HANDLE_NULL
+        if let h = handle {
+            softether_destroy(h)
+            handle = nil
         }
     }
     
@@ -254,7 +254,7 @@ public class SoftEtherBridge {
     
     /// Create and connect to VPN server.
     public func connect(config: Configuration) throws {
-        if handle != SOFTETHER_HANDLE_NULL {
+        if handle != nil {
             throw BridgeError.alreadyConnected
         }
         
@@ -369,38 +369,39 @@ public class SoftEtherBridge {
         
         // Create client
         handle = softether_create(&cConfig, &cCallbacks)
-        if handle == SOFTETHER_HANDLE_NULL {
+        guard let h = handle else {
             throw BridgeError.createFailed
         }
         
         // Start connection
-        let result = softether_connect(handle)
+        let result = softether_connect(h)
         if result != SOFTETHER_OK {
-            softether_destroy(handle)
-            handle = SOFTETHER_HANDLE_NULL
+            softether_destroy(h)
+            handle = nil
             throw BridgeError.connectFailed(code: Int(result.rawValue))
         }
     }
     
     /// Disconnect from VPN server.
     public func disconnect() {
-        if handle != SOFTETHER_HANDLE_NULL {
-            _ = softether_disconnect(handle)
+        if let h = handle {
+            _ = softether_disconnect(h)
         }
     }
     
     /// Get current connection state.
     public var state: ConnectionState {
-        if handle == SOFTETHER_HANDLE_NULL {
+        guard let h = handle else {
             return .disconnected
         }
-        return ConnectionState(from: softether_get_state(handle))
+        return ConnectionState(from: softether_get_state(h))
     }
     
     /// Get session information (only valid when connected).
     public var session: Session? {
+        guard let h = handle else { return nil }
         var cSession = SoftEtherSession()
-        let result = softether_get_session(handle, &cSession)
+        let result = softether_get_session(h, &cSession)
         guard result == SOFTETHER_OK else { return nil }
         
         return Session(
@@ -424,7 +425,9 @@ public class SoftEtherBridge {
     /// Get connection statistics.
     public var statistics: Statistics {
         var cStats = SoftEtherStats()
-        _ = softether_get_stats(handle, &cStats)
+        if let h = handle {
+            _ = softether_get_stats(h, &cStats)
+        }
         
         return Statistics(
             bytesSent: cStats.bytes_sent,
@@ -459,9 +462,12 @@ public class SoftEtherBridge {
         }
         
         // Send
+        guard let h = handle else {
+            throw BridgeError.sendFailed(code: -1)
+        }
         let result = buffer.withUnsafeBytes { ptr in
             softether_send_packets(
-                handle,
+                h,
                 ptr.baseAddress?.assumingMemoryBound(to: UInt8.self),
                 buffer.count,
                 Int32(packets.count)

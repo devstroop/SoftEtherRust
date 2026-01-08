@@ -150,6 +150,9 @@ pub struct SoftEtherSession {
     /// Actual server IP we're connected to (for route exclusion).
     /// Null-terminated UTF-8 string in a fixed buffer.
     pub connected_server_ip: [c_char; 64],
+    /// Original resolved server IP before cluster redirect (for route exclusion).
+    /// Null-terminated UTF-8 string in a fixed buffer.
+    pub original_server_ip: [c_char; 64],
     /// Server version.
     pub server_version: u32,
     /// Server build number.
@@ -253,6 +256,7 @@ impl Default for SoftEtherSession {
             dns1: 0,
             dns2: 0,
             connected_server_ip: [0; 64],
+            original_server_ip: [0; 64],
             server_version: 0,
             server_build: 0,
             mac_address: [0; 6],

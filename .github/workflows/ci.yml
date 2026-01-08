@@ -49,8 +49,14 @@ jobs:
       - name: Clippy (default features)
         run: cargo clippy --all-targets -- -D warnings
       
-      - name: Clippy (FFI/JNI features)
-        run: cargo clippy --all-targets --features ffi,jni -- -D warnings -A unused_mut
+      - name: Clippy (FFI - generic)
+        run: cargo clippy --all-targets --features ffi -- -D warnings -A unused_mut
+      
+      - name: Clippy (Android features)
+        run: cargo clippy --all-targets --features android -- -D warnings -A unused_mut
+      
+      - name: Clippy (iOS features)
+        run: cargo clippy --all-targets --features ios -- -D warnings -A unused_mut
   
   # Security audit
   security:
@@ -79,6 +85,12 @@ jobs:
           - name: linux-x64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - name: linux-x86
+            os: ubuntu-latest
+            target: i686-unknown-linux-gnu
           - name: macos-x64
             os: macos-15-intel
             target: x86_64-apple-darwin
@@ -88,6 +100,10 @@ jobs:
           - name: windows-x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
+            can_test: true
+          - name: windows-x86
+            os: windows-latest
+            target: i686-pc-windows-msvc
             can_test: true
           - name: windows-arm64
             os: windows-latest
@@ -120,6 +136,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake
+          if [ "${{ matrix.target }}" = "i686-unknown-linux-gnu" ]; then
+            sudo apt-get install -y gcc-multilib
+          fi
       
       - name: Cache Windows dependencies
         if: runner.os == 'Windows'
@@ -176,7 +195,7 @@ jobs:
             macos-ios-cargo-
       
       - name: Build iOS
-        run: cargo build --release --target aarch64-apple-ios --features ffi
+        run: cargo build --release --target aarch64-apple-ios --features ios
 
   # Build Android (verify it compiles)
   build-android:
@@ -239,5 +258,5 @@ jobs:
           export CARGO_TARGET_$(echo ${{ matrix.env_prefix }} | tr '[:lower:]' '[:upper:]')_LINKER="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.linker_prefix }}-clang"
           export CC_${{ matrix.env_prefix }}="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.linker_prefix }}-clang"
           export AR_${{ matrix.env_prefix }}="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
-          cargo build --release --target ${{ matrix.target }} --features ffi,jni
+          cargo build --release --target ${{ matrix.target }} --features android
 

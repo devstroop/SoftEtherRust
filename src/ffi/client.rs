@@ -24,8 +24,8 @@ use crate::protocol::{
     CONTENT_TYPE_SIGNATURE, SIGNATURE_TARGET, VPN_SIGNATURE, VPN_TARGET,
 };
 
-/// Channel capacity for packet queues
-const PACKET_QUEUE_SIZE: usize = 256;
+/// Channel capacity for packet queues - larger buffer for better throughput
+const PACKET_QUEUE_SIZE: usize = 128;
 
 /// Maximum retries for "User Already Logged In" errors
 const MAX_USER_IN_USE_RETRIES: u32 = 5;
@@ -308,7 +308,9 @@ pub unsafe extern "C" fn softether_create(
         max_connections: config.max_connections.clamp(1, 32) as u8,
         timeout_seconds: config.timeout_seconds.max(5) as u64,
         mtu: config.mtu.clamp(576, 1500) as u16,
-        use_encrypt: config.use_encrypt != 0,
+        // Always force encryption on - non-encrypted mode is not properly supported
+        // (server would switch to plain TCP which our TLS connection can't handle)
+        use_encrypt: true,
         use_compress: config.use_compress != 0,
         udp_accel: config.udp_accel != 0,
         qos: config.qos != 0,
@@ -808,6 +810,11 @@ async fn connect_and_run_inner(
     log_message(callbacks, 1, "[RUST] Starting DHCP...");
     update_state(atomic_state, callbacks, SoftEtherState::EstablishingTunnel);
 
+    // In half-connection mode, we need to temporarily enable bidirectional mode
+    // on the primary connection for DHCP, since additional connections aren't
+    // established yet. DHCP needs to both send and receive on the same connection.
+    let original_direction = conn_mgr.enable_primary_bidirectional();
+
     let dhcp_config = match perform_dhcp(&mut conn_mgr, mac, callbacks, config.use_compress).await {
         Ok(config) => {
             log_message(
@@ -821,10 +828,19 @@ async fn connect_and_run_inner(
             config
         }
         Err(e) => {
+            // Restore direction before returning error
+            if let Some(dir) = original_direction {
+                conn_mgr.restore_primary_direction(dir);
+            }
             log_message(callbacks, 3, &format!("[RUST] DHCP failed: {e}"));
             return Err(e);
         }
     };
+
+    // Restore primary connection direction after DHCP
+    if let Some(dir) = original_direction {
+        conn_mgr.restore_primary_direction(dir);
+    }
 
     // Establish additional connections if max_connections > 1
     if config.max_connections > 1 {
@@ -877,8 +893,13 @@ async fn connect_and_run_inner(
     }
 
     // Create session info from DHCP config (include MAC for Kotlin to use)
-    let session =
-        create_session_from_dhcp(&dhcp_config, dhcpv6_config.as_ref(), actual_server_ip, mac);
+    let session = create_session_from_dhcp(
+        &dhcp_config,
+        dhcpv6_config.as_ref(),
+        actual_server_ip,
+        server_ip,
+        mac,
+    );
 
     // Notify connected with session info
     log_message(callbacks, 1, "[RUST] Notifying Android of connection...");
@@ -960,6 +981,7 @@ async fn connect_and_run_inner(
         dhcp_config,
         final_auth.rc4_key_pair.as_ref(),
         config.qos,
+        config.use_compress,
         udp_accel.as_mut(),
         stats,
     )
@@ -971,6 +993,7 @@ fn create_session_from_dhcp(
     dhcp: &DhcpConfig,
     dhcpv6: Option<&Dhcpv6Config>,
     server_ip: Ipv4Addr,
+    original_server_ip: Ipv4Addr,
     mac: [u8; 6],
 ) -> SoftEtherSession {
     let mut server_ip_str = [0 as std::ffi::c_char; 64];
@@ -978,6 +1001,14 @@ fn create_session_from_dhcp(
     for (i, b) in ip_string.bytes().enumerate() {
         if i < 63 {
             server_ip_str[i] = b as std::ffi::c_char;
+        }
+    }
+
+    let mut original_ip_str = [0 as std::ffi::c_char; 64];
+    let orig_ip_string = format!("{original_server_ip}");
+    for (i, b) in orig_ip_string.bytes().enumerate() {
+        if i < 63 {
+            original_ip_str[i] = b as std::ffi::c_char;
         }
     }
 
@@ -1008,6 +1039,7 @@ fn create_session_from_dhcp(
         dns1: dhcp.dns1.map(ip_to_u32).unwrap_or(0),
         dns2: dhcp.dns2.map(ip_to_u32).unwrap_or(0),
         connected_server_ip: server_ip_str,
+        original_server_ip: original_ip_str,
         server_version: 0,
         server_build: 0,
         mac_address: mac,
@@ -1454,10 +1486,12 @@ async fn run_packet_loop(
     dhcp_config: DhcpConfig,
     rc4_key_pair: Option<&Rc4KeyPair>,
     qos_enabled: bool,
+    use_compress: bool,
     mut udp_accel: Option<&mut crate::net::UdpAccel>,
     stats: &Arc<FfiStats>,
 ) -> crate::error::Result<()> {
     use crate::packet::is_priority_packet;
+    use crate::protocol::compress;
     fn log_msg(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
         if let Some(cb) = callbacks.on_log {
             if let Ok(cstr) = std::ffi::CString::new(msg) {
@@ -1488,9 +1522,30 @@ async fn run_packet_loop(
     // Create RC4 encryption state if keys are provided
     let mut encryption = rc4_key_pair.map(TunnelEncryption::new);
 
+    // Log compression/encryption state
+    log_msg(
+        &callbacks,
+        1,
+        &format!(
+            "[RUST] Compression: {}, Encryption: {}",
+            if use_compress { "enabled" } else { "disabled" },
+            if encryption.is_some() {
+                "RC4"
+            } else {
+                "TLS-only"
+            }
+        ),
+    );
+
     // Send gratuitous ARP to announce our presence
     let garp = arp.build_gratuitous_arp();
-    let encoded_garp = tunnel_codec.encode(&[&garp]);
+    let garp_bytes = garp.to_vec();
+    let garp_data: Vec<u8> = if use_compress {
+        compress(&garp_bytes).unwrap_or_else(|_| garp_bytes.clone())
+    } else {
+        garp_bytes
+    };
+    let encoded_garp = tunnel_codec.encode(&[&garp_data]);
     let garp_to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
         let mut data = encoded_garp.to_vec();
         enc.encrypt(&mut data);
@@ -1506,7 +1561,13 @@ async fn run_packet_loop(
 
     // Send ARP request for gateway MAC
     let gateway_arp = arp.build_gateway_request();
-    let encoded_gw = tunnel_codec.encode(&[&gateway_arp]);
+    let gateway_arp_bytes = gateway_arp.to_vec();
+    let gateway_arp_data: Vec<u8> = if use_compress {
+        compress(&gateway_arp_bytes).unwrap_or_else(|_| gateway_arp_bytes.clone())
+    } else {
+        gateway_arp_bytes
+    };
+    let encoded_gw = tunnel_codec.encode(&[&gateway_arp_data]);
     let gw_to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
         let mut data = encoded_gw.to_vec();
         enc.encrypt(&mut data);
@@ -1562,12 +1623,20 @@ async fn run_packet_loop(
         .await
         .map_err(crate::error::Error::Io)?;
     let mut last_keepalive = std::time::Instant::now();
+    let mut loop_count = 0u64;
 
     while running.load(Ordering::SeqCst) {
+        loop_count += 1;
+
+        // Only log loop iteration periodically to avoid log spam
+        if loop_count == 1 {
+            log_msg(&callbacks, 1, "[RUST] Packet loop started");
+        }
+
         // Check if we need to send keepalive (TCP)
         if last_keepalive.elapsed() >= Duration::from_secs(keepalive_interval_secs) {
-            let keepalive = tunnel_codec.encode_keepalive();
             // Encrypt keepalive if RC4 is enabled
+            let keepalive = tunnel_codec.encode_keepalive();
             let to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
                 let mut data = keepalive.to_vec();
                 enc.encrypt(&mut data);
@@ -1575,10 +1644,10 @@ async fn run_packet_loop(
             } else {
                 keepalive.to_vec()
             };
-            conn_mgr
-                .write_all(&to_send)
-                .await
-                .map_err(crate::error::Error::Io)?;
+            if let Err(e) = conn_mgr.write_all(&to_send).await {
+                log_msg(&callbacks, 3, &format!("[RUST] Keepalive failed: {e}"));
+                return Err(crate::error::Error::Io(e));
+            }
             last_keepalive = std::time::Instant::now();
         }
 
@@ -1649,8 +1718,17 @@ async fn run_packet_loop(
 
                     // Fallback to TCP if UDP not ready or not available
                     if !sent_via_udp {
+                        // Compress frames if enabled
+                        let frames_to_encode: Vec<Vec<u8>> = if use_compress {
+                            modified_frames.iter().map(|f| {
+                                compress(f).unwrap_or_else(|_| f.clone())
+                            }).collect()
+                        } else {
+                            modified_frames
+                        };
+
                         // Encode frames into tunnel format
-                        let encoded = tunnel_codec.encode(&modified_frames.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
+                        let encoded = tunnel_codec.encode(&frames_to_encode.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
 
                         // Encrypt if RC4 is enabled, otherwise send as-is
                         let to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
@@ -1661,7 +1739,11 @@ async fn run_packet_loop(
                             encoded.to_vec()
                         };
 
-                        conn_mgr.write_all(&to_send).await.map_err(crate::error::Error::Io)?;
+                        // Write to TCP - don't use timeout, let TCP flow control handle backpressure
+                        if let Err(e) = conn_mgr.write_all(&to_send).await {
+                            log_msg(&callbacks, 3, &format!("[RUST] TX error: {}", e));
+                            return Err(crate::error::Error::Io(e));
+                        }
                     }
 
                     // Update send statistics
@@ -1729,15 +1811,19 @@ async fn run_packet_loop(
                             enc.decrypt(&mut read_buf[..n]);
                         }
 
-                        if let Ok(frames) = tunnel_codec.decode(&read_buf[..n]) {
+                        match tunnel_codec.decode(&read_buf[..n]) {
+                            Ok(frames) => {
                             if !frames.is_empty() {
                                 // Build length-prefixed buffer for callback
                                 let mut buffer = Vec::with_capacity(n + frames.len() * 2);
                                 let mut total_bytes: u64 = 0;
-                                for frame in &frames {
+                                for frame in frames.iter() {
                                     // Decompress if needed
                                     let frame_data: Vec<u8> = if is_compressed(frame) {
-                                        decompress(frame).unwrap_or_else(|_| frame.to_vec())
+                                        match decompress(frame) {
+                                            Ok(d) => d,
+                                            Err(_) => frame.to_vec(),
+                                        }
                                     } else {
                                         frame.to_vec()
                                     };
@@ -1775,6 +1861,10 @@ async fn run_packet_loop(
                                     cb(callbacks.context, buffer.as_ptr(), buffer.len(), frames.len() as u32);
                                 }
                             }
+                            }
+                            Err(e) => {
+                                log_msg(&callbacks, 3, &format!("[RUST] RX decode error: {:?}", e));
+                            }
                         }
                     }
                     Ok(Ok(_)) => {
@@ -1785,7 +1875,9 @@ async fn run_packet_loop(
                         log_msg(&callbacks, 3, &format!("[RUST] Read error: {e}"));
                         return Err(crate::error::Error::Io(e));
                     }
-                    Err(_) => {} // Timeout - fine, loop to check keepalive
+                    Err(_) => {
+                        // Timeout - this is normal, no need to log
+                    }
                 }
             }
         }
@@ -2400,6 +2492,7 @@ impl Clone for SoftEtherSession {
             dns1: self.dns1,
             dns2: self.dns2,
             connected_server_ip: self.connected_server_ip,
+            original_server_ip: self.original_server_ip,
             server_version: self.server_version,
             server_build: self.server_build,
             mac_address: self.mac_address,

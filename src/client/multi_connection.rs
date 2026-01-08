@@ -187,6 +187,29 @@ impl ConnectionManager {
         self.half_connection
     }
 
+    /// Temporarily enable bidirectional mode on the primary connection.
+    /// This is needed for DHCP before additional connections are established.
+    /// Returns the original direction so it can be restored.
+    pub fn enable_primary_bidirectional(&mut self) -> Option<TcpDirection> {
+        if !self.connections.is_empty() {
+            let original = self.connections[0].direction;
+            if original != TcpDirection::Both {
+                info!("Temporarily enabling bidirectional mode on primary connection for DHCP");
+                self.connections[0].direction = TcpDirection::Both;
+                return Some(original);
+            }
+        }
+        None
+    }
+
+    /// Restore the primary connection's original direction after DHCP.
+    pub fn restore_primary_direction(&mut self, original: TcpDirection) {
+        if !self.connections.is_empty() {
+            info!("Restoring primary connection direction to {:?}", original);
+            self.connections[0].direction = original;
+        }
+    }
+
     /// Establish additional connections up to max_connections.
     pub async fn establish_additional_connections(&mut self) -> Result<()> {
         if self.max_connections <= 1 {
