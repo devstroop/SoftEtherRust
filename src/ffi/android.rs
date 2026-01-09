@@ -376,6 +376,7 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
             .map(|s| s.as_ptr())
             .unwrap_or(std::ptr::null()),
         max_connections: max_connections as u32,
+        half_connection: 0, // Android doesn't expose this yet, default to false
         timeout_seconds: timeout_seconds as u32,
         mtu: mtu as u32,
         use_encrypt: if use_encrypt != 0 { 1 } else { 0 },
