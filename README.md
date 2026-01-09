@@ -1,63 +1,104 @@
 # SoftEther VPN Client (Rust)
 
-A high-performance, fully async SoftEther VPN client implementation in Rust.
+A high-performance, fully async SoftEther VPN client library and CLI in Rust with native iOS/Android/FFI support.
 
 ## Features
 
-- **Full Protocol Compatibility** — Connects to SoftEther VPN Server with complete protocol support
-- **Multi-Connection Mode** — Configurable TCP connections (1–32) for improved throughput
-- **Cluster Support** — Automatic redirect handling for SoftEther VPN cluster servers
-- **DHCP Client** — Automatic IP configuration from the VPN server
-- **ARP Handler** — Gateway MAC address resolution for proper L2 operation
-- **Flexible Routing** — Split tunneling with include/exclude CIDR lists
-- **Cross-Platform** — macOS (utun) and Linux (TUN) support
-- **TLS 1.2/1.3** — Secure connections via rustls with optional certificate verification
-- **RC4 Encryption** — Optional packet-level encryption within the TLS tunnel
-- **Compression** — Optional zlib compression for reduced bandwidth
-- **QoS Support** — VoIP/real-time traffic prioritization
+### Core Protocol
+- **Full SoftEther Protocol** — Complete protocol implementation compatible with SoftEther VPN Server
+- **Multi-Connection Mode** — Up to 32 parallel TCP connections with half-connection support
+- **UDP Acceleration** — V1 (RC4+SHA-1) and V2 (ChaCha20-Poly1305 AEAD) protocols
+- **Cluster Support** — Automatic redirect handling for SoftEther VPN clusters
+- **TLS 1.2/1.3** — Secure connections via rustls with certificate pinning support
+
+### Networking
+- **DHCP/DHCPv6** — Automatic IPv4/IPv6 configuration with lease renewal/rebind
+- **Static IP** — Optional manual IP configuration (bypass DHCP)
+- **ARP Handler** — Gateway MAC address resolution for L2 operation
+- **IP Fragmentation** — Fragment reassembly for oversized packets
+- **Split Tunneling** — Include/exclude CIDR lists for IPv4 and IPv6
+
+### Security
+- **Multiple Auth Methods** — Password, RADIUS/NT Domain, Certificate, Anonymous
+- **RC4 Defense-in-Depth** — Optional packet encryption within TLS tunnel
+- **Certificate Pinning** — SHA-256 fingerprint verification
+- **Custom CA** — Support for private PKI
+
+### Performance
+- **LZ4 Compression** — Reduced bandwidth usage
+- **QoS Prioritization** — VoIP/real-time traffic handling
+- **NAT-T Keepalive** — Connection persistence through NAT
+
+### Platform Support
+
+| Platform | Interface | Status |
+|----------|-----------|--------|
+| macOS | utun | ✅ Native CLI |
+| Linux | TUN | ✅ Native CLI |
+| iOS | NEPacketTunnelProvider | ✅ FFI Library |
+| Android | VpnService | ✅ JNI Library |
 
 ## Requirements
 
+### Desktop CLI
 - Rust 1.75+
 - Root/sudo privileges (TUN device creation)
 - macOS 10.12+ or Linux 3.10+
 
+### Mobile Development
+- Xcode 14+ (iOS)
+- Android NDK r25+ (Android)
+
 ## Installation
 
+### CLI
+
 ```bash
-git clone https://github.com/yourusername/SoftEtherRust
+git clone https://github.com/AlfredAkku/SoftEtherRust
 cd SoftEtherRust
 cargo build --release
 ```
 
-Binary location: `target/release/vpnclient`
+Binary: `target/release/vpnclient`
+
+### iOS Library
+
+```bash
+./scripts/build-ios.sh
+```
+
+Output: `target/ios/SoftEtherVPN.xcframework`
+
+### Android Library
+
+```bash
+./scripts/build-android.sh
+```
+
+Output: `target/android/jniLibs/`
 
 ## Quick Start
 
 ```bash
-# 1. Generate a password hash (required for config)
+# Generate password hash
 ./vpnclient hash -u your_username -p your_password
 
-# 2. Generate sample config
+# Generate sample config
 ./vpnclient gen-config -o config.json
 
-# 3. Edit config.json with your server details and password hash
+# Edit config.json with your server details
 
-# 4. Connect
-sudo ./vpnclient -c config.json
+# Connect
+sudo ./vpnclient connect -c config.json
 ```
 
-## Usage
-
-### Commands
+## CLI Commands
 
 | Command | Description |
 |---------|-------------|
-| `connect` | Connect to a VPN server |
-| `hash` | Generate password hash for authentication |
-| `gen-config` | Generate a sample configuration file |
-| `disconnect` | Disconnect from VPN (daemon mode, not yet implemented) |
-| `status` | Show connection status (daemon mode, not yet implemented) |
+| `connect` | Connect to VPN server |
+| `hash` | Generate SHA-0 password hash |
+| `gen-config` | Generate sample configuration |
 
 ### Connect Options
 
@@ -71,60 +112,16 @@ Options:
   -H, --hub <HUB>             Virtual Hub name
   -u, --username <USER>       Username
       --password-hash <HASH>  Pre-computed password hash (40 hex chars)
-      --skip-tls-verify       Verify TLS certificate 
+      --skip-tls-verify       Skip TLS certificate verification
   -v, --verbose               Enable verbose output
   -d, --debug                 Enable debug output
 ```
 
-### Generate Password Hash
-
-SoftEther uses SHA-0 hashed passwords. Generate once and store in your config:
-
-```bash
-./vpnclient hash -u myuser -p mypassword
-
-# Output:
-# Password hash for user 'myuser':
-# a1b2c3d4e5f6... (40 hex characters)
-```
-
 ## Configuration
 
-### Example Configuration
+See [config.example.json](config.example.json) for a complete example.
 
-```json
-{
-  "server": "vpn.example.com",
-  "port": 443,
-  "hub": "DEFAULT",
-  "username": "your_username",
-  "password_hash": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-
-  "skip_tls_verify": true,
-  "timeout_seconds": 30,
-
-  "use_encrypt": true,
-  "use_compress": false,
-  "udp_accel": false,
-  "qos": true,
-
-  "nat_traversal": false,
-  "monitor_mode": false,
-  "max_connections": 1,
-  "mtu": 1400,
-
-  "routing": {
-    "default_route": false,
-    "accept_pushed_routes": true,
-    "ipv4_include": [],
-    "ipv4_exclude": []
-  }
-}
-```
-
-### Configuration Reference
-
-#### Connection
+### Connection
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -133,80 +130,146 @@ SoftEther uses SHA-0 hashed passwords. Generate once and store in your config:
 | `hub` | string | *required* | Virtual Hub name |
 | `timeout_seconds` | number | `30` | Connection timeout |
 
-#### Authentication
+### Authentication
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `username` | string | *required* | Username |
-| `password_hash` | string | *required* | SHA-0 password hash (40 hex chars) |
+| `auth.method` | string | `standard_password` | Auth method: `standard_password`, `radius_or_nt_domain`, `certificate`, `anonymous` |
+| `auth.username` | string | — | Username |
+| `auth.password_hash` | string | — | SHA-0 password hash (40 hex chars) |
+| `auth.password` | string | — | Plaintext password (RADIUS/NT Domain only) |
+| `auth.certificate_pem` | string | — | Client certificate PEM (cert auth) |
+| `auth.private_key_pem` | string | — | Client private key PEM (cert auth) |
 
-#### TLS
+### TLS
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `skip_tls_verify` | boolean | `true` | Skip certificate verification |
+| `custom_ca_pem` | string | — | Custom CA certificate PEM |
+| `cert_fingerprint_sha256` | string | — | Certificate pinning (64 hex chars) |
 
-#### Tunnel Features
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `use_encrypt` | boolean | `true` | RC4 packet encryption (defense in depth) |
-| `use_compress` | boolean | `false` | Enable zlib compression |
-| `udp_accel` | boolean | `false` | UDP acceleration (experimental) |
-| `qos` | boolean | `true` | VoIP/QoS prioritization |
-
-#### Session Mode
+### Tunnel
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `nat_traversal` | boolean | `false` | NAT mode (`true`) vs Bridge mode (`false`) |
-| `monitor_mode` | boolean | `false` | Packet capture mode (requires permissions) |
+| `use_encrypt` | boolean | `true` | RC4 encryption (defense in depth) |
+| `use_compress` | boolean | `true` | LZ4 compression |
+| `udp_accel` | boolean | `false` | UDP acceleration |
+| `qos` | boolean | `false` | VoIP/QoS prioritization |
 
-#### Performance
+### Session
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `nat_traversal` | boolean | `false` | NAT mode vs Bridge mode |
+| `monitor_mode` | boolean | `false` | Packet capture mode |
+
+### Performance
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `max_connections` | number | `1` | TCP connections (1–32) |
+| `half_connection` | boolean | `false` | Split send/receive connections |
 | `mtu` | number | `1400` | TUN device MTU |
 
-#### Routing
+### IP Version
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `ip_version` | string | `auto` | `auto`, `ipv4`, `ipv6` |
+
+### Routing
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `routing.default_route` | boolean | `false` | Route all traffic through VPN |
 | `routing.accept_pushed_routes` | boolean | `true` | Accept server-pushed routes |
-| `routing.ipv4_include` | array | `[]` | CIDRs to route through VPN |
-| `routing.ipv4_exclude` | array | `[]` | CIDRs to exclude from VPN |
+| `routing.ipv4_include` | array | `[]` | IPv4 CIDRs to route through VPN |
+| `routing.ipv4_exclude` | array | `[]` | IPv4 CIDRs to exclude |
+| `routing.ipv6_include` | array | `[]` | IPv6 CIDRs to route through VPN |
+| `routing.ipv6_exclude` | array | `[]` | IPv6 CIDRs to exclude |
 
-### Environment Variables
+### Static IP (Optional)
 
-Configuration can be overridden via environment variables:
+When configured, DHCP is skipped.
 
-| Variable | Description |
-|----------|-------------|
-| `SOFTETHER_SERVER` | Server address |
-| `SOFTETHER_PORT` | Server port |
-| `SOFTETHER_HUB` | Hub name |
-| `SOFTETHER_USER` | Username |
-| `SOFTETHER_PASSWORD_HASH` | Password hash |
+| Option | Type | Description |
+|--------|------|-------------|
+| `static_ip.ipv4_address` | string | Static IPv4 address |
+| `static_ip.ipv4_netmask` | string | IPv4 subnet mask |
+| `static_ip.ipv4_gateway` | string | IPv4 gateway |
+| `static_ip.ipv4_dns1` | string | Primary DNS |
+| `static_ip.ipv4_dns2` | string | Secondary DNS |
+| `static_ip.ipv6_address` | string | Static IPv6 address |
+| `static_ip.ipv6_prefix_len` | number | IPv6 prefix length |
+| `static_ip.ipv6_gateway` | string | IPv6 gateway |
+| `static_ip.ipv6_dns1` | string | Primary IPv6 DNS |
+| `static_ip.ipv6_dns2` | string | Secondary IPv6 DNS |
+
+## Mobile Integration
+
+### iOS
+
+1. Add `SoftEtherVPN.xcframework` to your Xcode project
+2. Add `include/SoftEtherVPN.h` via bridging header
+3. Use `SoftEtherBridge.swift` wrapper (see [examples/ios/](examples/ios/))
+
+```swift
+let config = SoftEtherBridge.Configuration(
+    server: "vpn.example.com",
+    port: 443,
+    hub: "VPN",
+    username: "user",
+    passwordHash: "..."
+)
+
+let vpn = SoftEtherBridge()
+try vpn.create(config: config)
+try vpn.connect()
+```
+
+### Android
+
+1. Copy `jniLibs/` to `app/src/main/jniLibs/`
+2. Use `SoftEtherBridge.kt` wrapper (see [examples/android/](examples/android/))
+
+```kotlin
+val config = SoftEtherBridge.Configuration(
+    server = "vpn.example.com",
+    port = 443,
+    hub = "VPN",
+    username = "user",
+    passwordHash = "..."
+)
+
+val bridge = SoftEtherBridge()
+bridge.create(config)
+bridge.connect()
+```
+
+See [INTEGRATION_GUIDE.md](INTEGRATION_GUIDE.md) for detailed mobile integration.
 
 ## Library Usage
 
 ```rust
-use softether_rust::{VpnClient, VpnConfig, crypto};
+use softether::{VpnClient, VpnConfig, crypto};
+use softether::config::{AuthConfig, AuthMethod};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Generate password hash (do this once, store the result)
-    let hash = crypto::hash_password("password", "username");
-    let hash_hex = hex::encode(hash);
+    let password_hash = crypto::hash_password("password", "user");
 
     let config = VpnConfig {
         server: "vpn.example.com".to_string(),
         port: 443,
         hub: "VPN".to_string(),
-        username: "username".to_string(),
-        password_hash: hash_hex,
+        auth: AuthConfig {
+            method: AuthMethod::StandardPassword,
+            username: "user".to_string(),
+            password_hash: Some(hex::encode(password_hash)),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -220,71 +283,37 @@ async fn main() -> anyhow::Result<()> {
 ## Architecture
 
 ```
-+--------------------------------------------------------------------+
-|                           VpnClient                                |
-+--------------------------------------------------------------------+
-|  +-----------------+  +-------------+  +------------------------+  |
-|  |    Protocol     |  |   Crypto    |  |       Adapter          |  |
-|  |  +-----------+  |  |  +-------+  |  |  +------------------+  |  |
-|  |  |   HTTP    |  |  |  | SHA-0 |  |  |  |   TunAdapter     |  |  |
-|  |  |  Codec    |  |  |  +-------+  |  |  |                  |  |  |
-|  |  +-----------+  |  |  +-------+  |  |  |  +----+  +-----+ |  |  |
-|  |  +-----------+  |  |  |  RC4  |  |  |  |  |utun|  | tun | |  |  |
-|  |  |   Pack    |  |  |  +-------+  |  |  |  +----+  +-----+ |  |  |
-|  |  | Serialize |  |  +-------------+  |  |  macOS   Linux   |  |  |
-|  |  +-----------+  |                   |  +------------------+  |  |
-|  |  +-----------+  |  +-------------+  +------------------------+  |
-|  |  |   Auth    |  |  |   Tunnel    |                              |
-|  |  +-----------+  |  |  +-------+  |  +------------------------+  |
-|  |  +-----------+  |  |  | DHCP  |  |  |   ConnectionManager    |  |
-|  |  |  Tunnel   |  |  |  |Client |  |  |  +------------------+  |  |
-|  |  |  Codec    |  |  |  +-------+  |  |  | Multi-Connection |  |  |
-|  |  +-----------+  |  |  +-------+  |  |  |     Support      |  |  |
-|  +-----------------+  |  |  ARP  |  |  |  +------------------+  |  |
-|                       |  +-------+  |  +------------------------+  |
-|                       +-------------+                              |
-+--------------------------------------------------------------------+
-|                    Tokio Async Runtime                             |
-|              (TCP/TLS with rustls, Timers, Signals)                |
-+--------------------------------------------------------------------+
-```
-
-## Protocol Flow
-
-```
-Client                                          Server
-   |                                               |
-   |---- TCP Connect ----------------------------->|
-   |<--- TLS Handshake --------------------------->|
-   |                                               |
-   |---- POST /vpnsvc/connect.cgi ---------------->|
-   |     (VPNCONNECT signature)                    |
-   |<--- 200 OK + Hello Pack ----------------------|
-   |     (server random)                           |
-   |                                               |
-   |---- POST /vpnsvc/vpn.cgi -------------------->|
-   |     (Auth Pack: hub, user, hashed password)   |
-   |<--- 200 OK + Auth Result ---------------------|
-   |     (session_key, policy, redirect?)          |
-   |                                               |
-   |        +--- If Cluster Redirect ---+          |
-   |        |  Connect to redirect IP   |          |
-   |        |  Authenticate with ticket |          |
-   |        +---------------------------+          |
-   |                                               |
-   |<--- Block-based Tunnel Protocol ------------->|
-   |     (Ethernet frames, compressed/encrypted)   |
-   |                                               |
-   |---- DHCP Discover --------------------------->|
-   |<--- DHCP Offer -------------------------------|
-   |---- DHCP Request ---------------------------->|
-   |<--- DHCP Ack (IP, Gateway, DNS) --------------|
-   |                                               |
-   |---- ARP Request (Gateway MAC) --------------->|
-   |<--- ARP Reply --------------------------------|
-   |                                               |
-   |<--- Tunnel Data (L2 Ethernet Frames) -------->|
-   |                                               |
+┌──────────────────────────────────────────────────────────────────┐
+│                         VpnClient                                │
+├──────────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
+│  │  Protocol   │  │   Crypto    │  │        Adapter          │  │
+│  │  ┌───────┐  │  │  ┌───────┐  │  │  ┌─────────────────┐   │  │
+│  │  │ HTTP  │  │  │  │ SHA-0 │  │  │  │   TunAdapter    │   │  │
+│  │  │ Codec │  │  │  └───────┘  │  │  │  ┌────┐ ┌────┐  │   │  │
+│  │  └───────┘  │  │  ┌───────┐  │  │  │  │utun│ │tun │  │   │  │
+│  │  ┌───────┐  │  │  │  RC4  │  │  │  │  └────┘ └────┘  │   │  │
+│  │  │ Pack  │  │  │  └───────┘  │  │  │  macOS   Linux  │   │  │
+│  │  └───────┘  │  │  ┌───────┐  │  │  └─────────────────┘   │  │
+│  │  ┌───────┐  │  │  │ChaCha │  │  │  ┌─────────────────┐   │  │
+│  │  │ Auth  │  │  │  │Poly   │  │  │  │   FFI Layer     │   │  │
+│  │  └───────┘  │  │  └───────┘  │  │  │  ┌────┐ ┌─────┐ │   │  │
+│  └─────────────┘  └─────────────┘  │  │  │iOS │ │JNI  │ │   │  │
+│                                    │  │  └────┘ └─────┘ │   │  │
+│  ┌─────────────┐  ┌─────────────┐  │  └─────────────────┘   │  │
+│  │   Tunnel    │  │    Net      │  └─────────────────────────┘  │
+│  │  ┌───────┐  │  │  ┌───────┐  │  ┌─────────────────────────┐  │
+│  │  │ DHCP  │  │  │  │  UDP  │  │  │   ConnectionManager     │  │
+│  │  │DHCPv6 │  │  │  │ Accel │  │  │  ┌─────────────────┐   │  │
+│  │  └───────┘  │  │  │ V1+V2 │  │  │  │ Multi-Connection│   │  │
+│  │  ┌───────┐  │  │  └───────┘  │  │  │ Half-Connection │   │  │
+│  │  │  ARP  │  │  │             │  │  └─────────────────┘   │  │
+│  │  └───────┘  │  │             │  └─────────────────────────┘  │
+│  └─────────────┘  └─────────────┘                               │
+├──────────────────────────────────────────────────────────────────┤
+│                     Tokio Async Runtime                          │
+│               (TCP/TLS/UDP, Timers, Signals)                     │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ## Building
@@ -293,60 +322,53 @@ Client                                          Server
 # Debug build
 cargo build
 
-# Release build (optimized, stripped)
+# Release build
 cargo build --release
 
 # Run tests
 cargo test
 
-# Generate docs
-cargo doc --open
+# Build iOS framework
+./scripts/build-ios.sh
+
+# Build Android libraries
+./scripts/build-android.sh
 ```
 
 ## Troubleshooting
 
 ### Permission Denied
-
 TUN device creation requires root:
-
 ```bash
 sudo ./vpnclient connect -c config.json
 ```
 
 ### Connection Timeout
-
-- Verify server is reachable: `nc -zv vpn.example.com 443`
+- Verify server reachable: `nc -zv vpn.example.com 443`
 - Check firewall allows outbound TCP 443
-- Verify DNS resolution
 
 ### Authentication Failed
-
-- Ensure password hash is correct (regenerate with `hash` command)
-- Verify hub name matches server configuration exactly
-- Confirm user has permissions on the hub
+- Regenerate password hash with `vpnclient hash`
+- Verify hub name matches exactly
+- Confirm user permissions on hub
 
 ### TLS Certificate Errors
+Most SoftEther servers use self-signed certificates. Use `skip_tls_verify: true` or configure `custom_ca_pem` / `cert_fingerprint_sha256`.
 
-Most SoftEther servers use self-signed certificates. The default `skip_tls_verify: true` handles this. For production, consider:
+## Security
 
-```json
-{
-  "skip_tls_verify": false
-}
-```
+- **TLS 1.2/1.3** — All connections encrypted via rustls
+- **SHA-0** — Legacy protocol requirement for password hashing
+- **RC4** — Optional defense-in-depth within TLS tunnel
+- **ChaCha20-Poly1305** — UDP Acceleration V2 AEAD
+- **Certificate Pinning** — SHA-256 fingerprint verification
+- **Constant-Time RSA** — Uses [hardened RSA fork](https://github.com/itsalfredakku/RustRSA) mitigating [Marvin Attack](https://people.redhat.com/~hkario/marvin/) (RUSTSEC-2023-0071)
 
-And ensure proper CA certificates are available.
+## Documentation
 
-### Multi-Connection Issues
-
-If experiencing instability with `max_connections > 1`, try reducing to `1` for debugging.
-
-## Security Notes
-
-- **SHA-0**: SoftEther uses SHA-0 for password hashing (legacy protocol requirement)
-- **TLS**: All connections use TLS 1.2/1.3 via rustls
-- **RC4**: Optional packet encryption within the TLS tunnel (defense in depth)
-- **Password Storage**: Store `password_hash` in config, not plaintext passwords
+- [FEATURE_MATRIX.md](FEATURE_MATRIX.md) — Detailed feature status by platform
+- [INTEGRATION_GUIDE.md](INTEGRATION_GUIDE.md) — iOS/Android integration guide
+- [config.example.json](config.example.json) — Complete configuration example
 
 ## License
 
@@ -355,5 +377,3 @@ Apache License 2.0
 ## Related Projects
 
 - [SoftEther VPN](https://www.softether.org/) — Official SoftEther VPN Project
-- [SoftEtherSwift](https://github.com/devstroop/SoftEtherSwift) — Swift implementation
-- [SoftEtherZig](https://github.com/devstroop/SoftEtherZig) — Zig implementation
