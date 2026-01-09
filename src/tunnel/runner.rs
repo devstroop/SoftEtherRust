@@ -1998,16 +1998,19 @@ impl TunnelRunner {
         let mut send_buf = vec![0u8; 4096];
         let mut decomp_buf = vec![0u8; 4096];
 
+        // Create encryption state for RC4 if enabled
+        let mut encryption = self.create_encryption();
+
         let mut arp = ArpHandler::new(self.mac);
         arp.configure(dhcp_config.ip, gateway);
 
         let garp = arp.build_gratuitous_arp();
-        self.send_frame_multi(conn_mgr, &garp, &mut send_buf)
+        self.send_frame_multi(conn_mgr, &garp, &mut send_buf, &mut encryption)
             .await?;
         debug!("Sent gratuitous ARP");
 
         let gateway_arp = arp.build_gateway_request();
-        self.send_frame_multi(conn_mgr, &gateway_arp, &mut send_buf)
+        self.send_frame_multi(conn_mgr, &gateway_arp, &mut send_buf, &mut encryption)
             .await?;
         debug!("Sent gateway ARP request");
 
@@ -2084,7 +2087,7 @@ impl TunnelRunner {
                     }
 
                     if let Some(reply) = arp.build_pending_reply() {
-                        if let Err(e) = self.send_frame_multi(conn_mgr, &reply, &mut send_buf).await
+                        if let Err(e) = self.send_frame_multi(conn_mgr, &reply, &mut send_buf, &mut encryption).await
                         {
                             error!("Failed to send ARP reply: {}", e);
                         } else {
@@ -2214,7 +2217,7 @@ impl TunnelRunner {
 
                     if arp.should_send_periodic_garp() {
                         let garp = arp.build_gratuitous_arp();
-                        self.send_frame_multi(conn_mgr, &garp, &mut send_buf).await?;
+                        self.send_frame_multi(conn_mgr, &garp, &mut send_buf, &mut encryption).await?;
                         arp.mark_garp_sent();
                         debug!("Sent periodic GARP");
                     }
