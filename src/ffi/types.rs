@@ -74,6 +74,8 @@ pub struct SoftEtherConfig {
     // Connection Settings
     /// Maximum TCP connections (1-32).
     pub max_connections: c_uint,
+    /// Half-connection mode (1 = true, 0 = false). Requires max_connections >= 2.
+    pub half_connection: c_int,
     /// Connection timeout in seconds.
     pub timeout_seconds: c_uint,
     /// MTU size (default 1400).

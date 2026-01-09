@@ -306,6 +306,7 @@ pub unsafe extern "C" fn softether_create(
         custom_ca_pem,
         cert_fingerprint_sha256,
         max_connections: config.max_connections.clamp(1, 32) as u8,
+        half_connection: config.half_connection != 0,
         timeout_seconds: config.timeout_seconds.max(5) as u64,
         mtu: config.mtu.clamp(576, 1500) as u16,
         use_encrypt: config.use_encrypt != 0,
