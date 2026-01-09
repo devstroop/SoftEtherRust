@@ -309,6 +309,7 @@ pub unsafe extern "C" fn softether_create(
         half_connection: config.half_connection != 0,
         timeout_seconds: config.timeout_seconds.max(5) as u64,
         mtu: config.mtu.clamp(576, 1500) as u16,
+        ip_version: config.ip_version.into(),
         use_encrypt: config.use_encrypt != 0,
         use_compress: config.use_compress != 0,
         udp_accel: config.udp_accel != 0,
@@ -819,25 +820,111 @@ async fn connect_and_run_inner(
     // established yet. DHCP needs to both send and receive on the same connection.
     let original_direction = conn_mgr.enable_primary_bidirectional();
 
-    let dhcp_config = match perform_dhcp(&mut conn_mgr, mac, callbacks, config.use_compress).await {
-        Ok(config) => {
+    // Perform DHCP based on ip_version setting
+    let (dhcp_config, dhcpv6_config) = match config.ip_version {
+        crate::config::IpVersion::Auto => {
+            // Auto: Try IPv4 DHCP (required), then try DHCPv6 (optional)
             log_message(
                 callbacks,
                 1,
-                &format!(
-                    "[RUST] DHCP complete: IP={}, Gateway={:?}, DNS={:?}",
-                    config.ip, config.gateway, config.dns1
-                ),
+                "[RUST] IP version: Auto (IPv4 required, IPv6 optional)",
             );
-            config
-        }
-        Err(e) => {
-            // Restore direction before returning error
-            if let Some(dir) = original_direction {
-                conn_mgr.restore_primary_direction(dir);
+            let dhcp = match perform_dhcp(&mut conn_mgr, mac, callbacks, config.use_compress).await
+            {
+                Ok(cfg) => {
+                    log_message(
+                        callbacks,
+                        1,
+                        &format!(
+                            "[RUST] DHCP complete: IP={}, Gateway={:?}, DNS={:?}",
+                            cfg.ip, cfg.gateway, cfg.dns1
+                        ),
+                    );
+                    cfg
+                }
+                Err(e) => {
+                    if let Some(dir) = original_direction {
+                        conn_mgr.restore_primary_direction(dir);
+                    }
+                    log_message(callbacks, 3, &format!("[RUST] DHCP failed: {e}"));
+                    return Err(e);
+                }
+            };
+
+            // Try DHCPv6 (optional)
+            log_message(callbacks, 1, "[RUST] Attempting DHCPv6 for IPv6 address...");
+            let dhcpv6 = perform_dhcpv6(&mut conn_mgr, mac, callbacks, config.use_compress).await;
+            if dhcpv6.is_some() {
+                log_message(
+                    callbacks,
+                    1,
+                    "[RUST] DHCPv6 successful - dual-stack configured",
+                );
+            } else {
+                log_message(callbacks, 1, "[RUST] DHCPv6 not available - IPv4 only");
             }
-            log_message(callbacks, 3, &format!("[RUST] DHCP failed: {e}"));
-            return Err(e);
+
+            (Some(dhcp), dhcpv6)
+        }
+        crate::config::IpVersion::IPv4Only => {
+            // IPv4 only: Only perform DHCP, skip DHCPv6
+            log_message(
+                callbacks,
+                1,
+                "[RUST] IP version: IPv4 only (skipping DHCPv6)",
+            );
+            let dhcp = match perform_dhcp(&mut conn_mgr, mac, callbacks, config.use_compress).await
+            {
+                Ok(cfg) => {
+                    log_message(
+                        callbacks,
+                        1,
+                        &format!(
+                            "[RUST] DHCP complete: IP={}, Gateway={:?}, DNS={:?}",
+                            cfg.ip, cfg.gateway, cfg.dns1
+                        ),
+                    );
+                    cfg
+                }
+                Err(e) => {
+                    if let Some(dir) = original_direction {
+                        conn_mgr.restore_primary_direction(dir);
+                    }
+                    log_message(callbacks, 3, &format!("[RUST] DHCP failed: {e}"));
+                    return Err(e);
+                }
+            };
+            (Some(dhcp), None)
+        }
+        crate::config::IpVersion::IPv6Only => {
+            // IPv6 only: Only perform DHCPv6, skip DHCP
+            log_message(
+                callbacks,
+                1,
+                "[RUST] IP version: IPv6 only (skipping IPv4 DHCP)",
+            );
+            let dhcpv6 = perform_dhcpv6(&mut conn_mgr, mac, callbacks, config.use_compress).await;
+            match dhcpv6 {
+                Some(cfg) => {
+                    log_message(
+                        callbacks,
+                        1,
+                        &format!("[RUST] DHCPv6 complete: IPv6 address obtained"),
+                    );
+                    (None, Some(cfg))
+                }
+                None => {
+                    if let Some(dir) = original_direction {
+                        conn_mgr.restore_primary_direction(dir);
+                    }
+                    log_message(
+                        callbacks,
+                        3,
+                        "[RUST] DHCPv6 failed - no IPv6 address available",
+                    );
+                    return Err(crate::error::Error::DhcpFailed("DHCPv6 failed".into()));
+                }
+            }
         }
     };
 
@@ -883,22 +970,9 @@ async fn connect_and_run_inner(
         );
     }
 
-    // Try DHCPv6 for IPv6 address (optional - doesn't fail if server doesn't support it)
-    log_message(callbacks, 1, "[RUST] Attempting DHCPv6 for IPv6 address...");
-    let dhcpv6_config = perform_dhcpv6(&mut conn_mgr, mac, callbacks, config.use_compress).await;
-    if dhcpv6_config.is_some() {
-        log_message(
-            callbacks,
-            1,
-            "[RUST] DHCPv6 successful - dual-stack configured",
-        );
-    } else {
-        log_message(callbacks, 1, "[RUST] DHCPv6 not available - IPv4 only");
-    }
-
     // Create session info from DHCP config (include MAC for Kotlin to use)
     let session = create_session_from_dhcp(
-        &dhcp_config,
+        dhcp_config.as_ref(),
         dhcpv6_config.as_ref(),
         actual_server_ip,
         server_ip,
@@ -912,12 +986,19 @@ async fn connect_and_run_inner(
     }
     update_state(atomic_state, callbacks, SoftEtherState::Connected);
 
+    // Log connection info
+    let ip_info = match (&dhcp_config, &dhcpv6_config) {
+        (Some(v4), Some(_v6)) => format!("IPv4: {}, IPv6: configured", v4.ip),
+        (Some(v4), None) => format!("IPv4: {}", v4.ip),
+        (None, Some(v6)) => format!("IPv6: {}", v6.ip),
+        (None, None) => "No IP configured".to_string(),
+    };
     log_message(
         callbacks,
         1,
         &format!(
-            "[RUST] Connected! IP: {}, Server: {}",
-            dhcp_config.ip, actual_server_ip
+            "[RUST] Connected! {}, Server: {}",
+            ip_info, actual_server_ip
         ),
     );
 
@@ -982,6 +1063,23 @@ async fn connect_and_run_inner(
     };
 
     // Run the packet loop
+    // Note: packet loop requires DhcpConfig for ARP. IPv6-only mode needs a dummy config.
+    let dhcp_for_loop = dhcp_config.unwrap_or_else(|| {
+        // For IPv6-only mode, create a dummy DhcpConfig
+        // ARP won't work, but IPv6 NDP will handle neighbor discovery
+        DhcpConfig {
+            ip: std::net::Ipv4Addr::UNSPECIFIED,
+            netmask: std::net::Ipv4Addr::UNSPECIFIED,
+            gateway: None,
+            dns1: None,
+            dns2: None,
+            server_id: None,
+            lease_time: 0,
+            renewal_time: 0,
+            rebinding_time: 0,
+            domain_name: String::new(),
+        }
+    });
     log_message(callbacks, 1, "[RUST] Starting packet loop...");
     run_packet_loop(
         &mut conn_mgr,
@@ -989,7 +1087,7 @@ async fn connect_and_run_inner(
         callbacks.clone(),
         tx_recv,
         mac,
-        dhcp_config,
+        dhcp_for_loop,
         final_auth.rc4_key_pair.as_ref(),
         config.qos,
         config.use_compress,
@@ -999,9 +1097,10 @@ async fn connect_and_run_inner(
     .await
 }
 
-/// Create session info from DHCP and optional DHCPv6 config
+/// Create session info from optional DHCP and optional DHCPv6 config.
+/// At least one of dhcp or dhcpv6 must be Some.
 fn create_session_from_dhcp(
-    dhcp: &DhcpConfig,
+    dhcp: Option<&DhcpConfig>,
     dhcpv6: Option<&Dhcpv6Config>,
     server_ip: Ipv4Addr,
     original_server_ip: Ipv4Addr,
@@ -1031,6 +1130,19 @@ fn create_session_from_dhcp(
             | (octets[3] as u32)
     }
 
+    // Extract IPv4 info if available
+    let (ip_address, subnet_mask, gateway, dns1, dns2) = if let Some(v4) = dhcp {
+        (
+            ip_to_u32(v4.ip),
+            ip_to_u32(v4.netmask),
+            v4.gateway.map(ip_to_u32).unwrap_or(0),
+            v4.dns1.map(ip_to_u32).unwrap_or(0),
+            v4.dns2.map(ip_to_u32).unwrap_or(0),
+        )
+    } else {
+        (0, 0, 0, 0, 0)
+    };
+
     // Extract IPv6 info if available
     let (ipv6_address, ipv6_prefix_len, dns1_v6, dns2_v6) = if let Some(v6) = dhcpv6 {
         (
@@ -1044,11 +1156,11 @@ fn create_session_from_dhcp(
     };
 
     SoftEtherSession {
-        ip_address: ip_to_u32(dhcp.ip),
-        subnet_mask: ip_to_u32(dhcp.netmask),
-        gateway: dhcp.gateway.map(ip_to_u32).unwrap_or(0),
-        dns1: dhcp.dns1.map(ip_to_u32).unwrap_or(0),
-        dns2: dhcp.dns2.map(ip_to_u32).unwrap_or(0),
+        ip_address,
+        subnet_mask,
+        gateway,
+        dns1,
+        dns2,
         connected_server_ip: server_ip_str,
         original_server_ip: original_ip_str,
         server_version: 0,

@@ -379,6 +379,7 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
         half_connection: 0, // Android doesn't expose this yet, default to false
         timeout_seconds: timeout_seconds as u32,
         mtu: mtu as u32,
+        ip_version: SoftEtherIpVersion::Auto, // Android doesn't expose this yet, default to Auto
         use_encrypt: if use_encrypt != 0 { 1 } else { 0 },
         use_compress: if use_compress != 0 { 1 } else { 0 },
         udp_accel: if udp_accel != 0 { 1 } else { 0 },
