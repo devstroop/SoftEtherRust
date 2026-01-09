@@ -1,41 +1,52 @@
 # Known Issues & Technical Debt
 
-This document tracks known issues, potential bugs, and areas for improvement in the SoftEther Rust client.
+> SoftEther VPN Rust Client - Issue Tracker  
+> Last updated: January 2026
 
 ---
 
-## 🐛 Potential Bugs
+## 📊 Summary
 
-### 1. RC4 Stream Corruption on Reconnect
-**Severity:** High  
+| Category | High | Medium | Low | Total |
+|----------|------|--------|-----|-------|
+| Bugs | 1 | 4 | 3 | 8 |
+| Tech Debt | 2 | 4 | 2 | 8 |
+| Performance | 0 | 1 | 4 | 5 |
+| Missing Features | - | - | - | 7 |
+
+---
+
+## 🐛 Bugs
+
+### High Severity
+
+#### BUG-1: RC4 Stream Corruption on Reconnect
 **Location:** `src/tunnel/runner.rs`, `src/ffi/client.rs`
 
-If a connection drops and reconnects, the RC4 cipher state may be out of sync with the server. The streaming cipher maintains internal state that must match between client and server.
+RC4 is a streaming cipher that maintains internal state. If a connection drops and reconnects, the cipher state may be out of sync with the server.
 
-**Impact:** Tunnel data corruption after reconnection.
-
+**Impact:** Tunnel data corruption after reconnection.  
 **Fix:** Reinitialize RC4 ciphers on each new connection, not just on initial connect.
 
 ---
 
-### 2. Frame Split Across Multi-Connections
-**Severity:** Medium  
+### Medium Severity
+
+#### BUG-2: Frame Split Across Multi-Connections
 **Location:** `src/tunnel/runner.rs:1580`
 
 ```rust
 let mut codecs: Vec<TunnelCodec> = (0..num_conns).map(|_| TunnelCodec::new()).collect();
 ```
 
-Each connection has its own `TunnelCodec` for stateful frame parsing. If a single tunnel frame is split across TCP segments that arrive on different connections (in half-connection mode), the codec will fail to reassemble.
+Each connection has its own `TunnelCodec`. If a tunnel frame splits across TCP segments on different connections (half-connection mode), reassembly fails.
 
-**Impact:** Packet loss or decode errors in multi-connection mode.
-
-**Investigation needed:** Verify SoftEther protocol guarantees frame boundaries align with TCP segment boundaries per connection.
+**Impact:** Packet loss or decode errors in multi-connection mode.  
+**Investigation:** Verify SoftEther protocol guarantees frame boundaries per connection.
 
 ---
 
-### 3. Missing Timeout on Additional Connection Establishment
-**Severity:** Medium  
+#### BUG-3: Missing Timeout on Additional Connection Establishment
 **Location:** `src/client/multi_connection.rs`
 
 ```rust
@@ -44,40 +55,21 @@ async fn establish_one_additional(&self) -> Result<ManagedConnection> {
 }
 ```
 
-**Impact:** Connection setup could hang forever if server doesn't respond.
-
+**Impact:** Connection setup hangs forever if server doesn't respond.  
 **Fix:** Wrap in `tokio::time::timeout()`.
 
 ---
 
-### 4. Panic on Invalid Password Hash Length
-**Severity:** Low  
-**Location:** `src/client/mod.rs:522`
-
-```rust
-let password_hash_bytes: [u8; 20] = password_hash_vec.try_into().unwrap();
-```
-
-Uses `unwrap()` which will panic if the password hash is not exactly 20 bytes.
-
-**Impact:** Panic instead of graceful error.
-
-**Fix:** Use `.map_err()` to convert to `Error::Config`.
-
----
-
-### 5. DHCP Response Race in Half-Connection Mode
-**Severity:** Medium  
+#### BUG-4: DHCP Response Race in Half-Connection Mode
 **Location:** `src/tunnel/runner.rs:1565`
 
-In half-connection mode, the primary connection is temporarily set to bidirectional for DHCP. If DHCP responses arrive on a receive-only connection before the primary is restored, they may be processed incorrectly.
+In half-connection mode, primary connection is temporarily bidirectional for DHCP. Responses may arrive on wrong connection.
 
 **Impact:** DHCP may fail intermittently in multi-connection mode.
 
 ---
 
-### 6. Thread-Local Storage in iOS FFI Returns Stale Data
-**Severity:** Medium  
+#### BUG-5: Thread-Local Storage in iOS FFI
 **Location:** `src/ffi/ios.rs:95-110`
 
 ```rust
@@ -86,97 +78,93 @@ thread_local! {
 }
 ```
 
-The `softether_ios_get_session` function returns a pointer to thread-local storage. If called from different threads, each gets its own (potentially outdated) copy. Also, the returned pointer is only valid until the next call.
+Returns pointer to thread-local storage. Different threads get different (stale) copies.
 
-**Impact:** Stale session data or undefined behavior if pointer is stored.
-
-**Fix:** Document lifetime limitations or use caller-provided buffer.
+**Impact:** Stale session data or undefined behavior.  
+**Fix:** Document lifetime or use caller-provided buffer.
 
 ---
 
-### 7. Unchecked Array Index in ARP Parsing
-**Severity:** Low  
+### Low Severity
+
+#### BUG-6: Panic on Invalid Password Hash Length
+**Location:** `src/client/mod.rs:522`
+
+```rust
+let password_hash_bytes: [u8; 20] = password_hash_vec.try_into().unwrap();
+```
+
+**Impact:** Panic instead of graceful error.  
+**Fix:** Use `.map_err()` to convert to `Error::Config`.
+
+---
+
+#### BUG-7: Unchecked Array Index in ARP Parsing
 **Location:** `src/packet/arp.rs:233`
 
 ```rust
 let sender_mac: [u8; 6] = frame[arp_start + 8..arp_start + 14].try_into().unwrap();
 ```
 
-While the frame length is checked at the function start (>=42 bytes), this `unwrap()` could panic if the slice range is somehow invalid.
-
-**Impact:** Potential panic on malformed ARP packets.
-
-**Fix:** Use explicit error handling or `?` operator.
+**Impact:** Potential panic on malformed ARP packets.  
+**Fix:** Use explicit error handling.
 
 ---
 
-### 8. UDP Accel Session Not Closed on Disconnect
-**Severity:** Low  
-**Location:** `src/net/udp_accel.rs`, `src/tunnel/runner.rs`
+#### BUG-8: UDP Accel Session Not Closed on Disconnect
+**Location:** `src/net/udp_accel.rs`
 
-When the VPN disconnects, the UDP acceleration socket may not be explicitly closed, relying on Drop. This could leave stale UDP sessions on the server.
+UDP socket relies on Drop instead of explicit close packet.
 
-**Impact:** Server resource leak, potential port exhaustion.
-
-**Fix:** Send explicit close packet before dropping UdpAccel.
+**Impact:** Server resource leak, potential port exhaustion.  
+**Fix:** Send explicit close packet before dropping.
 
 ---
 
 ## 🔧 Technical Debt
 
-### 1. Large File: tunnel/runner.rs (2247 lines)
-**Priority:** High
+### High Priority
 
-This file handles too many concerns:
-- Platform-specific TUN operations (macOS/Linux/Windows)
+#### DEBT-1: Large File - tunnel/runner.rs (2247 lines)
+
+Handles too many concerns:
+- Platform-specific TUN operations
 - DHCP state machine
 - ARP handling
 - Multi-connection coordination
-- RC4 encryption state
+- RC4 encryption
 - Data loop
 
 **Recommendation:** Split into:
 - `tunnel/dhcp_handler.rs`
 - `tunnel/data_loop_unix.rs`
 - `tunnel/data_loop_windows.rs`
-- `tunnel/arp_handler.rs` (move from packet/)
 
 ---
 
-### 2. Large File: ffi/client.rs (2725 lines)
-**Priority:** High
+#### DEBT-2: Large File - ffi/client.rs (2725 lines)
 
-The FFI layer reimplements much of the desktop client logic instead of wrapping it.
+FFI layer reimplements desktop client logic instead of wrapping it.
 
-**Duplication:**
-- DHCP handling
-- ARP handling
-- Packet loop
-- Multi-connection management
+**Duplication:** DHCP, ARP, packet loop, multi-connection management (~70% overlap)
 
-**Recommendation:** Extract shared logic into `client/shared.rs` or use the desktop `TunnelRunner` with platform-specific packet I/O callbacks.
+**Recommendation:** Extract shared logic into `client/shared.rs`.
 
 ---
 
-### 3. Duplicated Data Loop Code (~70% overlap)
-**Priority:** Medium  
+### Medium Priority
+
+#### DEBT-3: Duplicated Data Loop Code
 **Location:** `run_data_loop_unix` vs `run_data_loop_windows`
 
-Both functions share most of their logic:
-- Keepalive handling
-- ARP processing
-- Compression/decompression
-- Frame encoding/decoding
+Both share: keepalive, ARP processing, compression, frame encoding.
 
-**Recommendation:** Extract common logic into trait methods or a shared function that takes platform-specific callbacks.
+**Recommendation:** Extract common logic with platform-specific callbacks.
 
 ---
 
-### 4. Inconsistent Error Handling in FFI
-**Priority:** Medium  
+#### DEBT-4: Inconsistent FFI Error Handling
 **Location:** `src/ffi/client.rs`
-
-FFI functions return `NULL_HANDLE` or raw error codes instead of using a consistent error reporting mechanism.
 
 ```rust
 if config.is_null() {
@@ -184,236 +172,174 @@ if config.is_null() {
 }
 ```
 
-**Recommendation:** Add `softether_get_last_error()` function that returns detailed error string, or use out-parameter for error details.
+**Recommendation:** Add `softether_get_last_error()` function.
 
 ---
 
-### 5. Missing Integration Tests for Multi-Connection
-**Priority:** Medium
+#### DEBT-5: Missing Integration Tests for Multi-Connection
 
-Multi-connection mode (half-connection) has complex state transitions:
-- Primary connection starts bidirectional for handshake/auth/DHCP
-- Server assigns direction to each connection after auth:
-  - **C2S (Client→Server)**: Used for sending VPN packets to server
-  - **S2C (Server→Client)**: Used for receiving VPN packets from server
-- With N connections, server splits them ~evenly (e.g., 4 conns → 2 C2S + 2 S2C)
-- Connection failure requires rebalancing remaining connections
-
-**Why half-connection?** TCP works better when data flows primarily one direction (ACKs don't compete with data). Separating upload/download paths improves throughput.
-
-**Recommendation:** Add integration tests that mock the server to verify state machine correctness.
-
----
-
-### 6. Multiple `unwrap()` Calls in TLS Config
-**Priority:** Low  
-**Location:** `src/client/connection.rs:202-244`
-
-```rust
-.with_safe_default_protocol_versions()
-.unwrap()
+Half-connection mode state transitions:
+```
+┌─────────────────────────────────────────────────────────┐
+│                    SoftEther Server                      │
+└────────────┬──────────────┬──────────────┬──────────────┘
+             │              │              │
+        Connection 1   Connection 2   Connection 3
+        (C2S - Send)   (S2C - Recv)   (S2C - Recv)
+             │              │              │
+             ▼              ▼              ▼
+┌─────────────────────────────────────────────────────────┐
+│                    VPN Client                            │
+└─────────────────────────────────────────────────────────┘
 ```
 
-Multiple `unwrap()` calls in TLS configuration that could panic on edge cases.
+- Primary starts bidirectional (handshake/auth/DHCP)
+- Server assigns direction: C2S (upload) or S2C (download)
+- N connections split ~evenly (4 conns → 2 C2S + 2 S2C)
+
+**Why?** TCP ACKs don't compete with data when separated.
+
+---
+
+#### DEBT-6: Windows TUN Incomplete
+**Location:** `src/adapter/windows.rs`
+
+Missing DNS configuration and route cleanup on drop.
+
+---
+
+### Low Priority
+
+#### DEBT-7: Multiple `unwrap()` in TLS Config
+**Location:** `src/client/connection.rs:202-244`
 
 **Recommendation:** Use `?` operator and return proper errors.
 
 ---
 
-### 7. Duplicated Authentication Pack Logic
-**Priority:** Low  
+#### DEBT-8: Duplicated Auth Pack Logic
 **Location:** `src/protocol/auth.rs`
 
-The `AuthPack` struct has multiple constructors (`new`, `new_plain_password`, `new_anonymous`, `new_certificate`, `new_ticket`) that share ~60% of their code for client fields.
-
-**Status:** Partially addressed - `add_client_fields()` extracts common logic, but still some duplication in ticket auth.
+Multiple constructors share ~60% code. Partially addressed with `add_client_fields()`.
 
 ---
 
-### 8. Windows TUN Device Abstraction Incomplete
-**Priority:** Medium  
-**Location:** `src/adapter/windows.rs`
+## 📈 Performance
 
-The Windows adapter exists but is less feature-complete than macOS/Linux:
-- Missing DNS configuration via Windows APIs
-- Route cleanup on drop may not work correctly
+### Medium Priority
 
----
-
-## 📈 Performance Improvements
-
-### 1. Buffer Pool for Receive Allocations
-**Priority:** Medium  
+#### PERF-1: Buffer Pool for Receive Allocations
 **Location:** `src/client/concurrent_reader.rs`
 
 ```rust
 let data: Vec<u8> = packet.data.to_vec();  // Allocation per packet
 ```
 
-**Recommendation:** Use `bytes::BytesMut` pool or arena allocator for receive buffers.
+**Recommendation:** Use `bytes::BytesMut` pool or arena allocator.
 
 ---
 
-### 2. Redundant Compression Check
-**Priority:** Low  
-**Location:** `src/tunnel/runner.rs`
+### Low Priority
 
-```rust
-let frame_data: &[u8] = if is_compressed(packet) { ... }
-```
+#### PERF-2: Redundant Compression Check
+**Location:** `src/tunnel/runner.rs`
 
 Called for every packet even when compression is disabled.
 
-**Recommendation:** Check `use_compress` config flag first, skip `is_compressed()` call if disabled.
+**Recommendation:** Check `use_compress` flag first.
 
 ---
 
-### 3. RC4 Batch Processing
-**Priority:** Low  
+#### PERF-3: RC4 Batch Processing
 **Location:** `src/crypto/rc4.rs`
 
-Currently encrypts/decrypts one buffer at a time. For multi-packet frames, batching could reduce function call overhead.
+Single buffer at a time. Batching could reduce overhead.
 
 ---
 
-### 4. Fragment Reassembly HashMap Growth
-**Priority:** Low  
+#### PERF-4: Fragment Reassembly HashMap Growth
 **Location:** `src/packet/fragment.rs`
 
-```rust
-states: HashMap<FragmentKey, ReassemblyState>,
-```
-
-The fragment reassembler uses a HashMap that can grow unbounded until cleanup runs. Consider using `HashMap::with_capacity()` or a bounded data structure.
+HashMap grows unbounded until cleanup. Use `with_capacity()`.
 
 ---
 
-### 5. String Allocations in JNI Layer
-**Priority:** Low  
+#### PERF-5: JNI String Allocations
 **Location:** `src/ffi/android.rs`
 
-```rust
-let server_str = match get_string(&mut env, &server) { ... }
-```
-
-Multiple string allocations when copying from JNI. Consider using stack-allocated buffers for small strings.
+Multiple allocations when copying from JNI. Consider stack buffers.
 
 ---
 
 ## 📋 Missing Features
 
-### 1. Daemon Mode (CLI)
-**Status:** Not implemented  
-**Location:** `src/main.rs`
-
-`disconnect` and `status` commands are stubbed out. Need daemon process with IPC.
-
----
-
-### 2. DHCP Lease Renewal
-**Status:** Partially implemented  
-**Location:** `src/packet/dhcp.rs`
-
-`DhcpState::Renewing` and `DhcpState::Rebinding` states exist but renewal timer is not wired in the tunnel runner.
+| Feature | Status | Location |
+|---------|--------|----------|
+| Daemon Mode (CLI) | Not implemented | `src/main.rs` |
+| DHCP Lease Renewal | Partial - timer not wired | `src/packet/dhcp.rs` |
+| DHCPv6 Lease Renewal | Not implemented | `src/packet/dhcpv6.rs` |
+| IPv6 Default Route | Not implemented | `src/tunnel/runner.rs` |
+| Graceful Reconnection | Not implemented | `src/client/mod.rs` |
+| UDP Accel V2 NAT-T | Partial | `src/net/udp_accel.rs` |
+| Per-Connection Stats | Partial | `src/ffi/client.rs` |
 
 ---
 
-### 3. IPv6 Default Route
-**Status:** Not implemented  
-**Location:** `src/tunnel/runner.rs`
+## 🏗️ Architecture
 
-IPv6 routing is parsed from config but `set_default_route` only handles IPv4.
+### ✅ Positive Patterns
 
----
+| Pattern | Description |
+|---------|-------------|
+| Zero-copy networking | `bytes::Bytes` and slice references throughout |
+| Modular crypto | SHA-0, RC4, ChaCha20-Poly1305 in separate modules |
+| Platform abstraction | `TunAdapter` trait for cross-platform TUN |
+| Good test coverage | Most packet/protocol modules have unit tests |
+| Clear separation | protocol/, packet/, net/, client/, ffi/ |
+| Concurrent reader | Channel-based concurrent TCP reader |
 
-### 4. Connection Statistics Export
-**Status:** Partial  
-**Location:** `src/ffi/client.rs`
+### ⚠️ Areas for Improvement
 
-`SoftEtherStats` struct exists but detailed per-connection stats are not exposed.
-
----
-
-### 5. Graceful Reconnection
-**Status:** Not implemented  
-**Location:** `src/client/mod.rs`
-
-No automatic reconnection on connection drop. Mobile apps handle this at the Swift/Kotlin layer, but desktop CLI has no reconnect logic.
-
----
-
-### 6. UDP Acceleration V2 Full Support
-**Status:** Partial  
-**Location:** `src/net/udp_accel.rs`
-
-ChaCha20-Poly1305 encryption is implemented, but:
-- NAT traversal (NAT-T) is not fully implemented
-- Fast disconnect detection is parsed but not acted upon
+| Issue | Impact |
+|-------|--------|
+| FFI/Desktop split | Two implementations instead of shared core |
+| Large files | runner.rs (2247) and client.rs (2725) need splitting |
+| Error propagation | Mix of `Result`, `Option`, and panics |
+| State machine clarity | Connection states could use proper FSM pattern |
 
 ---
 
-### 7. DHCPv6 Lease Renewal
-**Status:** Not implemented  
-**Location:** `src/packet/dhcpv6.rs`
+## 🧪 Test Coverage
 
-DHCPv6 handler has `Dhcpv6State::Renewing` and `needs_renewal()` methods, but they're not wired into the tunnel runner.
-
----
-
-## 🏗️ Architecture Observations
-
-### Positive Patterns
-
-1. **Zero-copy networking** - `bytes::Bytes` and slice references used throughout packet handling
-2. **Modular crypto** - SHA-0, RC4, ChaCha20-Poly1305 in separate modules
-3. **Platform abstraction** - `TunAdapter` trait for cross-platform TUN device
-4. **Good test coverage** - Most packet/protocol modules have unit tests
-5. **Clear separation** - Protocol parsing (protocol/), packet handling (packet/), networking (net/)
-6. **Concurrent reader** - Well-designed channel-based concurrent TCP reader
-
-### Areas for Improvement
-
-1. **FFI/Desktop split** - Two separate implementations instead of shared core
-2. **Large files** - tunnel/runner.rs and ffi/client.rs need decomposition
-3. **Error propagation** - Mix of `Result`, `Option`, and panics
-4. **State machine clarity** - Connection states could use a proper state machine pattern
+| Module | Status | Notes |
+|--------|--------|-------|
+| `packet/arp.rs` | ✅ | Good coverage |
+| `packet/dhcp.rs` | ✅ | State machine tests |
+| `packet/dhcpv6.rs` | ✅ | Basic coverage |
+| `packet/ethernet.rs` | ✅ | Zero-copy helpers |
+| `packet/fragment.rs` | ✅ | Reassembly tested |
+| `packet/qos.rs` | ✅ | Priority detection |
+| `protocol/pack.rs` | ✅ | Serialization |
+| `protocol/auth.rs` | ✅ | Auth pack building |
+| `crypto/sha0.rs` | ✅ | Known test vectors |
+| `crypto/rc4.rs` | ✅ | Stream cipher |
+| `net/udp_accel.rs` | ⚠️ | Structure tests only |
+| `tunnel/runner.rs` | ❌ | Complex, needs mocking |
+| `ffi/client.rs` | ❌ | Needs integration tests |
+| `client/mod.rs` | ⚠️ | Connection tests only |
 
 ---
 
 ## ✅ Recently Fixed
 
-- [x] Marvin Attack RSA vulnerability (RUSTSEC-2023-0071) - Fixed by using hardened RSA fork
-- [x] Digest version conflict - Updated sha1 to 0.11.0-rc.3
-- [x] Auth restructure for multiple auth methods (password, RADIUS, certificate, anonymous)
-
----
-
-## 🧪 Test Coverage Status
-
-| Module | Unit Tests | Notes |
-|--------|------------|-------|
-| `packet/arp.rs` | ✅ Yes | Good coverage |
-| `packet/dhcp.rs` | ✅ Yes | State machine tests |
-| `packet/dhcpv6.rs` | ✅ Yes | Basic coverage |
-| `packet/ethernet.rs` | ✅ Yes | Zero-copy helpers tested |
-| `packet/fragment.rs` | ✅ Yes | Reassembly tested |
-| `packet/qos.rs` | ✅ Yes | Priority detection |
-| `protocol/pack.rs` | ✅ Yes | Serialization |
-| `protocol/auth.rs` | ✅ Yes | Auth pack building |
-| `crypto/sha0.rs` | ✅ Yes | Known test vectors |
-| `crypto/rc4.rs` | ✅ Yes | Stream cipher |
-| `net/udp_accel.rs` | ⚠️ Partial | Only structure tests |
-| `tunnel/runner.rs` | ❌ No | Complex, needs mocking |
-| `ffi/client.rs` | ❌ No | Needs integration tests |
-| `client/mod.rs` | ⚠️ Partial | Connection tests only |
+- [x] **Marvin Attack** (RUSTSEC-2023-0071) - Hardened RSA fork
+- [x] **Digest conflict** - Updated sha1 to 0.11.0-rc.3
+- [x] **Auth restructure** - Multiple auth methods (password, RADIUS, cert, anonymous)
 
 ---
 
 ## Contributing
 
-When fixing an issue:
-1. Reference this document in your PR
+1. Reference this document in your PR (e.g., "Fixes BUG-3")
 2. Add tests for the fix
 3. Update this document to mark as fixed with date
-
-Last updated: January 2026
