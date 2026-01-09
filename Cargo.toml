@@ -46,8 +46,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 ring = "0.17"
 rand = "0.8"
 # RSA and SHA-1 for certificate authentication
-rsa = { version = "0.9", features = ["sha1"] }
-sha1 = "0.10"
+# Using forked version with Marvin Attack fix (RUSTSEC-2023-0071)
+rsa = { git = "https://github.com/itsalfredakku/RustRSA", branch = "dev", features = ["sha1"] }
+# Must match RSA crate's digest version (0.11.0-rc.5)
+sha1 = { version = "0.11.0-rc.3", features = ["oid"] }
 
 # Binary parsing
 bytes = "1.9"
