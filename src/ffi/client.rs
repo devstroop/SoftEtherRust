@@ -906,11 +906,7 @@ async fn connect_and_run_inner(
             let dhcpv6 = perform_dhcpv6(&mut conn_mgr, mac, callbacks, config.use_compress).await;
             match dhcpv6 {
                 Some(cfg) => {
-                    log_message(
-                        callbacks,
-                        1,
-                        &format!("[RUST] DHCPv6 complete: IPv6 address obtained"),
-                    );
+                    log_message(callbacks, 1, "[RUST] DHCPv6 complete: IPv6 address obtained");
                     (None, Some(cfg))
                 }
                 None => {
@@ -996,10 +992,7 @@ async fn connect_and_run_inner(
     log_message(
         callbacks,
         1,
-        &format!(
-            "[RUST] Connected! {}, Server: {}",
-            ip_info, actual_server_ip
-        ),
+        &format!("[RUST] Connected! {ip_info}, Server: {actual_server_ip}"),
     );
 
     // Log RC4 encryption status

@@ -49,20 +49,15 @@ pub enum SoftEtherState {
 
 /// IP version preference for DHCP.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SoftEtherIpVersion {
     /// Auto-detect: Try both IPv4 and IPv6.
+    #[default]
     Auto = 0,
     /// IPv4 only: Skip DHCPv6.
     IPv4Only = 1,
     /// IPv6 only: Skip IPv4 DHCP.
     IPv6Only = 2,
-}
-
-impl Default for SoftEtherIpVersion {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl From<SoftEtherIpVersion> for crate::config::IpVersion {
