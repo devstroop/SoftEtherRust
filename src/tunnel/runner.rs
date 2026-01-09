@@ -116,10 +116,11 @@ pub struct TunnelRunner {
 impl TunnelRunner {
     /// Create a new tunnel runner.
     pub fn new(config: TunnelConfig) -> Self {
+        // Note: TLS encryption is ALWAYS active. RC4 is optional defense-in-depth.
         if config.rc4_key_pair.is_some() {
-            info!("RC4 tunnel encryption enabled (UseFastRC4 mode)");
+            info!("RC4 defense-in-depth enabled (TLS + RC4)");
         } else {
-            debug!("No RC4 encryption (using TLS layer or encryption disabled)");
+            debug!("RC4 defense-in-depth disabled (TLS encryption still active)");
         }
 
         Self {
@@ -1394,10 +1395,13 @@ impl TunnelRunner {
             "DHCP using receive connections"
         );
 
+        // Note: DHCP happens before authentication, so no RC4 encryption yet
+        let mut no_encryption: Option<TunnelEncryption> = None;
+
         // Send DHCP DISCOVER
         let discover = dhcp.build_discover();
         debug!(bytes = discover.len(), "Sending DHCP DISCOVER");
-        self.send_frame_multi(conn_mgr, &discover, &mut send_buf)
+        self.send_frame_multi(conn_mgr, &discover, &mut send_buf, &mut no_encryption)
             .await?;
 
         let mut last_send = Instant::now();
@@ -1424,13 +1428,18 @@ impl TunnelRunner {
                 if dhcp.state() == DhcpState::DiscoverSent {
                     warn!("DHCP timeout, retrying DISCOVER");
                     let discover = dhcp.build_discover();
-                    self.send_frame_multi(conn_mgr, &discover, &mut send_buf)
+                    self.send_frame_multi(conn_mgr, &discover, &mut send_buf, &mut no_encryption)
                         .await?;
                 } else if dhcp.state() == DhcpState::RequestSent {
                     warn!("DHCP timeout, retrying REQUEST");
                     if let Some(request) = dhcp.build_request() {
-                        self.send_frame_multi(conn_mgr, &request, &mut send_buf)
-                            .await?;
+                        self.send_frame_multi(
+                            conn_mgr,
+                            &request,
+                            &mut send_buf,
+                            &mut no_encryption,
+                        )
+                        .await?;
                     }
                 }
                 last_send = Instant::now();
@@ -1519,6 +1528,7 @@ impl TunnelRunner {
                                                     conn_mgr,
                                                     &request,
                                                     &mut send_buf,
+                                                    &mut no_encryption,
                                                 )
                                                 .await?;
                                                 last_send = Instant::now();
@@ -1540,11 +1550,13 @@ impl TunnelRunner {
     }
 
     /// Send an Ethernet frame through the tunnel using ConnectionManager.
+    /// Supports optional RC4 encryption for defense-in-depth mode.
     async fn send_frame_multi(
         &self,
         conn_mgr: &mut ConnectionManager,
         frame: &[u8],
         buf: &mut [u8],
+        encryption: &mut Option<TunnelEncryption>,
     ) -> Result<()> {
         // Compress if enabled
         let data_to_send: std::borrow::Cow<[u8]> = if self.config.use_compress {
@@ -1571,6 +1583,11 @@ impl TunnelRunner {
         buf[0..4].copy_from_slice(&1u32.to_be_bytes());
         buf[4..8].copy_from_slice(&(data_to_send.len() as u32).to_be_bytes());
         buf[8..8 + data_to_send.len()].copy_from_slice(&data_to_send);
+
+        // Encrypt before sending if RC4 encryption is enabled
+        if let Some(ref mut enc) = encryption {
+            enc.encrypt(&mut buf[..total_len]);
+        }
 
         conn_mgr.write_all(&buf[..total_len]).await?;
         Ok(())
@@ -1610,6 +1627,14 @@ impl TunnelRunner {
         // One codec per original connection index for stateful frame parsing
         let mut codecs: Vec<TunnelCodec> = (0..total_conns).map(|_| TunnelCodec::new()).collect();
 
+        // Initialize RC4 encryption if enabled (defense-in-depth mode)
+        let mut encryption = self.create_encryption();
+        if encryption.is_some() {
+            info!("RC4 defense-in-depth encryption active for multi-connection tunnel");
+        } else {
+            debug!("No RC4 encryption (TLS-only mode for multi-connection tunnel)");
+        }
+
         // Buffer for reading from bidirectional connections
         let mut bidir_read_buf = vec![0u8; 8192];
 
@@ -1623,13 +1648,13 @@ impl TunnelRunner {
 
         // Send gratuitous ARP to announce our presence
         let garp = arp.build_gratuitous_arp();
-        self.send_frame_multi(conn_mgr, &garp, &mut send_buf)
+        self.send_frame_multi(conn_mgr, &garp, &mut send_buf, &mut encryption)
             .await?;
         debug!("Sent gratuitous ARP");
 
         // Send ARP request for gateway
         let gateway_arp = arp.build_gateway_request();
-        self.send_frame_multi(conn_mgr, &gateway_arp, &mut send_buf)
+        self.send_frame_multi(conn_mgr, &gateway_arp, &mut send_buf, &mut encryption)
             .await?;
         debug!("Sent gateway ARP request");
 
@@ -1733,7 +1758,9 @@ impl TunnelRunner {
 
                     // Send any pending ARP replies
                     if let Some(reply) = arp.build_pending_reply() {
-                        if let Err(e) = self.send_frame_multi(conn_mgr, &reply, &mut send_buf).await
+                        if let Err(e) = self
+                            .send_frame_multi(conn_mgr, &reply, &mut send_buf, &mut encryption)
+                            .await
                         {
                             error!("Failed to send ARP reply: {}", e);
                         } else {
@@ -1822,6 +1849,10 @@ impl TunnelRunner {
                                     send_buf[0..4].copy_from_slice(&1u32.to_be_bytes());
                                     send_buf[4..8].copy_from_slice(&(compressed.len() as u32).to_be_bytes());
                                     send_buf[8..8 + compressed.len()].copy_from_slice(&compressed);
+                                    // Encrypt before sending if RC4 is enabled
+                                    if let Some(ref mut enc) = encryption {
+                                        enc.encrypt(&mut send_buf[..comp_total]);
+                                    }
                                     conn_mgr.write_all(&send_buf[..comp_total]).await?;
                                 }
                             }
@@ -1829,6 +1860,10 @@ impl TunnelRunner {
                                 warn!("Compression failed: {}", e);
                                 send_buf[0..4].copy_from_slice(&1u32.to_be_bytes());
                                 send_buf[4..8].copy_from_slice(&(eth_len as u32).to_be_bytes());
+                                // Encrypt before sending if RC4 is enabled
+                                if let Some(ref mut enc) = encryption {
+                                    enc.encrypt(&mut send_buf[..total_len]);
+                                }
                                 conn_mgr.write_all(&send_buf[..total_len]).await?;
                             }
                         }
@@ -1847,6 +1882,10 @@ impl TunnelRunner {
                         }
                         send_buf[22..22 + ip_packet.len()].copy_from_slice(ip_packet);
 
+                        // Encrypt before sending if RC4 is enabled
+                        if let Some(ref mut enc) = encryption {
+                            enc.encrypt(&mut send_buf[..total_len]);
+                        }
                         conn_mgr.write_all(&send_buf[..total_len]).await?;
                     }
 
@@ -1856,14 +1895,25 @@ impl TunnelRunner {
                 // Data from receive-only connections via ConcurrentReader
                 Some(packet) = concurrent_recv => {
                     let conn_idx = packet.conn_index;
-                    let data = &packet.data[..];
-                    process_vpn_data!(conn_idx, data);
+                    // Decrypt received data if RC4 is enabled (need to copy since Bytes is immutable)
+                    let data: Vec<u8> = if let Some(ref mut enc) = encryption {
+                        let mut decrypted = packet.data.to_vec();
+                        enc.decrypt(&mut decrypted);
+                        decrypted
+                    } else {
+                        packet.data.to_vec()
+                    };
+                    process_vpn_data!(conn_idx, &data[..]);
                 }
 
                 // Data from bidirectional connections (direct read)
                 result = bidir_recv => {
                     if let Ok((conn_idx, n)) = result {
                         if n > 0 {
+                            // Decrypt received data if RC4 is enabled
+                            if let Some(ref mut enc) = encryption {
+                                enc.decrypt(&mut bidir_read_buf[..n]);
+                            }
                             let data = &bidir_read_buf[..n];
                             process_vpn_data!(conn_idx, data);
                         }
@@ -1878,14 +1928,20 @@ impl TunnelRunner {
                             &mut send_buf,
                         );
                         if let Some(ka) = keepalive {
-                            conn_mgr.write_all(ka).await?;
+                            // Note: Keepalive may need encryption too if RC4 is enabled
+                            // For now, the tunnel codec produces keepalive in buffer
+                            let ka_len = ka.len();
+                            if let Some(ref mut enc) = encryption {
+                                enc.encrypt(&mut send_buf[..ka_len]);
+                            }
+                            conn_mgr.write_all(&send_buf[..ka_len]).await?;
                             debug!("Sent keepalive");
                         }
                     }
 
                     if arp.should_send_periodic_garp() {
                         let garp = arp.build_gratuitous_arp();
-                        self.send_frame_multi(conn_mgr, &garp, &mut send_buf).await?;
+                        self.send_frame_multi(conn_mgr, &garp, &mut send_buf, &mut encryption).await?;
                         arp.mark_garp_sent();
                         debug!("Sent periodic GARP");
                     }

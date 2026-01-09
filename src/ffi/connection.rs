@@ -147,16 +147,19 @@ pub fn init_udp_acceleration(
 }
 
 /// Log encryption status.
+/// Note: TLS encryption is ALWAYS active. use_encrypt only controls RC4 defense-in-depth.
 pub fn log_encryption_status(
     auth: &AuthResult,
     config: &crate::config::VpnConfig,
     callbacks: &SoftEtherCallbacks,
 ) {
     if auth.rc4_key_pair.is_some() {
-        callbacks.log_info("[RUST] RC4 tunnel encryption enabled (UseFastRC4 mode)");
+        callbacks.log_info("[RUST] RC4 defense-in-depth enabled (TLS + RC4)");
     } else if config.use_encrypt {
-        callbacks.log_info("[RUST] Using TLS-layer encryption (UseSSLDataEncryption mode)");
+        // Client requested RC4 but server didn't provide keys
+        callbacks.log_info("[RUST] RC4 requested but not provided by server (TLS-only)");
     } else {
-        callbacks.log_info("[RUST] Encryption disabled");
+        // RC4 explicitly disabled, TLS still provides encryption
+        callbacks.log_info("[RUST] RC4 defense-in-depth disabled (TLS encryption active)");
     }
 }

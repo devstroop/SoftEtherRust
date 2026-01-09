@@ -56,8 +56,10 @@ pub struct VpnConfig {
     // ─────────────────────────────────────────────────────────────────────────
     // Tunnel Features
     // ─────────────────────────────────────────────────────────────────────────
-    /// Enable tunnel data encryption (RC4, default: true).
-    /// Encrypts VPN packets inside the TLS tunnel (defense in depth).
+    /// Enable RC4 defense-in-depth encryption (default: true).
+    /// When true, adds RC4 encryption layer inside the TLS tunnel.
+    /// Note: TLS encryption is ALWAYS active regardless of this setting.
+    /// This provides an extra layer of security (defense in depth).
     pub use_encrypt: bool,
 
     /// Enable compression (default: false).

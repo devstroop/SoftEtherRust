@@ -220,6 +220,24 @@ impl VpnClient {
             "Session key received"
         );
 
+        // CRITICAL: When use_encrypt=false and server doesn't provide RC4 keys,
+        // the server switches from TLS to raw TCP mode after authentication.
+        // We must unwrap the TLS stream to read/write raw tunnel data.
+        //
+        // When use_encrypt=true (or server provides RC4 keys), TLS continues.
+        let use_raw_mode = !self.config.use_encrypt && auth_result.rc4_key_pair.is_none();
+        let active_conn = if use_raw_mode {
+            info!("Switching to raw TCP mode (use_encrypt=false, no RC4 keys)");
+            active_conn.into_plain()
+        } else {
+            if auth_result.rc4_key_pair.is_some() {
+                debug!("Using TLS + RC4 encryption (defense-in-depth mode)");
+            } else {
+                debug!("Using TLS encryption only");
+            }
+            active_conn
+        };
+
         // Create ConnectionManager for multi-connection support
         // Pass the actual server address (after redirect) for additional connections
         let mut conn_mgr = ConnectionManager::new(
@@ -228,6 +246,7 @@ impl VpnClient {
             &auth_result,
             &actual_server_addr,
             actual_server_port,
+            use_raw_mode,
         );
 
         // Start tunnel

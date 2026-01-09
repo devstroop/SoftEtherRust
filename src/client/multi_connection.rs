@@ -125,6 +125,9 @@ pub struct ConnectionManager {
     send_index: usize,
     /// Index of next connection to use for receiving (round-robin).
     recv_index: usize,
+    /// Whether to use raw TCP mode (no TLS) for tunnel data.
+    /// This is set when use_encrypt=false and server doesn't provide RC4 keys.
+    use_raw_mode: bool,
 }
 
 impl ConnectionManager {
@@ -132,12 +135,17 @@ impl ConnectionManager {
     ///
     /// Note: `actual_server` and `actual_port` should be the server we're actually
     /// connected to (after any cluster redirect), not the original config server.
+    ///
+    /// `use_raw_mode` indicates whether the server switched to raw TCP mode
+    /// (when use_encrypt=false and no RC4 keys). Additional connections must
+    /// also use raw TCP mode in this case.
     pub fn new(
         primary_conn: VpnConnection,
         config: &VpnConfig,
         auth_result: &AuthResult,
         actual_server: &str,
         actual_port: u16,
+        use_raw_mode: bool,
     ) -> Self {
         let half_connection = config.max_connections > 1;
 
@@ -169,6 +177,7 @@ impl ConnectionManager {
             config: actual_config,
             send_index: 0,
             recv_index: 0,
+            use_raw_mode,
         }
     }
 
@@ -262,6 +271,14 @@ impl ConnectionManager {
 
         // Send additional connection authentication
         let direction = self.upload_additional_auth(&mut conn).await?;
+
+        // Convert to raw TCP if use_encrypt=false (same as primary connection)
+        let conn = if self.use_raw_mode {
+            debug!("Converting additional connection {} to raw TCP mode", index);
+            conn.into_plain()
+        } else {
+            conn
+        };
 
         debug!(
             "Additional connection {} ready with direction {:?}",

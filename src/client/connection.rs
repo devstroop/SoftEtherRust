@@ -434,4 +434,40 @@ impl VpnConnection {
             VpnConnection::Tls(stream) => stream.shutdown().await,
         }
     }
+
+    /// Convert a TLS connection to a plain TCP connection.
+    ///
+    /// This is needed when `use_encrypt=false` - the SoftEther server switches
+    /// from TLS to raw TCP after authentication. The server sends raw tunnel
+    /// protocol data directly over TCP instead of wrapping it in TLS records.
+    ///
+    /// # Warning
+    /// After calling this, any remaining TLS buffered data may be lost.
+    /// This should only be called immediately after authentication when the
+    /// server indicates it's switching to raw mode.
+    pub fn into_plain(self) -> Self {
+        match self {
+            VpnConnection::Tls(tls_stream) => {
+                // Unwrap the TLS stream to get the underlying TCP stream
+                // tokio_rustls::client::TlsStream::into_inner() returns (TcpStream, ClientConnection)
+                let (tcp_stream, _tls_conn) = tls_stream.into_inner();
+                debug!("Converted TLS connection to plain TCP (raw mode)");
+                VpnConnection::Plain(tcp_stream)
+            }
+            VpnConnection::Plain(_) => {
+                // Already plain, no conversion needed
+                self
+            }
+        }
+    }
+
+    /// Check if this is a TLS connection.
+    pub fn is_tls(&self) -> bool {
+        matches!(self, VpnConnection::Tls(_))
+    }
+
+    /// Check if this is a plain TCP connection.
+    pub fn is_plain(&self) -> bool {
+        matches!(self, VpnConnection::Plain(_))
+    }
 }

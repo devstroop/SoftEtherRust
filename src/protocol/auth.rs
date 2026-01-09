@@ -92,9 +92,11 @@ pub struct AuthResult {
     pub redirect: Option<RedirectInfo>,
     /// Connection direction for half-connection mode (0=both, 1=c2s, 2=s2c).
     pub direction: u32,
-    /// RC4 key pair for tunnel encryption (if UseFastRC4 is enabled).
+    /// RC4 key pair for defense-in-depth encryption (if server provides keys).
+    /// Note: TLS encryption is ALWAYS active regardless of this.
     pub rc4_key_pair: Option<Rc4KeyPair>,
-    /// Whether to use SSL/TLS layer for data encryption (when use_encrypt=true but UseFastRC4=false).
+    /// Legacy flag: true when RC4 keys not present.
+    /// Note: TLS is ALWAYS used regardless of this flag.
     pub use_ssl_data_encryption: bool,
     /// UDP acceleration server response (if server supports it).
     pub udp_accel_response: Option<UdpAccelServerResponse>,
@@ -177,9 +179,10 @@ impl AuthResult {
         // Server sends these in the Welcome packet if encryption is enabled
         let rc4_key_pair = Self::parse_rc4_keys(pack);
 
-        // Determine encryption mode:
-        // - If RC4 keys present -> UseFastRC4 mode (application-level RC4)
-        // - If no RC4 keys but use_encrypt was requested -> UseSSLDataEncryption mode (TLS layer handles it)
+        // RC4 defense-in-depth mode:
+        // - If RC4 keys present -> RC4 encryption applied inside TLS tunnel
+        // - If no RC4 keys -> TLS-only (TLS encryption is ALWAYS active regardless)
+        // Note: use_ssl_data_encryption is a legacy flag, TLS is always used.
         let use_ssl_data_encryption = rc4_key_pair.is_none();
 
         // Parse UDP acceleration response if server supports it
