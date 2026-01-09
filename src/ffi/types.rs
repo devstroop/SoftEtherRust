@@ -47,6 +47,29 @@ pub enum SoftEtherState {
     Error = 7,
 }
 
+/// IP version preference for DHCP.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SoftEtherIpVersion {
+    /// Auto-detect: Try both IPv4 and IPv6.
+    #[default]
+    Auto = 0,
+    /// IPv4 only: Skip DHCPv6.
+    IPv4Only = 1,
+    /// IPv6 only: Skip IPv4 DHCP.
+    IPv6Only = 2,
+}
+
+impl From<SoftEtherIpVersion> for crate::config::IpVersion {
+    fn from(v: SoftEtherIpVersion) -> Self {
+        match v {
+            SoftEtherIpVersion::Auto => crate::config::IpVersion::Auto,
+            SoftEtherIpVersion::IPv4Only => crate::config::IpVersion::IPv4Only,
+            SoftEtherIpVersion::IPv6Only => crate::config::IpVersion::IPv6Only,
+        }
+    }
+}
+
 /// VPN configuration passed from mobile apps.
 #[repr(C)]
 pub struct SoftEtherConfig {
@@ -80,6 +103,10 @@ pub struct SoftEtherConfig {
     pub timeout_seconds: c_uint,
     /// MTU size (default 1400).
     pub mtu: c_uint,
+
+    // IP Version
+    /// IP version preference (0 = Auto, 1 = IPv4 only, 2 = IPv6 only).
+    pub ip_version: SoftEtherIpVersion,
 
     // Protocol Features
     /// Use RC4 packet encryption within TLS tunnel (1 = true, 0 = false).

@@ -49,6 +49,16 @@ typedef enum {
 } SoftEtherState;
 
 // =============================================================================
+// IP Version Preference
+// =============================================================================
+
+typedef enum {
+    SOFTETHER_IP_AUTO = 0,        // Auto: Try both IPv4 and IPv6 (IPv4 required, IPv6 optional)
+    SOFTETHER_IP_V4_ONLY = 1,     // IPv4 only: Skip DHCPv6
+    SOFTETHER_IP_V6_ONLY = 2,     // IPv6 only: Skip IPv4 DHCP
+} SoftEtherIpVersion;
+
+// =============================================================================
 // Configuration
 // =============================================================================
 
@@ -67,8 +77,10 @@ typedef struct {
     
     // Connection Settings
     unsigned int max_connections; // Max TCP connections (1-32, default 1)
+    int half_connection;          // Half-connection mode (1 = yes, 0 = no). Requires max_connections >= 2
     unsigned int timeout_seconds; // Connection timeout in seconds (default 30)
     unsigned int mtu;             // MTU size (576-1500, default 1400)
+    SoftEtherIpVersion ip_version; // IP version preference (default: Auto)
     
     // Protocol Features
     int use_encrypt;              // Use RC4 encryption within TLS (1 = yes, 0 = no)

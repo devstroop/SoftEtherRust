@@ -5,6 +5,36 @@ use std::net::Ipv4Addr;
 use std::path::Path;
 use std::time::Duration;
 
+/// IP version preference for DHCP configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IpVersion {
+    /// Auto-detect: Try both IPv4 (DHCP) and IPv6 (DHCPv6).
+    /// IPv4 is required, IPv6 is optional.
+    #[default]
+    Auto,
+    /// IPv4 only: Only perform DHCP for IPv4 address.
+    /// Skip DHCPv6 entirely.
+    #[serde(rename = "ipv4")]
+    IPv4Only,
+    /// IPv6 only: Only perform DHCPv6 for IPv6 address.
+    /// Skip IPv4 DHCP entirely.
+    #[serde(rename = "ipv6")]
+    IPv6Only,
+}
+
+impl IpVersion {
+    /// Check if IPv4 DHCP should be attempted.
+    pub fn wants_ipv4(&self) -> bool {
+        matches!(self, IpVersion::Auto | IpVersion::IPv4Only)
+    }
+
+    /// Check if IPv6 DHCPv6 should be attempted.
+    pub fn wants_ipv6(&self) -> bool {
+        matches!(self, IpVersion::Auto | IpVersion::IPv6Only)
+    }
+}
+
 /// VPN client configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -101,6 +131,16 @@ pub struct VpnConfig {
     /// MTU size for the TUN device (default: 1400).
     /// Used for packet handling, not sent to server.
     pub mtu: u16,
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // IP Version
+    // ─────────────────────────────────────────────────────────────────────────
+    /// IP version preference for DHCP (default: Auto).
+    /// - auto: Try both IPv4 and IPv6 (IPv4 required, IPv6 optional)
+    /// - ipv4: IPv4 only (skip DHCPv6)
+    /// - ipv6: IPv6 only (skip IPv4 DHCP)
+    #[serde(default)]
+    pub ip_version: IpVersion,
 
     // ─────────────────────────────────────────────────────────────────────────
     // Routing
@@ -318,6 +358,8 @@ impl Default for VpnConfig {
             max_connections: 1,
             half_connection: false,
             mtu: 1400,
+            // IP Version
+            ip_version: IpVersion::Auto,
             // Routing
             routing: RoutingConfig::default(),
             // Static IP
