@@ -35,6 +35,110 @@ impl IpVersion {
     }
 }
 
+/// Authentication method for VPN connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMethod {
+    /// Standard password authentication (hashed).
+    /// Uses SHA-0 hashed password.
+    #[default]
+    #[serde(alias = "password")]
+    StandardPassword,
+    /// RADIUS or NT Domain authentication.
+    /// Uses plaintext password sent over TLS.
+    #[serde(alias = "radius", alias = "ntdomain", alias = "domain")]
+    RadiusOrNtDomain,
+    /// Certificate-based authentication.
+    /// Uses client certificate and private key.
+    Certificate,
+    /// Anonymous authentication (no credentials).
+    /// Server must allow anonymous access.
+    Anonymous,
+}
+
+/// Authentication configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthConfig {
+    /// Authentication method to use.
+    pub method: AuthMethod,
+
+    /// Username for authentication (required for password/radius methods).
+    #[serde(default)]
+    pub username: String,
+
+    /// Pre-computed password hash (40-char hex string of SHA-0 hash).
+    /// Used for StandardPassword method.
+    /// Generate using: vpnclient hash -u <username> -p <password>
+    #[serde(default)]
+    pub password_hash: Option<String>,
+
+    /// Plaintext password for RADIUS/NT Domain authentication.
+    /// Used for RadiusOrNtDomain method. Sent over TLS.
+    #[serde(default)]
+    pub password: Option<String>,
+
+    /// Client certificate in PEM format.
+    /// Used for Certificate method.
+    #[serde(default)]
+    pub certificate_pem: Option<String>,
+
+    /// Client private key in PEM format.
+    /// Used for Certificate method.
+    #[serde(default)]
+    pub private_key_pem: Option<String>,
+}
+
+impl AuthConfig {
+    /// Validate the authentication configuration.
+    pub fn validate(&self) -> crate::Result<()> {
+        match self.method {
+            AuthMethod::StandardPassword => {
+                if self.username.is_empty() {
+                    return Err(crate::Error::Config(
+                        "Username is required for password authentication".into(),
+                    ));
+                }
+                if self.password_hash.is_none() {
+                    return Err(crate::Error::Config(
+                        "password_hash is required for standard password authentication. \
+                        Generate with: vpnclient hash -u <username> -p <password>"
+                            .into(),
+                    ));
+                }
+            }
+            AuthMethod::RadiusOrNtDomain => {
+                if self.username.is_empty() {
+                    return Err(crate::Error::Config(
+                        "Username is required for RADIUS/NT Domain authentication".into(),
+                    ));
+                }
+                if self.password.is_none() {
+                    return Err(crate::Error::Config(
+                        "password is required for RADIUS/NT Domain authentication".into(),
+                    ));
+                }
+            }
+            AuthMethod::Certificate => {
+                if self.certificate_pem.is_none() {
+                    return Err(crate::Error::Config(
+                        "certificate_pem is required for certificate authentication".into(),
+                    ));
+                }
+                if self.private_key_pem.is_none() {
+                    return Err(crate::Error::Config(
+                        "private_key_pem is required for certificate authentication".into(),
+                    ));
+                }
+            }
+            AuthMethod::Anonymous => {
+                // No credentials required
+            }
+        }
+        Ok(())
+    }
+}
+
 /// VPN client configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -57,12 +161,8 @@ pub struct VpnConfig {
     // ─────────────────────────────────────────────────────────────────────────
     // Authentication
     // ─────────────────────────────────────────────────────────────────────────
-    /// Username for authentication.
-    pub username: String,
-
-    /// Pre-computed password hash (40-char hex string of SHA-0 hash).
-    /// Generate using: vpnclient hash -u <username> -p <password>
-    pub password_hash: String,
+    /// Authentication configuration.
+    pub auth: AuthConfig,
 
     // ─────────────────────────────────────────────────────────────────────────
     // TLS
@@ -340,8 +440,7 @@ impl Default for VpnConfig {
             hub: String::new(),
             timeout_seconds: 30,
             // Authentication
-            username: String::new(),
-            password_hash: String::new(),
+            auth: AuthConfig::default(),
             // TLS
             skip_tls_verify: true, // SoftEther often uses self-signed certs
             custom_ca_pem: None,
@@ -370,14 +469,34 @@ impl Default for VpnConfig {
 
 impl VpnConfig {
     /// Create a new configuration with required fields.
-    pub fn new(server: String, hub: String, username: String, password_hash: String) -> Self {
+    pub fn new(server: String, hub: String, auth: AuthConfig) -> Self {
         Self {
             server,
             hub,
-            username,
-            password_hash,
+            auth,
             ..Default::default()
         }
+    }
+
+    /// Create a new configuration with standard password authentication.
+    ///
+    /// This is a convenience constructor for the most common use case.
+    pub fn with_password(
+        server: String,
+        hub: String,
+        username: String,
+        password_hash: String,
+    ) -> Self {
+        Self::new(
+            server,
+            hub,
+            AuthConfig {
+                method: AuthMethod::StandardPassword,
+                username,
+                password_hash: Some(password_hash),
+                ..Default::default()
+            },
+        )
     }
 
     /// Load configuration from a JSON file.
@@ -419,14 +538,8 @@ impl VpnConfig {
         if self.hub.is_empty() {
             return Err(crate::Error::Config("Hub name is required".into()));
         }
-        if self.username.is_empty() {
-            return Err(crate::Error::Config("Username is required".into()));
-        }
-        if self.password_hash.is_empty() {
-            return Err(crate::Error::Config(
-                "Password hash is required. Generate with: vpnclient hash -u <username> -p <password>".into(),
-            ));
-        }
+        // Validate authentication configuration
+        self.auth.validate()?;
         if self.port == 0 {
             return Err(crate::Error::Config("Invalid port number".into()));
         }
@@ -448,6 +561,7 @@ impl VpnConfig {
     /// - SOFTETHER_HUB
     /// - SOFTETHER_USER
     /// - SOFTETHER_PASSWORD_HASH
+    /// - SOFTETHER_PASSWORD (for RADIUS/NT Domain auth)
     pub fn merge_env(&mut self) {
         if let Ok(val) = std::env::var("SOFTETHER_SERVER") {
             self.server = val;
@@ -461,10 +575,13 @@ impl VpnConfig {
             self.hub = val;
         }
         if let Ok(val) = std::env::var("SOFTETHER_USER") {
-            self.username = val;
+            self.auth.username = val;
         }
         if let Ok(val) = std::env::var("SOFTETHER_PASSWORD_HASH") {
-            self.password_hash = val;
+            self.auth.password_hash = Some(val);
+        }
+        if let Ok(val) = std::env::var("SOFTETHER_PASSWORD") {
+            self.auth.password = Some(val);
         }
     }
 }
@@ -486,7 +603,7 @@ mod tests {
         let config = VpnConfig::default();
         assert!(config.validate().is_err());
 
-        let config = VpnConfig::new(
+        let config = VpnConfig::with_password(
             "vpn.example.com".into(),
             "VPN".into(),
             "user".into(),
@@ -497,7 +614,7 @@ mod tests {
 
     #[test]
     fn test_config_json_roundtrip() {
-        let config = VpnConfig::new(
+        let config = VpnConfig::with_password(
             "vpn.example.com".into(),
             "VPN".into(),
             "user".into(),

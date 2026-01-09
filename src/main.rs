@@ -8,6 +8,7 @@ use std::process;
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
 
+use softether::config::{AuthConfig, AuthMethod};
 use softether::{crypto, VpnClient, VpnConfig};
 
 #[derive(Parser)]
@@ -208,7 +209,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     config.hub = h;
                 }
                 if let Some(u) = username {
-                    config.username = u;
+                    config.auth.username = u;
                 }
                 if let Some(h) = password_hash {
                     // Validate it's valid hex
@@ -222,7 +223,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         )
                         .into());
                     }
-                    config.password_hash = h;
+                    config.auth.password_hash = Some(h);
                 }
                 if skip_tls_verify {
                     config.skip_tls_verify = true;
@@ -232,7 +233,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 // Require server, hub, username, and password_hash from command line
                 let server = server.ok_or("Server address is required (use -s or config file)")?;
                 let hub = hub.ok_or("Hub name is required (use -H or config file)")?;
-                let username = username.ok_or("Username is required (use -u or config file)")?;
+                let username_val =
+                    username.ok_or("Username is required (use -u or config file)")?;
                 let password_hash_str = password_hash.ok_or(
                     "Password hash is required (use --password-hash or config file). Generate with: vpnclient hash -u <username>"
                 )?;
@@ -251,8 +253,12 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     server,
                     port: port.unwrap_or(443),
                     hub,
-                    username,
-                    password_hash: password_hash_str,
+                    auth: AuthConfig {
+                        method: AuthMethod::StandardPassword,
+                        username: username_val,
+                        password_hash: Some(password_hash_str),
+                        ..Default::default()
+                    },
                     skip_tls_verify,
                     ..Default::default()
                 }
@@ -267,7 +273,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             config.validate()?;
 
             info!("Connecting to {}:{}", config.server, config.port);
-            info!("Hub: {}, Username: {}", config.hub, config.username);
+            info!("Hub: {}, Username: {}", config.hub, config.auth.username);
 
             let mut client = VpnClient::new(config);
 
@@ -295,8 +301,12 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 server: "vpn.example.com".to_string(),
                 port: 443,
                 hub: "VPN".to_string(),
-                username: "your_username".to_string(),
-                password_hash: "0000000000000000000000000000000000000000".to_string(), // Generate with: vpnclient hash -u your_username
+                auth: AuthConfig {
+                    method: AuthMethod::StandardPassword,
+                    username: "your_username".to_string(),
+                    password_hash: Some("0000000000000000000000000000000000000000".to_string()), // Generate with: vpnclient hash -u your_username
+                    ..Default::default()
+                },
                 ..Default::default()
             };
 

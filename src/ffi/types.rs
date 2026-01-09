@@ -70,6 +70,32 @@ impl From<SoftEtherIpVersion> for crate::config::IpVersion {
     }
 }
 
+/// Authentication method for VPN connection.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SoftEtherAuthMethod {
+    /// Standard password authentication (hashed).
+    #[default]
+    StandardPassword = 0,
+    /// RADIUS or NT Domain authentication (plaintext over TLS).
+    RadiusOrNtDomain = 1,
+    /// Certificate-based authentication.
+    Certificate = 2,
+    /// Anonymous authentication (no credentials).
+    Anonymous = 3,
+}
+
+impl From<SoftEtherAuthMethod> for crate::config::AuthMethod {
+    fn from(m: SoftEtherAuthMethod) -> Self {
+        match m {
+            SoftEtherAuthMethod::StandardPassword => crate::config::AuthMethod::StandardPassword,
+            SoftEtherAuthMethod::RadiusOrNtDomain => crate::config::AuthMethod::RadiusOrNtDomain,
+            SoftEtherAuthMethod::Certificate => crate::config::AuthMethod::Certificate,
+            SoftEtherAuthMethod::Anonymous => crate::config::AuthMethod::Anonymous,
+        }
+    }
+}
+
 /// VPN configuration passed from mobile apps.
 #[repr(C)]
 pub struct SoftEtherConfig {
@@ -79,10 +105,20 @@ pub struct SoftEtherConfig {
     pub port: c_uint,
     /// Virtual hub name (null-terminated UTF-8).
     pub hub: *const c_char,
+
+    // Authentication
+    /// Authentication method (0=StandardPassword, 1=RadiusOrNtDomain, 2=Certificate, 3=Anonymous).
+    pub auth_method: SoftEtherAuthMethod,
     /// Username (null-terminated UTF-8).
     pub username: *const c_char,
-    /// Password hash, hex or base64 encoded (null-terminated UTF-8).
+    /// Password hash for StandardPassword auth, hex encoded (null-terminated UTF-8, can be null).
     pub password_hash: *const c_char,
+    /// Plaintext password for RadiusOrNtDomain auth (null-terminated UTF-8, can be null).
+    pub password: *const c_char,
+    /// Client certificate in PEM format for Certificate auth (null-terminated UTF-8, can be null).
+    pub certificate_pem: *const c_char,
+    /// Client private key in PEM format for Certificate auth (null-terminated UTF-8, can be null).
+    pub private_key_pem: *const c_char,
 
     // TLS Settings
     /// Skip TLS certificate verification (1 = true, 0 = false).

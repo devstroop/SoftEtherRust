@@ -45,6 +45,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Cryptography (for SHA-0 we implement ourselves, but SHA-1/256 from ring)
 ring = "0.17"
 rand = "0.8"
+# RSA and SHA-1 for certificate authentication
+rsa = { version = "0.9", features = ["sha1"] }
+sha1 = "0.10"
 
 # Binary parsing
 bytes = "1.9"
