@@ -330,6 +330,7 @@ impl VpnClient {
         // Multi-connection support: use actual max_connections value
         let options = ConnectionOptions {
             max_connections: self.config.max_connections,
+            half_connection: self.config.half_connection,
             use_encrypt: self.config.use_encrypt,
             use_compress: self.config.use_compress,
             udp_accel: self.config.udp_accel,
@@ -487,6 +488,7 @@ impl VpnClient {
         // With max_connections > 1, the server uses half-connection mode
         let options = ConnectionOptions {
             max_connections: self.config.max_connections,
+            half_connection: self.config.half_connection,
             use_encrypt: self.config.use_encrypt,
             use_compress: self.config.use_compress,
             udp_accel: self.config.udp_accel,

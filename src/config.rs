@@ -93,6 +93,11 @@ pub struct VpnConfig {
     /// Higher values can improve throughput but use more resources.
     pub max_connections: u8,
 
+    /// Enable half-connection mode (default: false).
+    /// When true, TCP connections are split into send-only and receive-only.
+    /// Requires max_connections >= 2.
+    pub half_connection: bool,
+
     /// MTU size for the TUN device (default: 1400).
     /// Used for packet handling, not sent to server.
     pub mtu: u16,
@@ -311,6 +316,7 @@ impl Default for VpnConfig {
             monitor_mode: false,
             // Performance
             max_connections: 1,
+            half_connection: false,
             mtu: 1400,
             // Routing
             routing: RoutingConfig::default(),
@@ -381,6 +387,12 @@ impl VpnConfig {
         }
         if self.port == 0 {
             return Err(crate::Error::Config("Invalid port number".into()));
+        }
+        // half_connection requires at least 2 connections
+        if self.half_connection && self.max_connections < 2 {
+            return Err(crate::Error::Config(
+                "half_connection requires max_connections >= 2".into(),
+            ));
         }
         Ok(())
     }
