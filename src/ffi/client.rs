@@ -782,12 +782,17 @@ async fn connect_and_run_inner(
 
     // Create connection manager for packet I/O
     log_message(callbacks, 1, "[RUST] Creating connection manager...");
+
+    // Determine if we need raw TCP mode (when use_encrypt=false and no RC4 keys)
+    let use_raw_mode = !config.use_encrypt && final_auth.rc4_key_pair.is_none();
+
     let mut conn_mgr = ConnectionManager::new(
         active_conn,
         config,
         &final_auth,
         &actual_server_addr,
         actual_server_port,
+        use_raw_mode,
     );
 
     // Generate MAC address for DHCP
@@ -1746,7 +1751,7 @@ async fn run_packet_loop(
 
                         // Write to TCP - don't use timeout, let TCP flow control handle backpressure
                         if let Err(e) = conn_mgr.write_all(&to_send).await {
-                            log_msg(&callbacks, 3, &format!("[RUST] TX error: {}", e));
+                            log_msg(&callbacks, 3, &format!("[RUST] TX error: {e}"));
                             return Err(crate::error::Error::Io(e));
                         }
                     }
@@ -1869,7 +1874,7 @@ async fn run_packet_loop(
                             }
                             }
                             Err(e) => {
-                                log_msg(&callbacks, 3, &format!("[RUST] RX decode error: {:?}", e));
+                                log_msg(&callbacks, 3, &format!("[RUST] RX decode error: {e:?}"));
                             }
                         }
                     }
