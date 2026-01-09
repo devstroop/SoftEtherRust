@@ -2087,7 +2087,9 @@ impl TunnelRunner {
                     }
 
                     if let Some(reply) = arp.build_pending_reply() {
-                        if let Err(e) = self.send_frame_multi(conn_mgr, &reply, &mut send_buf, &mut encryption).await
+                        if let Err(e) = self
+                            .send_frame_multi(conn_mgr, &reply, &mut send_buf, &mut encryption)
+                            .await
                         {
                             error!("Failed to send ARP reply: {}", e);
                         } else {
