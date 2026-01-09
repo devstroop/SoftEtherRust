@@ -142,7 +142,9 @@ pub extern "C" fn softether_ios_is_valid_ipv4(ip: u32) -> c_int {
 /// # Safety
 /// The `handle` must be a valid handle returned from `softether_create`.
 #[no_mangle]
-pub unsafe extern "C" fn softether_ios_get_session(handle: SoftEtherHandle) -> *const SoftEtherSession {
+pub unsafe extern "C" fn softether_ios_get_session(
+    handle: SoftEtherHandle,
+) -> *const SoftEtherSession {
     if handle.is_null() {
         return std::ptr::null();
     }
@@ -319,7 +321,8 @@ mod tests {
     fn test_mac_to_string() {
         let mac = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
         let mut buffer = [0i8; 18];
-        let len = unsafe { softether_ios_mac_to_string(mac.as_ptr(), buffer.as_mut_ptr(), buffer.len()) };
+        let len =
+            unsafe { softether_ios_mac_to_string(mac.as_ptr(), buffer.as_mut_ptr(), buffer.len()) };
         assert!(len > 0);
 
         let result = unsafe {
