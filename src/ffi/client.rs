@@ -199,14 +199,11 @@ pub unsafe extern "C" fn softether_create(
         Some(s) => s,
         None => return NULL_HANDLE,
     };
-    let username = match cstr_to_string(config.username) {
-        Some(s) => s,
-        None => return NULL_HANDLE,
-    };
-    let password_hash = match cstr_to_string(config.password_hash) {
-        Some(s) => s,
-        None => return NULL_HANDLE,
-    };
+    let username = cstr_to_string(config.username).unwrap_or_default();
+    let password_hash = cstr_to_string(config.password_hash);
+    let password = cstr_to_string(config.password);
+    let certificate_pem = cstr_to_string(config.certificate_pem);
+    let private_key_pem = cstr_to_string(config.private_key_pem);
 
     // Parse optional routing strings
     let ipv4_include_str = cstr_to_string(config.ipv4_include).unwrap_or_default();
@@ -300,8 +297,14 @@ pub unsafe extern "C" fn softether_create(
         server,
         port: config.port as u16,
         hub,
-        username,
-        password_hash,
+        auth: crate::config::AuthConfig {
+            method: config.auth_method.into(),
+            username,
+            password_hash,
+            password,
+            certificate_pem,
+            private_key_pem,
+        },
         skip_tls_verify: config.skip_tls_verify != 0,
         custom_ca_pem,
         cert_fingerprint_sha256,
@@ -588,7 +591,7 @@ async fn connect_and_run_inner(
     log_message(
         callbacks,
         1,
-        &format!("[RUST] Hub: {}, User: {}", config.hub, config.username),
+        &format!("[RUST] Hub: {}, User: {}", config.hub, config.auth.username),
     );
     log_message(
         callbacks,
@@ -1238,7 +1241,7 @@ async fn connect_redirect(
     // Build ticket auth pack
     let auth_pack = AuthPack::new_ticket(
         &config.hub,
-        &config.username,
+        &config.auth.username,
         &hello.random,
         &redirect.ticket,
         &options,
@@ -2105,14 +2108,11 @@ async fn authenticate(
             hello.use_secure_password
         ),
     );
-
-    let auth_type = if hello.use_secure_password {
-        log_msg(callbacks, 1, "[RUST] Using SecurePassword auth type");
-        AuthType::SecurePassword
-    } else {
-        log_msg(callbacks, 1, "[RUST] Using Password auth type");
-        AuthType::Password
-    };
+    log_msg(
+        callbacks,
+        1,
+        &format!("[RUST] Auth method: {:?}", config.auth.method),
+    );
 
     let options = ConnectionOptions {
         max_connections: config.max_connections,
@@ -2158,51 +2158,115 @@ async fn authenticate(
         .as_ref()
         .map(crate::net::UdpAccelAuthParams::from_udp_accel);
 
-    log_msg(
-        callbacks,
-        1,
-        &format!(
-            "[RUST] Password hash length: {}",
-            config.password_hash.len()
-        ),
-    );
-
-    // Decode password hash - hex format only (40 chars = 20 bytes)
-    if config.password_hash.len() != 40 {
-        log_msg(
-            callbacks,
-            3,
-            &format!(
-                "[RUST] Invalid hash format: len={}, expected 40 hex chars",
-                config.password_hash.len()
-            ),
-        );
-        return Err(crate::error::Error::Config(format!(
-            "Password hash must be 40 hex characters, got {}",
-            config.password_hash.len()
-        )));
-    }
-
-    log_msg(callbacks, 1, "[RUST] Decoding hex password hash");
-    let password_hash_bytes: [u8; 20] = hex::decode(&config.password_hash)
-        .map_err(|e| {
-            log_msg(callbacks, 3, &format!("[RUST] Hex decode error: {e}"));
-            crate::error::Error::Config(format!("Invalid hex password hash: {e}"))
-        })?
-        .try_into()
-        .map_err(|_| crate::error::Error::Config("Hash decode produced wrong length".into()))?;
-    log_msg(callbacks, 1, "[RUST] Hex hash decoded successfully");
-
+    // Build auth pack based on auth method
     log_msg(callbacks, 1, "[RUST] Building auth pack...");
-    let auth_pack = AuthPack::new(
-        &config.hub,
-        &config.username,
-        &password_hash_bytes,
-        auth_type,
-        &hello.random,
-        &options,
-        udp_accel_params.as_ref(),
-    );
+    let auth_pack = match config.auth.method {
+        crate::config::AuthMethod::StandardPassword => {
+            let auth_type = if hello.use_secure_password {
+                log_msg(callbacks, 1, "[RUST] Using SecurePassword auth type");
+                AuthType::SecurePassword
+            } else {
+                log_msg(callbacks, 1, "[RUST] Using Password auth type");
+                AuthType::Password
+            };
+
+            // Decode password hash - hex format only (40 chars = 20 bytes)
+            let password_hash_str = config.auth.password_hash.as_ref().ok_or_else(|| {
+                crate::error::Error::Config(
+                    "password_hash required for StandardPassword auth".into(),
+                )
+            })?;
+
+            log_msg(
+                callbacks,
+                1,
+                &format!("[RUST] Password hash length: {}", password_hash_str.len()),
+            );
+
+            if password_hash_str.len() != 40 {
+                log_msg(
+                    callbacks,
+                    3,
+                    &format!(
+                        "[RUST] Invalid hash format: len={}, expected 40 hex chars",
+                        password_hash_str.len()
+                    ),
+                );
+                return Err(crate::error::Error::Config(format!(
+                    "Password hash must be 40 hex characters, got {}",
+                    password_hash_str.len()
+                )));
+            }
+
+            log_msg(callbacks, 1, "[RUST] Decoding hex password hash");
+            let password_hash_bytes: [u8; 20] = hex::decode(password_hash_str)
+                .map_err(|e| {
+                    log_msg(callbacks, 3, &format!("[RUST] Hex decode error: {e}"));
+                    crate::error::Error::Config(format!("Invalid hex password hash: {e}"))
+                })?
+                .try_into()
+                .map_err(|_| {
+                    crate::error::Error::Config("Hash decode produced wrong length".into())
+                })?;
+            log_msg(callbacks, 1, "[RUST] Hex hash decoded successfully");
+
+            AuthPack::new(
+                &config.hub,
+                &config.auth.username,
+                &password_hash_bytes,
+                auth_type,
+                &hello.random,
+                &options,
+                udp_accel_params.as_ref(),
+            )
+        }
+        crate::config::AuthMethod::RadiusOrNtDomain => {
+            log_msg(
+                callbacks,
+                1,
+                "[RUST] Using RADIUS/NT Domain auth (plaintext password)",
+            );
+            let password = config.auth.password.as_ref().ok_or_else(|| {
+                crate::error::Error::Config("password required for RadiusOrNtDomain auth".into())
+            })?;
+
+            AuthPack::new_plain_password(
+                &config.hub,
+                &config.auth.username,
+                password,
+                &options,
+                udp_accel_params.as_ref(),
+            )
+        }
+        crate::config::AuthMethod::Certificate => {
+            log_msg(callbacks, 1, "[RUST] Using certificate auth");
+            let cert_pem = config.auth.certificate_pem.as_ref().ok_or_else(|| {
+                crate::error::Error::Config("certificate_pem required for Certificate auth".into())
+            })?;
+            let key_pem = config.auth.private_key_pem.as_ref().ok_or_else(|| {
+                crate::error::Error::Config("private_key_pem required for Certificate auth".into())
+            })?;
+
+            AuthPack::new_certificate(
+                &config.hub,
+                &config.auth.username,
+                cert_pem,
+                key_pem,
+                &hello.random,
+                &options,
+                udp_accel_params.as_ref(),
+            )?
+        }
+        crate::config::AuthMethod::Anonymous => {
+            log_msg(callbacks, 1, "[RUST] Using anonymous auth");
+            AuthPack::new_anonymous(
+                &config.hub,
+                &config.auth.username,
+                &options,
+                udp_accel_params.as_ref(),
+            )
+        }
+    };
 
     let request = HttpRequest::post(VPN_TARGET)
         .header("Content-Type", CONTENT_TYPE_PACK)

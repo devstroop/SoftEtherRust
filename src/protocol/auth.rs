@@ -502,6 +502,217 @@ impl AuthPack {
         Self { pack }
     }
 
+    /// Create a plain password authentication Pack (for RADIUS / NT Domain).
+    ///
+    /// This sends the plaintext password over TLS for server-side authentication
+    /// via RADIUS or NT Domain controller.
+    ///
+    /// # Arguments
+    /// * `hub` - Hub name to connect to
+    /// * `username` - Username for authentication
+    /// * `password` - Plaintext password
+    /// * `options` - Connection options
+    /// * `udp_accel_params` - Optional UDP acceleration parameters
+    pub fn new_plain_password(
+        hub: &str,
+        username: &str,
+        password: &str,
+        options: &ConnectionOptions,
+        udp_accel_params: Option<&UdpAccelAuthParams>,
+    ) -> Self {
+        let mut pack = Pack::new();
+
+        // Authentication fields
+        pack.add_str("method", "login");
+        pack.add_str("hubname", hub);
+        pack.add_str("username", username);
+        pack.add_int("authtype", AuthType::PlainPassword as u32);
+        pack.add_str("plain_password", password);
+
+        // Add common client fields
+        Self::add_client_fields(&mut pack, hub, options, udp_accel_params);
+
+        Self { pack }
+    }
+
+    /// Create an anonymous authentication Pack.
+    ///
+    /// Server must be configured to allow anonymous access.
+    ///
+    /// # Arguments
+    /// * `hub` - Hub name to connect to
+    /// * `username` - Username (can be empty for anonymous)
+    /// * `options` - Connection options
+    /// * `udp_accel_params` - Optional UDP acceleration parameters
+    pub fn new_anonymous(
+        hub: &str,
+        username: &str,
+        options: &ConnectionOptions,
+        udp_accel_params: Option<&UdpAccelAuthParams>,
+    ) -> Self {
+        let mut pack = Pack::new();
+
+        // Authentication fields
+        pack.add_str("method", "login");
+        pack.add_str("hubname", hub);
+        pack.add_str("username", username);
+        pack.add_int("authtype", AuthType::Anonymous as u32);
+
+        // Add common client fields
+        Self::add_client_fields(&mut pack, hub, options, udp_accel_params);
+
+        Self { pack }
+    }
+
+    /// Create a certificate authentication Pack.
+    ///
+    /// Uses X.509 client certificate for authentication.
+    ///
+    /// # Arguments
+    /// * `hub` - Hub name to connect to
+    /// * `username` - Username for authentication  
+    /// * `certificate_pem` - Client certificate in PEM format
+    /// * `private_key_pem` - Client private key in PEM format
+    /// * `server_random` - Server's random challenge
+    /// * `options` - Connection options
+    /// * `udp_accel_params` - Optional UDP acceleration parameters
+    pub fn new_certificate(
+        hub: &str,
+        username: &str,
+        certificate_pem: &str,
+        private_key_pem: &str,
+        server_random: &[u8; SHA0_DIGEST_LEN],
+        options: &ConnectionOptions,
+        udp_accel_params: Option<&UdpAccelAuthParams>,
+    ) -> Result<Self> {
+        use crate::crypto;
+
+        let mut pack = Pack::new();
+
+        // Authentication fields
+        pack.add_str("method", "login");
+        pack.add_str("hubname", hub);
+        pack.add_str("username", username);
+        pack.add_int("authtype", AuthType::Certificate as u32);
+
+        // Parse certificate and sign with private key
+        // The signature is SHA-1 hash of server_random signed with the private key
+        let signature = crypto::sign_with_private_key(server_random, private_key_pem)?;
+        pack.add_data("sign", signature);
+
+        // Add certificate (as DER encoded)
+        let cert_der = crypto::pem_to_der(certificate_pem)?;
+        pack.add_data("cert", cert_der);
+
+        // Add common client fields
+        Self::add_client_fields(&mut pack, hub, options, udp_accel_params);
+
+        Ok(Self { pack })
+    }
+
+    /// Add common client fields to auth pack.
+    fn add_client_fields(
+        pack: &mut Pack,
+        hub: &str,
+        options: &ConnectionOptions,
+        udp_accel_params: Option<&UdpAccelAuthParams>,
+    ) {
+        // Client version info
+        pack.add_str("client_str", CLIENT_STRING);
+        pack.add_int("client_ver", CLIENT_VERSION);
+        pack.add_int("client_build", CLIENT_BUILD);
+
+        // Protocol (0 = TCP)
+        pack.add_int("protocol", 0);
+
+        // Version fields
+        pack.add_str("hello", CLIENT_STRING);
+        pack.add_int("version", CLIENT_VERSION);
+        pack.add_int("build", CLIENT_BUILD);
+        pack.add_int("client_id", 0);
+
+        // Connection options (wired from config)
+        pack.add_int("max_connection", options.max_connections as u32);
+        pack.add_bool("use_encrypt", options.use_encrypt);
+        pack.add_bool("use_compress", options.use_compress);
+        pack.add_bool("half_connection", options.half_connection);
+        pack.add_bool("require_bridge_routing_mode", options.bridge_mode);
+        pack.add_bool("require_monitor_mode", options.monitor_mode);
+        pack.add_bool("qos", options.qos);
+
+        // UDP acceleration R-UDP bulk support
+        pack.add_bool("support_bulk_on_rudp", options.udp_accel);
+        pack.add_bool("support_hmac_on_bulk_of_rudp", options.udp_accel);
+        pack.add_bool("support_udp_recovery", options.udp_accel);
+
+        // Unique ID
+        let unique_id: [u8; 20] = crypto::random_bytes();
+        pack.add_data("unique_id", unique_id.to_vec());
+        pack.add_int(
+            "rudp_bulk_max_version",
+            if options.udp_accel { 2 } else { 0 },
+        );
+
+        // UDP acceleration using flag - send client UDP params if available
+        if let Some(params) = udp_accel_params {
+            pack.add_bool("use_udp_acceleration", true);
+            pack.add_int("udp_acceleration_version", params.max_version);
+
+            Self::add_ip(pack, "udp_acceleration_client_ip", params.client_ip);
+            pack.add_int("udp_acceleration_client_port", params.client_port as u32);
+
+            pack.add_data("udp_acceleration_client_key", params.client_key.to_vec());
+            pack.add_data(
+                "udp_acceleration_client_key_v2",
+                params.client_key_v2.to_vec(),
+            );
+
+            pack.add_bool("support_hmac_on_udp_acceleration", true);
+            pack.add_bool("support_udp_accel_fast_disconnect_detect", true);
+            pack.add_int("udp_acceleration_max_version", params.max_version);
+        }
+
+        // Node info (OutRpcNodeInfo in C)
+        let cedar_unique_id: [u8; 16] = crypto::random_bytes();
+        let hostname = Self::get_hostname();
+        pack.add_str("ClientProductName", CLIENT_STRING);
+        pack.add_str("ServerProductName", "");
+        pack.add_str("ClientOsName", std::env::consts::OS);
+        pack.add_str("ClientOsVer", "");
+        pack.add_str("ClientOsProductId", "");
+        pack.add_str("ClientHostname", &hostname);
+        pack.add_str("ServerHostname", "");
+        pack.add_str("ProxyHostname", "");
+        pack.add_str("HubName", hub);
+        pack.add_data("UniqueId", cedar_unique_id.to_vec());
+        pack.add_int("ClientProductVer", CLIENT_VERSION.to_le());
+        pack.add_int("ClientProductBuild", CLIENT_BUILD.to_le());
+        pack.add_int("ServerProductVer", 0);
+        pack.add_int("ServerProductBuild", 0);
+
+        // IP addresses
+        Self::add_ip32(pack, "ClientIpAddress", 0);
+        pack.add_data("ClientIpAddress6", vec![0u8; 16]);
+        pack.add_int("ClientPort", 0);
+        Self::add_ip32(pack, "ServerIpAddress", 0);
+        pack.add_data("ServerIpAddress6", vec![0u8; 16]);
+        pack.add_int("ServerPort2", 0);
+        Self::add_ip32(pack, "ProxyIpAddress", 0);
+        pack.add_data("ProxyIpAddress6", vec![0u8; 16]);
+        pack.add_int("ProxyPort", 0);
+
+        // WinVer fields
+        pack.add_bool("V_IsWindows", false);
+        pack.add_bool("V_IsNT", false);
+        pack.add_bool("V_IsServer", false);
+        pack.add_bool("V_IsBeta", false);
+        pack.add_int("V_VerMajor", 0);
+        pack.add_int("V_VerMinor", 0);
+        pack.add_int("V_Build", 0);
+        pack.add_int("V_ServicePack", 0);
+        pack.add_str("V_Title", std::env::consts::OS);
+    }
+
     /// Create a ticket authentication Pack (for cluster redirect).
     ///
     /// # Arguments

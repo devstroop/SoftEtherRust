@@ -59,6 +59,17 @@ typedef enum {
 } SoftEtherIpVersion;
 
 // =============================================================================
+// Authentication Method
+// =============================================================================
+
+typedef enum {
+    SOFTETHER_AUTH_STANDARD_PASSWORD = 0, // Standard password auth (SHA-0 hashed)
+    SOFTETHER_AUTH_RADIUS_NTDOMAIN = 1,   // RADIUS/NT Domain auth (plaintext over TLS)
+    SOFTETHER_AUTH_CERTIFICATE = 2,        // Client certificate auth
+    SOFTETHER_AUTH_ANONYMOUS = 3,          // Anonymous auth (no credentials)
+} SoftEtherAuthMethod;
+
+// =============================================================================
 // Configuration
 // =============================================================================
 
@@ -67,8 +78,14 @@ typedef struct {
     const char* server;           // Server hostname or IP (null-terminated UTF-8)
     unsigned int port;            // Server port (default 443)
     const char* hub;              // Virtual hub name
-    const char* username;         // Username
-    const char* password_hash;    // Hex-encoded SHA0 password hash (40 chars)
+    
+    // Authentication
+    SoftEtherAuthMethod auth_method; // Authentication method (default: StandardPassword)
+    const char* username;         // Username (required for password/radius auth)
+    const char* password_hash;    // Hex-encoded SHA0 password hash (40 chars) for StandardPassword
+    const char* password;         // Plaintext password for RadiusOrNtDomain auth (nullable)
+    const char* certificate_pem;  // Client certificate PEM for Certificate auth (nullable)
+    const char* private_key_pem;  // Client private key PEM for Certificate auth (nullable)
     
     // TLS Settings
     int skip_tls_verify;          // Skip TLS certificate verification (1 = yes, 0 = no)

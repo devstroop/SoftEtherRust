@@ -364,8 +364,12 @@ pub extern "system" fn Java_com_worxvpn_app_vpn_SoftEtherBridge_nativeCreate(
         server: server_cstr.as_ptr(),
         port: port as u32,
         hub: hub_cstr.as_ptr(),
+        auth_method: SoftEtherAuthMethod::StandardPassword, // Android uses standard password auth
         username: username_cstr.as_ptr(),
         password_hash: password_hash_cstr.as_ptr(),
+        password: std::ptr::null(), // Not used for standard password auth
+        certificate_pem: std::ptr::null(), // Not used for standard password auth
+        private_key_pem: std::ptr::null(), // Not used for standard password auth
         skip_tls_verify: if skip_tls_verify != 0 { 1 } else { 0 },
         custom_ca_pem: custom_ca_pem_cstr
             .as_ref()

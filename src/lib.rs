@@ -5,6 +5,7 @@
 //! ## Features
 //!
 //! - Full SoftEther protocol support (TCP over TLS)
+//! - Multiple authentication methods (password, RADIUS, certificate, anonymous)
 //! - SHA-0 authentication (legacy SoftEther compatibility)
 //! - DHCP client for IP configuration
 //! - ARP handling for gateway MAC discovery
@@ -15,6 +16,7 @@
 //!
 //! ```rust,no_run
 //! use softether::{VpnClient, VpnConfig, crypto};
+//! use softether::config::{AuthConfig, AuthMethod};
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
@@ -26,8 +28,12 @@
 //!         server: "vpn.example.com".to_string(),
 //!         port: 443,
 //!         hub: "VPN".to_string(),
-//!         username: "user".to_string(),
-//!         password_hash: password_hash_hex,
+//!         auth: AuthConfig {
+//!             method: AuthMethod::StandardPassword,
+//!             username: "user".to_string(),
+//!             password_hash: Some(password_hash_hex),
+//!             ..Default::default()
+//!         },
 //!         ..Default::default()
 //!     };
 //!

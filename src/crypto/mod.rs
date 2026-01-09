@@ -95,6 +95,62 @@ pub fn generate_transaction_id() -> u32 {
     rand::thread_rng().gen()
 }
 
+/// Convert PEM certificate to DER format.
+pub fn pem_to_der(pem: &str) -> crate::Result<Vec<u8>> {
+    use base64::Engine;
+
+    // Find the certificate block
+    let start_marker = "-----BEGIN CERTIFICATE-----";
+    let end_marker = "-----END CERTIFICATE-----";
+
+    let start = pem
+        .find(start_marker)
+        .ok_or_else(|| crate::Error::Config("Invalid PEM: missing BEGIN marker".into()))?;
+    let end = pem
+        .find(end_marker)
+        .ok_or_else(|| crate::Error::Config("Invalid PEM: missing END marker".into()))?;
+
+    let base64_content = &pem[start + start_marker.len()..end];
+    let base64_clean: String = base64_content
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+
+    base64::engine::general_purpose::STANDARD
+        .decode(&base64_clean)
+        .map_err(|e| crate::Error::Config(format!("Invalid PEM base64: {e}")))
+}
+
+/// Sign data with a private key (RSA PKCS#1 v1.5 SHA-1 signature).
+///
+/// This is used for certificate authentication in SoftEther.
+pub fn sign_with_private_key(data: &[u8], private_key_pem: &str) -> crate::Result<Vec<u8>> {
+    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::{Pkcs1v15Sign, RsaPrivateKey};
+    use sha1::{Digest, Sha1};
+
+    // Parse the private key from PEM
+    let private_key = RsaPrivateKey::from_pkcs8_pem(private_key_pem)
+        .or_else(|_| {
+            // Try PKCS#1 format
+            use rsa::pkcs1::DecodeRsaPrivateKey;
+            RsaPrivateKey::from_pkcs1_pem(private_key_pem)
+        })
+        .map_err(|e| crate::Error::Config(format!("Failed to parse private key: {e}")))?;
+
+    // Compute SHA-1 hash of the data
+    let mut hasher = Sha1::new();
+    hasher.update(data);
+    let hash = hasher.finalize();
+
+    // Sign with PKCS#1 v1.5
+    let signature = private_key
+        .sign(Pkcs1v15Sign::new::<Sha1>(), &hash)
+        .map_err(|e| crate::Error::Config(format!("Failed to sign: {e}")))?;
+
+    Ok(signature)
+}
+
 /// Bidirectional RC4 encryption state for tunnel traffic.
 ///
 /// This wraps separate send/receive RC4 ciphers for encrypting

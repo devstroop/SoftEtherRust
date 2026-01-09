@@ -19,7 +19,7 @@ use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 use crate::adapter::TunAdapter;
-use crate::config::VpnConfig;
+use crate::config::{AuthMethod, VpnConfig};
 use crate::error::{Error, Result};
 use crate::net::{UdpAccel, UdpAccelAuthParams};
 use crate::packet::{DhcpConfig, EtherType};
@@ -348,7 +348,7 @@ impl VpnClient {
         // Authenticate with ticket
         let auth_pack = AuthPack::new_ticket(
             &self.config.hub,
-            &self.config.username,
+            &self.config.auth.username,
             &redirect_hello.random,
             &redirect.ticket,
             &options,
@@ -474,18 +474,7 @@ impl VpnClient {
         conn: &mut VpnConnection,
         hello: &HelloResponse,
     ) -> Result<AuthResult> {
-        // Determine authentication type
-        let auth_type = if hello.use_secure_password {
-            AuthType::SecurePassword
-        } else {
-            AuthType::Password
-        };
-
-        info!("Using authentication type: {:?}", auth_type);
-
         // Build connection options from config
-        // Multi-connection support: use actual max_connections value
-        // With max_connections > 1, the server uses half-connection mode
         let options = ConnectionOptions {
             max_connections: self.config.max_connections,
             half_connection: self.config.half_connection,
@@ -503,27 +492,88 @@ impl VpnClient {
             .as_ref()
             .map(UdpAccelAuthParams::from_udp_accel);
 
-        // Decode password hash from hex string
-        let password_hash_vec = hex::decode(&self.config.password_hash)
-            .map_err(|e| Error::Config(format!("Invalid password_hash hex: {e}")))?;
-        if password_hash_vec.len() != 20 {
-            return Err(Error::Config(format!(
-                "password_hash must be 20 bytes (40 hex chars), got {} bytes",
-                password_hash_vec.len()
-            )));
-        }
-        let password_hash_bytes: [u8; 20] = password_hash_vec.try_into().unwrap();
+        // Build authentication pack based on auth method
+        let auth_pack = match self.config.auth.method {
+            AuthMethod::StandardPassword => {
+                // Determine wire protocol auth type based on server capability
+                let auth_type = if hello.use_secure_password {
+                    AuthType::SecurePassword
+                } else {
+                    AuthType::Password
+                };
+                info!(
+                    "Using standard password authentication (wire type: {:?})",
+                    auth_type
+                );
 
-        // Build authentication pack with decoded hash
-        let auth_pack = AuthPack::new(
-            &self.config.hub,
-            &self.config.username,
-            &password_hash_bytes,
-            auth_type,
-            &hello.random,
-            &options,
-            udp_accel_params.as_ref(),
-        );
+                // Decode password hash from hex string
+                let password_hash_str =
+                    self.config.auth.password_hash.as_ref().ok_or_else(|| {
+                        Error::Config("password_hash is required for standard password auth".into())
+                    })?;
+                let password_hash_vec = hex::decode(password_hash_str)
+                    .map_err(|e| Error::Config(format!("Invalid password_hash hex: {e}")))?;
+                if password_hash_vec.len() != 20 {
+                    return Err(Error::Config(format!(
+                        "password_hash must be 20 bytes (40 hex chars), got {} bytes",
+                        password_hash_vec.len()
+                    )));
+                }
+                let password_hash_bytes: [u8; 20] = password_hash_vec.try_into().unwrap();
+
+                AuthPack::new(
+                    &self.config.hub,
+                    &self.config.auth.username,
+                    &password_hash_bytes,
+                    auth_type,
+                    &hello.random,
+                    &options,
+                    udp_accel_params.as_ref(),
+                )
+            }
+            AuthMethod::RadiusOrNtDomain => {
+                info!("Using RADIUS/NT Domain authentication (plaintext password over TLS)");
+                let password = self.config.auth.password.as_ref().ok_or_else(|| {
+                    Error::Config("password is required for RADIUS/NT Domain auth".into())
+                })?;
+
+                AuthPack::new_plain_password(
+                    &self.config.hub,
+                    &self.config.auth.username,
+                    password,
+                    &options,
+                    udp_accel_params.as_ref(),
+                )
+            }
+            AuthMethod::Certificate => {
+                info!("Using certificate authentication");
+                let cert_pem = self.config.auth.certificate_pem.as_ref().ok_or_else(|| {
+                    Error::Config("certificate_pem is required for certificate auth".into())
+                })?;
+                let key_pem = self.config.auth.private_key_pem.as_ref().ok_or_else(|| {
+                    Error::Config("private_key_pem is required for certificate auth".into())
+                })?;
+
+                AuthPack::new_certificate(
+                    &self.config.hub,
+                    &self.config.auth.username,
+                    cert_pem,
+                    key_pem,
+                    &hello.random,
+                    &options,
+                    udp_accel_params.as_ref(),
+                )?
+            }
+            AuthMethod::Anonymous => {
+                info!("Using anonymous authentication");
+                AuthPack::new_anonymous(
+                    &self.config.hub,
+                    &self.config.auth.username,
+                    &options,
+                    udp_accel_params.as_ref(),
+                )
+            }
+        };
 
         // Build HTTP request with auth data - use VPN_TARGET and CONTENT_TYPE_PACK
         let request = HttpRequest::post(VPN_TARGET)
