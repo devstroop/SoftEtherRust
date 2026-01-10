@@ -2277,7 +2277,20 @@ async fn authenticate(
                 .map_err(|_| {
                     crate::error::Error::Config("Hash decode produced wrong length".into())
                 })?;
-            log_msg(callbacks, 1, "[RUST] Hex hash decoded successfully");
+            log_msg(
+                callbacks,
+                1,
+                &format!(
+                    "[RUST] Hex hash decoded: {}...{} (first/last 4 chars)",
+                    &password_hash_str[..8],
+                    &password_hash_str[32..]
+                ),
+            );
+            log_msg(callbacks, 1, &format!(
+                "[RUST] Server random (first 8 bytes): {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                hello.random[0], hello.random[1], hello.random[2], hello.random[3],
+                hello.random[4], hello.random[5], hello.random[6], hello.random[7]
+            ));
 
             AuthPack::new(
                 &config.hub,
@@ -2393,7 +2406,18 @@ async fn authenticate(
                     1,
                     &format!("[RUST] Response body: {} bytes", response.body.len()),
                 );
-                let pack = crate::protocol::Pack::deserialize(&response.body)?;
+
+                // Deserialize Pack with error logging
+                let pack = match crate::protocol::Pack::deserialize(&response.body) {
+                    Ok(p) => {
+                        log_msg(callbacks, 1, "[RUST] Pack deserialized successfully");
+                        p
+                    }
+                    Err(e) => {
+                        log_msg(callbacks, 3, &format!("[RUST] Pack deserialize error: {e}"));
+                        return Err(e);
+                    }
+                };
 
                 // Resolve remote IP for UDP accel parsing
                 let remote_ip = if config.udp_accel {
@@ -2404,7 +2428,25 @@ async fn authenticate(
                     None
                 };
 
-                let result = AuthResult::from_pack_with_remote(&pack, remote_ip)?;
+                // Parse auth result with error logging
+                let result = match AuthResult::from_pack_with_remote(&pack, remote_ip) {
+                    Ok(r) => {
+                        log_msg(
+                            callbacks,
+                            1,
+                            &format!(
+                                "[RUST] AuthResult parsed: error={}, session_key_len={}",
+                                r.error,
+                                r.session_key.len()
+                            ),
+                        );
+                        r
+                    }
+                    Err(e) => {
+                        log_msg(callbacks, 3, &format!("[RUST] AuthResult parse error: {e}"));
+                        return Err(e);
+                    }
+                };
 
                 if result.error > 0 {
                     log_msg(

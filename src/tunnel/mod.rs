@@ -9,17 +9,35 @@
 //! - DHCP handling for tunnel setup
 
 mod data_loop;
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "ios",
+    target_os = "android"
+))]
 mod dhcp_handler;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod multi_conn;
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "ios",
+    target_os = "android"
+))]
 mod packet_processor;
 mod runner;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod single_conn;
 
 pub use data_loop::{format_ip, DataLoopConfig, DataLoopState, Ipv4Info, LoopResult, TimingState};
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "ios",
+    target_os = "android"
+))]
 pub use packet_processor::*;
 pub use runner::{RouteConfig, TunnelConfig, TunnelRunner};
