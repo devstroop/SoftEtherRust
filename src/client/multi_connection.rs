@@ -1085,14 +1085,12 @@ mod tests {
 
         // Should be roughly balanced (2 and 2)
         assert!(
-            c2s_count >= 1 && c2s_count <= 3,
-            "C2S count {} not in expected range",
-            c2s_count
+            (1..=3).contains(&c2s_count),
+            "C2S count {c2s_count} not in expected range"
         );
         assert!(
-            s2c_count >= 1 && s2c_count <= 3,
-            "S2C count {} not in expected range",
-            s2c_count
+            (1..=3).contains(&s2c_count),
+            "S2C count {s2c_count} not in expected range"
         );
         assert_eq!(c2s_count + s2c_count, 4, "Total should be 4 connections");
     }
@@ -1113,14 +1111,12 @@ mod tests {
 
         // Should be balanced (4 and 4)
         assert!(
-            c2s_count >= 3 && c2s_count <= 5,
-            "C2S count {} not in expected range",
-            c2s_count
+            (3..=5).contains(&c2s_count),
+            "C2S count {c2s_count} not in expected range"
         );
         assert!(
-            s2c_count >= 3 && s2c_count <= 5,
-            "S2C count {} not in expected range",
-            s2c_count
+            (3..=5).contains(&s2c_count),
+            "S2C count {s2c_count} not in expected range"
         );
     }
 
@@ -1310,7 +1306,7 @@ mod tests {
     #[test]
     fn test_least_loaded_selection() {
         // Simulate selecting least-loaded connection
-        let pending_bytes = vec![
+        let pending_bytes = [
             (0usize, 5000u64), // Connection 0: 5KB pending
             (1usize, 1000u64), // Connection 1: 1KB pending (least loaded)
             (2usize, 8000u64), // Connection 2: 8KB pending
@@ -1331,7 +1327,7 @@ mod tests {
     #[test]
     fn test_least_loaded_with_equal_pending() {
         // When pending is equal, should select consistently (first min)
-        let pending_bytes = vec![(0usize, 1000u64), (1usize, 1000u64), (2usize, 1000u64)];
+        let pending_bytes = [(0usize, 1000u64), (1usize, 1000u64), (2usize, 1000u64)];
 
         let (selected_idx, _) = pending_bytes
             .iter()
@@ -1345,7 +1341,7 @@ mod tests {
     #[test]
     fn test_load_distribution_simulation() {
         // Simulate how load distributes with least-loaded selection
-        let mut pending = vec![0u64, 0u64, 0u64]; // 3 connections
+        let mut pending = [0u64, 0u64, 0u64]; // 3 connections
         let packet_size = 1500u64;
 
         // Simulate sending 9 packets
@@ -1389,7 +1385,7 @@ mod tests {
     #[test]
     fn test_session_key_validity() {
         // Session key should be non-empty for additional connections
-        let session_key = vec![0x01, 0x02, 0x03, 0x04, 0x05];
+        let session_key = [0x01, 0x02, 0x03, 0x04, 0x05];
 
         assert!(!session_key.is_empty(), "Session key should not be empty");
         assert!(

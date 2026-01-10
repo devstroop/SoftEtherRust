@@ -555,8 +555,7 @@ mod tests {
             let capacity = 256; // From ConcurrentReader::new
             assert_eq!(
                 capacity, expected_capacity,
-                "Channel capacity for {} connections",
-                num_conns
+                "Channel capacity for {num_conns} connections"
             );
             let _ = num_conns; // Suppress warning
         }
@@ -668,8 +667,7 @@ mod tests {
         let hit_rate = pool.hit_rate();
         assert!(
             (hit_rate - 75.0).abs() < 0.01,
-            "Expected 75% hit rate, got {}",
-            hit_rate
+            "Expected 75% hit rate, got {hit_rate}"
         );
     }
 
@@ -716,14 +714,15 @@ mod tests {
         assert_eq!(misses, 1, "Should have missed because reclaim failed");
     }
 
+    // Compile-time assertions for buffer pool constants
+    const _: () = {
+        assert!(BUFFERS_PER_READER >= 4, "Should have enough buffers per reader");
+    };
+
     #[test]
     fn test_buffer_pool_constants() {
         // Verify the constants make sense
         assert_eq!(DEFAULT_BUFFER_SIZE, 65536, "Should match max VPN packet");
-        assert!(
-            BUFFERS_PER_READER >= 4,
-            "Should have enough buffers per reader"
-        );
     }
 
     #[tokio::test]
