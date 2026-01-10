@@ -305,6 +305,26 @@ int softether_receive_packets(SoftEtherHandle handle, uint8_t* buffer, size_t bu
  */
 const char* softether_version(void);
 
+/**
+ * Get the last error message.
+ *
+ * Returns a pointer to a null-terminated string describing the last error
+ * that occurred in the current thread. The pointer is valid until the next
+ * call to any softether_* function on the same thread.
+ *
+ * Thread-safe: Each thread has its own error storage.
+ *
+ * @return Error message, or NULL if no error occurred
+ */
+const char* softether_get_last_error(void);
+
+/**
+ * Clear the last error message.
+ *
+ * Resets the thread-local error state to NULL.
+ */
+void softether_clear_last_error(void);
+
 // =============================================================================
 // Helper Functions
 // =============================================================================

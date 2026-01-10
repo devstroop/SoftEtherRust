@@ -150,10 +150,10 @@ pub unsafe extern "C" fn softether_ios_get_session(
     session_out: *mut SoftEtherSession,
 ) -> SoftEtherResult {
     if handle.is_null() {
-        return SoftEtherResult::InvalidHandle;
+        return SoftEtherResult::InvalidParam;
     }
     if session_out.is_null() {
-        return SoftEtherResult::InvalidConfig;
+        return SoftEtherResult::InvalidParam;
     }
 
     unsafe { softether_get_session(handle, session_out) }
@@ -171,10 +171,10 @@ pub unsafe extern "C" fn softether_ios_get_stats(
     stats_out: *mut SoftEtherStats,
 ) -> SoftEtherResult {
     if handle.is_null() {
-        return SoftEtherResult::InvalidHandle;
+        return SoftEtherResult::InvalidParam;
     }
     if stats_out.is_null() {
-        return SoftEtherResult::InvalidConfig;
+        return SoftEtherResult::InvalidParam;
     }
 
     unsafe { softether_get_stats(handle, stats_out) }

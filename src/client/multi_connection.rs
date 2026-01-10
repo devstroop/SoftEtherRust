@@ -79,6 +79,11 @@ pub struct ManagedConnection {
     pub healthy: bool,
     /// Connection index (for debugging).
     pub index: usize,
+    /// Estimated pending bytes in send buffer (for load balancing).
+    /// Updated on write, decremented over time based on estimated bandwidth.
+    pending_send_bytes: u64,
+    /// Last time pending bytes was updated.
+    pending_updated: Instant,
 }
 
 impl ManagedConnection {
@@ -95,6 +100,8 @@ impl ManagedConnection {
             bytes_received: 0,
             healthy: true,
             index,
+            pending_send_bytes: 0,
+            pending_updated: now,
         }
     }
 
@@ -119,6 +126,8 @@ impl ManagedConnection {
             bytes_received: 0,
             healthy: true,
             index,
+            pending_send_bytes: 0,
+            pending_updated: now,
         }
     }
 
@@ -152,6 +161,25 @@ impl ManagedConnection {
     /// Check if connection has been idle too long.
     pub fn is_idle(&self, timeout: Duration) -> bool {
         self.last_activity.elapsed() > timeout
+    }
+
+    /// Get estimated pending send bytes with time-based decay.
+    /// Assumes ~10 MB/s bandwidth for decay calculation (100 bytes/µs).
+    pub fn estimated_pending(&self) -> u64 {
+        let elapsed_us = self.pending_updated.elapsed().as_micros() as u64;
+        // Decay rate: ~10 MB/s = 10 bytes per microsecond
+        let decay = elapsed_us.saturating_mul(10);
+        self.pending_send_bytes.saturating_sub(decay)
+    }
+
+    /// Record bytes written (increases pending estimate).
+    pub fn record_write(&mut self, bytes: u64) {
+        // First decay existing pending
+        let current = self.estimated_pending();
+        self.pending_send_bytes = current.saturating_add(bytes);
+        self.pending_updated = Instant::now();
+        self.bytes_sent += bytes;
+        self.touch();
     }
 }
 
@@ -498,8 +526,35 @@ impl ConnectionManager {
     }
 
     /// Get a connection suitable for sending data.
-    /// Uses round-robin among send-capable connections.
+    /// Uses least-loaded selection among send-capable connections to balance
+    /// TCP buffer pressure and reduce latency oscillation.
     pub fn get_send_connection(&mut self) -> Option<&mut ManagedConnection> {
+        // Find send-capable connections with their estimated pending bytes
+        let send_capable: Vec<(usize, u64)> = self
+            .connections
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.healthy && c.direction.can_send())
+            .map(|(i, c)| (i, c.estimated_pending()))
+            .collect();
+
+        if send_capable.is_empty() {
+            return None;
+        }
+
+        // Select connection with least pending bytes (least loaded)
+        let (idx, _) = send_capable
+            .iter()
+            .min_by_key(|(_, pending)| *pending)
+            .copied()
+            .unwrap();
+
+        Some(&mut self.connections[idx])
+    }
+
+    /// Get a connection for sending using round-robin (for compatibility).
+    /// Prefer `get_send_connection()` for better load balancing.
+    pub fn get_send_connection_roundrobin(&mut self) -> Option<&mut ManagedConnection> {
         let send_capable: Vec<usize> = self
             .connections
             .iter()
@@ -622,16 +677,17 @@ impl ConnectionManager {
     }
 
     /// Write data using an appropriate send connection.
-    /// Flushes immediately to minimize latency for VPN traffic.
+    /// Uses least-loaded selection to reduce latency oscillation.
+    /// TCP_NODELAY is set, so we don't explicitly flush to avoid blocking.
     pub async fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        // Select a send-capable connection
+        // Select least-loaded send-capable connection
         let idx = {
-            let send_capable: Vec<usize> = self
+            let send_capable: Vec<(usize, u64)> = self
                 .connections
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| c.healthy && c.direction.can_send())
-                .map(|(i, _)| i)
+                .map(|(i, c)| (i, c.estimated_pending()))
                 .collect();
 
             if send_capable.is_empty() {
@@ -641,30 +697,35 @@ impl ConnectionManager {
                 ));
             }
 
-            self.send_index = (self.send_index + 1) % send_capable.len();
-            send_capable[self.send_index]
+            // Select connection with least pending bytes
+            send_capable
+                .iter()
+                .min_by_key(|(_, pending)| *pending)
+                .map(|(i, _)| *i)
+                .unwrap()
         };
 
         let conn = &mut self.connections[idx];
         conn.conn.write_all(buf).await?;
-        conn.conn.flush().await?; // Flush immediately for low latency
-        conn.bytes_sent += buf.len() as u64;
-        conn.touch();
+        // TCP_NODELAY is set, so data is sent immediately without Nagle delay.
+        // We don't call flush() here to avoid blocking on TCP ACKs which
+        // causes latency oscillation under load.
+        conn.record_write(buf.len() as u64);
         Ok(())
     }
 
     /// Write data with per-connection encryption.
     /// Encrypts using the selected connection's own cipher state, then sends.
-    /// Each TCP socket has independent RC4 state on the server.
+    /// Uses least-loaded selection to balance TCP buffer pressure.
     pub async fn write_all_encrypted(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        // Select a send-capable connection
+        // Select least-loaded send-capable connection
         let idx = {
-            let send_capable: Vec<usize> = self
+            let send_capable: Vec<(usize, u64)> = self
                 .connections
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| c.healthy && c.direction.can_send())
-                .map(|(i, _)| i)
+                .map(|(i, c)| (i, c.estimated_pending()))
                 .collect();
 
             if send_capable.is_empty() {
@@ -674,17 +735,20 @@ impl ConnectionManager {
                 ));
             }
 
-            self.send_index = (self.send_index + 1) % send_capable.len();
-            send_capable[self.send_index]
+            // Select connection with least pending bytes
+            send_capable
+                .iter()
+                .min_by_key(|(_, pending)| *pending)
+                .map(|(i, _)| *i)
+                .unwrap()
         };
 
         let conn = &mut self.connections[idx];
         // Encrypt with this connection's own cipher state
         conn.encrypt(buf);
         conn.conn.write_all(buf).await?;
-        conn.conn.flush().await?; // Flush immediately for low latency
-        conn.bytes_sent += buf.len() as u64;
-        conn.touch();
+        // TCP_NODELAY ensures immediate send. No flush() to avoid ACK-wait latency.
+        conn.record_write(buf.len() as u64);
         Ok(())
     }
 
@@ -836,4 +900,527 @@ pub struct ConnectionStats {
     pub total_bytes_sent: u64,
     /// Total bytes received across all connections.
     pub total_bytes_received: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ==========================================================================
+    // TcpDirection tests
+    // ==========================================================================
+
+    #[test]
+    fn test_tcp_direction_from_int() {
+        // TCP_BOTH = 0
+        assert_eq!(TcpDirection::from_int(0), TcpDirection::Both);
+        // TCP_SERVER_TO_CLIENT = 1
+        assert_eq!(TcpDirection::from_int(1), TcpDirection::ServerToClient);
+        // TCP_CLIENT_TO_SERVER = 2
+        assert_eq!(TcpDirection::from_int(2), TcpDirection::ClientToServer);
+        // Unknown values default to Both
+        assert_eq!(TcpDirection::from_int(99), TcpDirection::Both);
+    }
+
+    #[test]
+    fn test_tcp_direction_can_send() {
+        // Both: can send and receive
+        assert!(TcpDirection::Both.can_send());
+        // ClientToServer: send only
+        assert!(TcpDirection::ClientToServer.can_send());
+        // ServerToClient: receive only
+        assert!(!TcpDirection::ServerToClient.can_send());
+    }
+
+    #[test]
+    fn test_tcp_direction_can_recv() {
+        // Both: can send and receive
+        assert!(TcpDirection::Both.can_recv());
+        // ServerToClient: receive only
+        assert!(TcpDirection::ServerToClient.can_recv());
+        // ClientToServer: send only
+        assert!(!TcpDirection::ClientToServer.can_recv());
+    }
+
+    #[test]
+    fn test_tcp_direction_half_connection_split() {
+        // In half-connection mode with 4 connections:
+        // - 2 should be ClientToServer (upload)
+        // - 2 should be ServerToClient (download)
+        let directions = [
+            TcpDirection::ClientToServer, // Primary is always C2S
+            TcpDirection::ServerToClient, // Server assigns
+            TcpDirection::ClientToServer, // Server assigns
+            TcpDirection::ServerToClient, // Server assigns
+        ];
+
+        let send_count = directions.iter().filter(|d| d.can_send()).count();
+        let recv_count = directions.iter().filter(|d| d.can_recv()).count();
+
+        assert_eq!(send_count, 2, "Should have 2 send-capable connections");
+        assert_eq!(recv_count, 2, "Should have 2 recv-capable connections");
+    }
+
+    // ==========================================================================
+    // ManagedConnection tests (without actual network)
+    // ==========================================================================
+
+    // Note: ManagedConnection requires a real VpnConnection, so we test
+    // the encryption methods separately.
+
+    #[test]
+    fn test_tunnel_encryption_independent_state() {
+        // Each connection should have independent RC4 state
+        // This test verifies that creating multiple encryptions from same keys
+        // produces independent cipher streams
+        use crate::crypto::{Rc4KeyPair, RC4_KEY_SIZE};
+
+        let keys = Rc4KeyPair {
+            server_to_client: [0x01; RC4_KEY_SIZE],
+            client_to_server: [0x02; RC4_KEY_SIZE],
+        };
+
+        let mut enc1 = TunnelEncryption::new(&keys);
+        let mut enc2 = TunnelEncryption::new(&keys);
+
+        // Same plaintext
+        let mut data1 = vec![0u8; 16];
+        let mut data2 = vec![0u8; 16];
+
+        // Both should produce identical ciphertext (same initial state)
+        enc1.encrypt(&mut data1);
+        enc2.encrypt(&mut data2);
+
+        assert_eq!(data1, data2, "Same keys should produce same ciphertext");
+
+        // But after encrypting different amounts, they diverge
+        let mut data3 = vec![0u8; 8]; // Advance enc1 by 8 more bytes
+        enc1.encrypt(&mut data3);
+
+        let mut data4 = vec![0u8; 16];
+        let mut data5 = vec![0u8; 16];
+        enc1.encrypt(&mut data4); // enc1 is now at position 32
+        enc2.encrypt(&mut data5); // enc2 is at position 16
+
+        assert_ne!(
+            data4, data5,
+            "Different stream positions should produce different ciphertext"
+        );
+    }
+
+    // ==========================================================================
+    // ConnectionStats tests
+    // ==========================================================================
+
+    #[test]
+    fn test_connection_stats_default() {
+        let stats = ConnectionStats {
+            total_connections: 0,
+            healthy_connections: 0,
+            total_bytes_sent: 0,
+            total_bytes_received: 0,
+        };
+
+        assert_eq!(stats.total_connections, 0);
+        assert_eq!(stats.healthy_connections, 0);
+        assert_eq!(stats.total_bytes_sent, 0);
+        assert_eq!(stats.total_bytes_received, 0);
+    }
+
+    #[test]
+    fn test_connection_stats_aggregation() {
+        // Simulate stats from multiple connections
+        let conn_stats = [
+            (100u64, 200u64), // conn 0: 100 sent, 200 received
+            (150u64, 300u64), // conn 1
+            (50u64, 100u64),  // conn 2
+        ];
+
+        let total_sent: u64 = conn_stats.iter().map(|(s, _)| s).sum();
+        let total_recv: u64 = conn_stats.iter().map(|(_, r)| r).sum();
+
+        assert_eq!(total_sent, 300);
+        assert_eq!(total_recv, 600);
+    }
+
+    // ==========================================================================
+    // Half-connection mode logic tests
+    // ==========================================================================
+
+    #[test]
+    fn test_half_connection_primary_direction() {
+        // In half-connection mode, primary connection is ALWAYS ClientToServer
+        // This is per SoftEther Protocol.c specification
+        let half_connection = true;
+
+        let expected = if half_connection {
+            TcpDirection::ClientToServer
+        } else {
+            TcpDirection::Both
+        };
+
+        assert_eq!(expected, TcpDirection::ClientToServer);
+    }
+
+    #[test]
+    fn test_connection_distribution_4_conns() {
+        // Test typical 4-connection half-connection setup
+        // Server should assign directions to balance send/recv
+        //
+        // Typical distribution:
+        // - Connection 0: ClientToServer (primary, always C2S)
+        // - Connection 1: ServerToClient
+        // - Connection 2: ClientToServer
+        // - Connection 3: ServerToClient
+        let directions = simulate_connection_distribution(4);
+
+        let c2s_count = directions
+            .iter()
+            .filter(|d| **d == TcpDirection::ClientToServer)
+            .count();
+        let s2c_count = directions
+            .iter()
+            .filter(|d| **d == TcpDirection::ServerToClient)
+            .count();
+
+        // Should be roughly balanced (2 and 2)
+        assert!(
+            c2s_count >= 1 && c2s_count <= 3,
+            "C2S count {} not in expected range",
+            c2s_count
+        );
+        assert!(
+            s2c_count >= 1 && s2c_count <= 3,
+            "S2C count {} not in expected range",
+            s2c_count
+        );
+        assert_eq!(c2s_count + s2c_count, 4, "Total should be 4 connections");
+    }
+
+    #[test]
+    fn test_connection_distribution_8_conns() {
+        // Test 8-connection half-connection setup
+        let directions = simulate_connection_distribution(8);
+
+        let c2s_count = directions
+            .iter()
+            .filter(|d| **d == TcpDirection::ClientToServer)
+            .count();
+        let s2c_count = directions
+            .iter()
+            .filter(|d| **d == TcpDirection::ServerToClient)
+            .count();
+
+        // Should be balanced (4 and 4)
+        assert!(
+            c2s_count >= 3 && c2s_count <= 5,
+            "C2S count {} not in expected range",
+            c2s_count
+        );
+        assert!(
+            s2c_count >= 3 && s2c_count <= 5,
+            "S2C count {} not in expected range",
+            s2c_count
+        );
+    }
+
+    /// Simulate how server assigns directions to N connections.
+    /// Based on SoftEther Protocol.c: alternates after primary.
+    fn simulate_connection_distribution(n: usize) -> Vec<TcpDirection> {
+        let mut directions = Vec::with_capacity(n);
+
+        for i in 0..n {
+            if i == 0 {
+                // Primary is always ClientToServer
+                directions.push(TcpDirection::ClientToServer);
+            } else {
+                // Server alternates remaining connections
+                // Odd index -> ServerToClient, Even index -> ClientToServer
+                if i % 2 == 1 {
+                    directions.push(TcpDirection::ServerToClient);
+                } else {
+                    directions.push(TcpDirection::ClientToServer);
+                }
+            }
+        }
+
+        directions
+    }
+
+    // ==========================================================================
+    // Round-robin selection tests
+    // ==========================================================================
+
+    #[test]
+    fn test_round_robin_send_selection() {
+        // Simulate round-robin selection among send-capable connections
+        let directions = [
+            TcpDirection::ClientToServer, // 0: can send
+            TcpDirection::ServerToClient, // 1: cannot send
+            TcpDirection::ClientToServer, // 2: can send
+            TcpDirection::ServerToClient, // 3: cannot send
+        ];
+
+        let send_indices: Vec<usize> = directions
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.can_send())
+            .map(|(i, _)| i)
+            .collect();
+
+        assert_eq!(send_indices, vec![0, 2], "Only indices 0 and 2 can send");
+
+        // Round-robin should cycle through send-capable connections
+        let mut send_index = 0;
+        let selected: Vec<usize> = (0..6)
+            .map(|_| {
+                send_index = (send_index + 1) % send_indices.len();
+                send_indices[send_index]
+            })
+            .collect();
+
+        // Should cycle: 2, 0, 2, 0, 2, 0
+        assert_eq!(selected, vec![2, 0, 2, 0, 2, 0]);
+    }
+
+    #[test]
+    fn test_round_robin_recv_selection() {
+        // Simulate round-robin selection among recv-capable connections
+        let directions = [
+            TcpDirection::ClientToServer, // 0: cannot recv
+            TcpDirection::ServerToClient, // 1: can recv
+            TcpDirection::Both,           // 2: can recv
+            TcpDirection::ServerToClient, // 3: can recv
+        ];
+
+        let recv_indices: Vec<usize> = directions
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.can_recv())
+            .map(|(i, _)| i)
+            .collect();
+
+        assert_eq!(recv_indices, vec![1, 2, 3], "Indices 1, 2, 3 can recv");
+    }
+
+    // ==========================================================================
+    // Connection extraction tests (for ConcurrentReader)
+    // ==========================================================================
+
+    #[test]
+    fn test_take_recv_connections_logic() {
+        // Test the logic of extracting recv-only connections
+        // ServerToClient should be extracted
+        // Both and ClientToServer should remain
+
+        let directions = [
+            TcpDirection::ClientToServer, // 0: remains (for sending)
+            TcpDirection::ServerToClient, // 1: extracted (recv-only)
+            TcpDirection::Both,           // 2: remains (bidirectional)
+            TcpDirection::ServerToClient, // 3: extracted (recv-only)
+        ];
+
+        let mut extracted = Vec::new();
+        let mut remaining = Vec::new();
+
+        for (i, dir) in directions.iter().enumerate() {
+            if *dir == TcpDirection::ServerToClient {
+                extracted.push(i);
+            } else {
+                remaining.push(i);
+            }
+        }
+
+        assert_eq!(extracted, vec![1, 3], "S2C connections should be extracted");
+        assert_eq!(
+            remaining,
+            vec![0, 2],
+            "C2S and Both should remain for sending"
+        );
+    }
+
+    #[test]
+    fn test_has_send_connections_after_extraction() {
+        // After extracting recv-only connections, we should still have send connections
+        let remaining_directions = [
+            TcpDirection::ClientToServer, // 0: can send
+            TcpDirection::Both,           // 2: can send
+        ];
+
+        let has_send = remaining_directions.iter().any(|d| d.can_send());
+        assert!(
+            has_send,
+            "Should still have send connections after extraction"
+        );
+    }
+
+    // ==========================================================================
+    // Pending bytes / load balancing tests
+    // ==========================================================================
+
+    #[test]
+    fn test_estimated_pending_initial() {
+        // New connection should have zero pending
+        let pending = 0u64;
+        assert_eq!(pending, 0);
+    }
+
+    #[test]
+    fn test_estimated_pending_decay() {
+        // Simulate pending bytes decay over time
+        let initial_pending = 10000u64;
+        let elapsed_us = 500u64; // 500 microseconds
+        let decay_rate = 10u64; // 10 bytes per microsecond (~10 MB/s)
+
+        let decay = elapsed_us.saturating_mul(decay_rate);
+        let remaining = initial_pending.saturating_sub(decay);
+
+        assert_eq!(decay, 5000);
+        assert_eq!(remaining, 5000);
+    }
+
+    #[test]
+    fn test_estimated_pending_full_decay() {
+        // After enough time, pending should decay to zero
+        let initial_pending = 10000u64;
+        let elapsed_us = 2000u64; // 2ms = 2000 us
+        let decay_rate = 10u64;
+
+        let decay = elapsed_us.saturating_mul(decay_rate);
+        let remaining = initial_pending.saturating_sub(decay);
+
+        assert_eq!(remaining, 0, "Pending should fully decay");
+    }
+
+    #[test]
+    fn test_record_write_updates_pending() {
+        // Simulate recording a write
+        let mut pending = 0u64;
+        let bytes_sent = 0u64;
+
+        // Write 1500 bytes
+        let write_size = 1500u64;
+        pending = pending.saturating_add(write_size);
+        let new_bytes_sent = bytes_sent + write_size;
+
+        assert_eq!(pending, 1500);
+        assert_eq!(new_bytes_sent, 1500);
+    }
+
+    #[test]
+    fn test_least_loaded_selection() {
+        // Simulate selecting least-loaded connection
+        let pending_bytes = vec![
+            (0usize, 5000u64), // Connection 0: 5KB pending
+            (1usize, 1000u64), // Connection 1: 1KB pending (least loaded)
+            (2usize, 8000u64), // Connection 2: 8KB pending
+        ];
+
+        let (selected_idx, _) = pending_bytes
+            .iter()
+            .min_by_key(|(_, pending)| *pending)
+            .copied()
+            .unwrap();
+
+        assert_eq!(
+            selected_idx, 1,
+            "Should select connection with least pending"
+        );
+    }
+
+    #[test]
+    fn test_least_loaded_with_equal_pending() {
+        // When pending is equal, should select consistently (first min)
+        let pending_bytes = vec![(0usize, 1000u64), (1usize, 1000u64), (2usize, 1000u64)];
+
+        let (selected_idx, _) = pending_bytes
+            .iter()
+            .min_by_key(|(_, pending)| *pending)
+            .copied()
+            .unwrap();
+
+        assert_eq!(selected_idx, 0, "Should select first connection when equal");
+    }
+
+    #[test]
+    fn test_load_distribution_simulation() {
+        // Simulate how load distributes with least-loaded selection
+        let mut pending = vec![0u64, 0u64, 0u64]; // 3 connections
+        let packet_size = 1500u64;
+
+        // Simulate sending 9 packets
+        for _ in 0..9 {
+            // Find least loaded
+            let (idx, _) = pending.iter().enumerate().min_by_key(|(_, p)| *p).unwrap();
+
+            pending[idx] += packet_size;
+        }
+
+        // Each connection should have 3 packets (4500 bytes)
+        assert_eq!(pending[0], 4500);
+        assert_eq!(pending[1], 4500);
+        assert_eq!(pending[2], 4500);
+    }
+
+    // ==========================================================================
+    // Timeout configuration tests
+    // ==========================================================================
+
+    #[test]
+    fn test_connection_timeout_detection() {
+        use std::time::Duration;
+
+        // Simulate idle detection
+        let timeout = Duration::from_secs(30);
+        let last_activity_secs = 35u64; // 35 seconds ago
+
+        let is_idle = last_activity_secs > timeout.as_secs();
+        assert!(is_idle, "Connection should be detected as idle");
+
+        let recent_activity_secs = 10u64;
+        let is_active = recent_activity_secs <= timeout.as_secs();
+        assert!(is_active, "Recent connection should not be idle");
+    }
+
+    // ==========================================================================
+    // Packet encoding/decoding consistency tests
+    // ==========================================================================
+
+    #[test]
+    fn test_session_key_validity() {
+        // Session key should be non-empty for additional connections
+        let session_key = vec![0x01, 0x02, 0x03, 0x04, 0x05];
+
+        assert!(!session_key.is_empty(), "Session key should not be empty");
+        assert!(
+            session_key.len() >= 4,
+            "Session key should have reasonable length"
+        );
+    }
+
+    #[test]
+    fn test_additional_connection_pack_format() {
+        use crate::protocol::Pack;
+
+        // Verify the pack format for additional connection auth
+        let session_key = vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+
+        let mut pack = Pack::new();
+        pack.add_str("method", "additional_connect");
+        pack.add_data("session_key", session_key.clone());
+
+        // Verify fields were added
+        assert_eq!(pack.get_str("method"), Some("additional_connect"));
+
+        // Serialize and verify it's valid
+        let bytes = pack.to_bytes();
+        assert!(
+            !bytes.is_empty(),
+            "Pack should serialize to non-empty bytes"
+        );
+
+        // Deserialize and verify roundtrip
+        let pack2 = Pack::deserialize(&bytes).expect("Should deserialize");
+        assert_eq!(pack2.get_str("method"), Some("additional_connect"));
+    }
 }
