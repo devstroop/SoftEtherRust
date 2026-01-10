@@ -716,7 +716,10 @@ mod tests {
 
     // Compile-time assertions for buffer pool constants
     const _: () = {
-        assert!(BUFFERS_PER_READER >= 4, "Should have enough buffers per reader");
+        assert!(
+            BUFFERS_PER_READER >= 4,
+            "Should have enough buffers per reader"
+        );
     };
 
     #[test]
