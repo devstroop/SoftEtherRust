@@ -747,7 +747,12 @@ impl ConnectionManager {
     /// After calling this, bidirectional and send-only connections remain.
     pub fn take_recv_connections(
         &mut self,
-    ) -> Vec<(usize, super::VpnConnection, TcpDirection, Option<TunnelEncryption>)> {
+    ) -> Vec<(
+        usize,
+        super::VpnConnection,
+        TcpDirection,
+        Option<TunnelEncryption>,
+    )> {
         let mut recv_conns = Vec::new();
         let mut remaining = Vec::new();
 

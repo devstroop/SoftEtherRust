@@ -9,7 +9,7 @@
 
 | Category | High | Medium | Low | Total |
 |----------|------|--------|-----|-------|
-| Issues | 0 | 2 | 3 | 5 |
+| Issues | 0 | 1 | 3 | 4 |
 | Tech Debt | 2 | 4 | 2 | 8 |
 | Performance | 0 | 1 | 4 | 5 |
 | Missing Features | - | - | - | 7 |
@@ -26,28 +26,22 @@
 
 ### Medium Severity
 
-#### ISSUE-4: DHCP Response Race in Half-Connection Mode
-**Location:** `src/tunnel/runner.rs:1565`
+#### ISSUE-4: DHCP Response Race in Half-Connection Mode *(Needs Verification)*
+**Location:** `src/tunnel/runner.rs:1374`
 
-In half-connection mode, primary connection is temporarily bidirectional for DHCP. Responses may arrive on wrong connection.
+In half-connection mode with multiple connections, DHCP timing:
+- Desktop client: Establishes ALL connections first, then DHCP polls receive-only connections
+- FFI client: Does DHCP on primary (temporarily bidirectional) BEFORE additional connections
 
-**Impact:** DHCP may fail intermittently in multi-connection mode.
+**Potential Issue:** If server hasn't fully established half-connection routing when DHCP starts, responses could be misrouted.
 
----
+**Mitigating Factors:**
+1. SoftEther's virtual switch broadcasts DHCP to all receive-capable connections
+2. FFI client does DHCP with single bidirectional connection (no race possible)
+3. Desktop client waits for all connections before DHCP
 
-#### ISSUE-5: Thread-Local Storage in iOS FFI
-**Location:** `src/ffi/ios.rs:95-110`
-
-```rust
-thread_local! {
-    static SESSION_STORAGE: std::cell::RefCell<SoftEtherSession> = ...
-}
-```
-
-Returns pointer to thread-local storage. Different threads get different (stale) copies.
-
-**Impact:** Stale session data or undefined behavior.  
-**Fix:** Document lifetime or use caller-provided buffer.
+**Status:** Low likelihood - needs real-world testing with high-latency servers to confirm.
+**If confirmed, fix:** Add small delay after connection establishment, or retry DHCP on timeout.
 
 ---
 
@@ -298,6 +292,7 @@ Multiple allocations when copying from JNI. Consider stack buffers.
 
 ## ✅ Recently Fixed
 
+- [x] **ISSUE-5: Thread-Local Storage in iOS FFI** (Jan 2026) - Changed `softether_ios_get_session()` and `softether_ios_get_stats()` to use caller-provided buffers instead of thread-local storage. Prevents stale data across threads and pointer invalidation. API now consistent with other iOS helper functions.
 - [x] **ISSUE-3: Missing Timeout on Additional Connection** (Jan 2026) - Wrapped `establish_one_additional()` with `tokio::time::timeout()` using `config.timeout_seconds`. Prevents hanging if server accepts TCP but never responds to handshake.
 - [x] **ISSUE-2: Frame Split Across Multi-Connections** (Jan 2026) - **Closed as not a bug.** Analysis of official SoftEther source (Connection.c) confirms each TCP socket has independent `RecvFifo` and frame parsing state. Server sends complete frames to individual connections (never splits across connections). Per-connection `TunnelCodec` is correct.
 - [x] **ISSUE-1: RC4 Stream Corruption** (Jan 2026) - Implemented per-connection RC4 cipher state. Each `ManagedConnection` now has its own `TunnelEncryption` instance, matching server's per-socket encryption model. Files: `multi_connection.rs`, `concurrent_reader.rs`, `runner.rs`

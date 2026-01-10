@@ -368,22 +368,23 @@ int softether_ios_mac_to_string(const uint8_t* mac, char* buffer, size_t buffer_
 int softether_ios_is_valid_ipv4(uint32_t ip);
 
 /**
- * Get session information (simplified for Swift).
- * Returns pointer to internal session data that remains valid until the next call.
+ * Get session information into caller-provided buffer.
+ * This is the recommended API - caller manages memory, avoiding thread-safety issues.
  *
  * @param handle Client handle
- * @return Pointer to session data, or NULL if not connected
+ * @param session_out Pointer to caller-allocated SoftEtherSession struct
+ * @return SOFTETHER_OK on success, error code otherwise
  */
-const SoftEtherSession* softether_ios_get_session(SoftEtherHandle handle);
+SoftEtherResult softether_ios_get_session(SoftEtherHandle handle, SoftEtherSession* session_out);
 
 /**
- * Get statistics (simplified for Swift).
- * Returns pointer to internal stats data that remains valid until the next call.
+ * Get statistics into caller-provided buffer.
  *
  * @param handle Client handle
- * @return Pointer to statistics data, or NULL on error
+ * @param stats_out Pointer to caller-allocated SoftEtherStats struct
+ * @return SOFTETHER_OK on success, error code otherwise
  */
-const SoftEtherStats* softether_ios_get_stats(SoftEtherHandle handle);
+SoftEtherResult softether_ios_get_stats(SoftEtherHandle handle, SoftEtherStats* stats_out);
 
 /**
  * Format byte count as human-readable string (B, KB, MB, GB).
