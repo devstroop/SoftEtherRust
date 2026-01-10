@@ -98,12 +98,25 @@ build_android() {
     
     NDK_HOST=$(get_ndk_host)
     LINKER_EXT=$(get_linker_ext)
+    TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$NDK_HOST/bin"
     
-    # Configure cargo for Android
-    export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$NDK_HOST/bin/aarch64-linux-android21-clang$LINKER_EXT"
-    export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$NDK_HOST/bin/armv7a-linux-androideabi21-clang$LINKER_EXT"
-    export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$NDK_HOST/bin/x86_64-linux-android21-clang$LINKER_EXT"
-    export CARGO_TARGET_I686_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$NDK_HOST/bin/i686-linux-android21-clang$LINKER_EXT"
+    # Configure cargo LINKERS for Android
+    export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/aarch64-linux-android21-clang$LINKER_EXT"
+    export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$TOOLCHAIN/armv7a-linux-androideabi21-clang$LINKER_EXT"
+    export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$TOOLCHAIN/x86_64-linux-android21-clang$LINKER_EXT"
+    export CARGO_TARGET_I686_LINUX_ANDROID_LINKER="$TOOLCHAIN/i686-linux-android21-clang$LINKER_EXT"
+    
+    # Configure CC compilers for ring crate (TLS)
+    export CC_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android21-clang$LINKER_EXT"
+    export CC_armv7_linux_androideabi="$TOOLCHAIN/armv7a-linux-androideabi21-clang$LINKER_EXT"
+    export CC_x86_64_linux_android="$TOOLCHAIN/x86_64-linux-android21-clang$LINKER_EXT"
+    export CC_i686_linux_android="$TOOLCHAIN/i686-linux-android21-clang$LINKER_EXT"
+    
+    # Configure AR archivers
+    export AR_aarch64_linux_android="$TOOLCHAIN/llvm-ar"
+    export AR_armv7_linux_androideabi="$TOOLCHAIN/llvm-ar"
+    export AR_x86_64_linux_android="$TOOLCHAIN/llvm-ar"
+    export AR_i686_linux_android="$TOOLCHAIN/llvm-ar"
     
     # Build for each architecture
     log_info "  Building aarch64-linux-android (arm64-v8a)..."
@@ -157,7 +170,11 @@ build_android_arm64() {
     
     NDK_HOST=$(get_ndk_host)
     LINKER_EXT=$(get_linker_ext)
-    export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$NDK_HOST/bin/aarch64-linux-android21-clang$LINKER_EXT"
+    TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$NDK_HOST/bin"
+    
+    export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/aarch64-linux-android21-clang$LINKER_EXT"
+    export CC_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android21-clang$LINKER_EXT"
+    export AR_aarch64_linux_android="$TOOLCHAIN/llvm-ar"
     
     log_info "  Building aarch64-linux-android (arm64-v8a)..."
     cargo build --release --target aarch64-linux-android --features android
@@ -175,13 +192,112 @@ build_android_arm64() {
     fi
 }
 
+# Build only armv7 (32-bit ARM - older devices)
+build_android_armv7() {
+    log_info "Building for Android (armv7 only)..."
+    
+    if [ -z "$ANDROID_NDK_HOME" ]; then
+        log_error "ANDROID_NDK_HOME not set"
+        exit 1
+    fi
+    
+    NDK_HOST=$(get_ndk_host)
+    LINKER_EXT=$(get_linker_ext)
+    TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$NDK_HOST/bin"
+    
+    export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$TOOLCHAIN/armv7a-linux-androideabi21-clang$LINKER_EXT"
+    export CC_armv7_linux_androideabi="$TOOLCHAIN/armv7a-linux-androideabi21-clang$LINKER_EXT"
+    export AR_armv7_linux_androideabi="$TOOLCHAIN/llvm-ar"
+    
+    log_info "  Building armv7-linux-androideabi (armeabi-v7a)..."
+    cargo build --release --target armv7-linux-androideabi --features android
+    
+    mkdir -p target/android/jniLibs/armeabi-v7a
+    cp target/armv7-linux-androideabi/release/libsoftether.so target/android/jniLibs/armeabi-v7a/
+    
+    log_info "Android armv7 build complete: target/android/jniLibs/armeabi-v7a/"
+    
+    # Copy to Android app if it exists
+    if [ -d "../app/src/main" ]; then
+        mkdir -p ../app/src/main/jniLibs/armeabi-v7a
+        cp target/android/jniLibs/armeabi-v7a/libsoftether.so ../app/src/main/jniLibs/armeabi-v7a/
+        log_info "Copied to Android app: app/src/main/jniLibs/armeabi-v7a/"
+    fi
+}
+
+# Build for connected device automatically
+build_android_auto() {
+    log_info "Detecting connected device architecture..."
+    
+    if ! command -v adb &> /dev/null; then
+        log_error "adb not found. Install Android SDK platform-tools."
+        exit 1
+    fi
+    
+    ARCH=$(adb shell getprop ro.product.cpu.abi 2>/dev/null | tr -d '\r')
+    
+    if [ -z "$ARCH" ]; then
+        log_error "No device connected or adb not responding."
+        exit 1
+    fi
+    
+    log_info "Detected device architecture: $ARCH"
+    
+    case "$ARCH" in
+        arm64-v8a)
+            rustup target add aarch64-linux-android
+            build_android_arm64
+            ;;
+        armeabi-v7a)
+            rustup target add armv7-linux-androideabi
+            build_android_armv7
+            ;;
+        x86_64)
+            log_info "Building for x86_64..."
+            rustup target add x86_64-linux-android
+            NDK_HOST=$(get_ndk_host)
+            LINKER_EXT=$(get_linker_ext)
+            TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$NDK_HOST/bin"
+            export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$TOOLCHAIN/x86_64-linux-android21-clang$LINKER_EXT"
+            export CC_x86_64_linux_android="$TOOLCHAIN/x86_64-linux-android21-clang$LINKER_EXT"
+            export AR_x86_64_linux_android="$TOOLCHAIN/llvm-ar"
+            cargo build --release --target x86_64-linux-android --features android
+            mkdir -p target/android/jniLibs/x86_64 ../app/src/main/jniLibs/x86_64
+            cp target/x86_64-linux-android/release/libsoftether.so target/android/jniLibs/x86_64/
+            cp target/android/jniLibs/x86_64/libsoftether.so ../app/src/main/jniLibs/x86_64/ 2>/dev/null || true
+            ;;
+        x86)
+            log_info "Building for x86..."
+            rustup target add i686-linux-android
+            NDK_HOST=$(get_ndk_host)
+            LINKER_EXT=$(get_linker_ext)
+            TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$NDK_HOST/bin"
+            export CARGO_TARGET_I686_LINUX_ANDROID_LINKER="$TOOLCHAIN/i686-linux-android21-clang$LINKER_EXT"
+            export CC_i686_linux_android="$TOOLCHAIN/i686-linux-android21-clang$LINKER_EXT"
+            export AR_i686_linux_android="$TOOLCHAIN/llvm-ar"
+            cargo build --release --target i686-linux-android --features android
+            mkdir -p target/android/jniLibs/x86 ../app/src/main/jniLibs/x86
+            cp target/i686-linux-android/release/libsoftether.so target/android/jniLibs/x86/
+            cp target/android/jniLibs/x86/libsoftether.so ../app/src/main/jniLibs/x86/ 2>/dev/null || true
+            ;;
+        *)
+            log_error "Unknown architecture: $ARCH"
+            exit 1
+            ;;
+    esac
+    
+    log_info "Build complete for $ARCH"
+}
+
 # Print usage
 usage() {
     echo "Usage: $0 [command]"
     echo ""
     echo "Commands:"
     echo "  build    Build for all Android architectures"
-    echo "  arm64    Build for arm64-v8a only (faster)"
+    echo "  auto     Build for connected device (auto-detect arch)"
+    echo "  arm64    Build for arm64-v8a only"
+    echo "  armv7    Build for armeabi-v7a only (32-bit ARM)"
     echo "  clean    Clean Android build artifacts"
     echo ""
     echo "With no command, builds for all Android architectures."
@@ -198,9 +314,16 @@ case "${1:-build}" in
         install_targets
         build_android
         ;;
+    auto)
+        build_android_auto
+        ;;
     arm64)
         rustup target add aarch64-linux-android
         build_android_arm64
+        ;;
+    armv7)
+        rustup target add armv7-linux-androideabi
+        build_android_armv7
         ;;
     clean)
         log_info "Cleaning Android build artifacts..."
