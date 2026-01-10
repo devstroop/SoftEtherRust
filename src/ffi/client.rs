@@ -1511,6 +1511,7 @@ async fn run_packet_loop(
     let mut tunnel_codec = TunnelCodec::new();
     let mut read_buf = vec![0u8; 65536];
     let _udp_recv_buf = vec![0u8; 65536];
+    let mut callback_buffer = Vec::with_capacity(65536); // Reusable buffer for callback
     let keepalive_interval_secs = 5u64;
 
     // Set up ARP handler for gateway MAC learning
@@ -1730,38 +1731,36 @@ async fn run_packet_loop(
                     // Process the received UDP packet through the accelerator
                     if let Some(ref mut ua) = udp_accel {
                         if let Some((frame_data, _compressed)) = ua.process_recv(&raw_data, src_addr) {
-                            // Process received UDP frame
-                            // Build length-prefixed buffer for callback
-                            let mut buffer = Vec::with_capacity(frame_data.len() + 2);
-
-                    // Process ARP packets for gateway MAC learning
-                    if frame_data.len() >= 14 {
-                        let ethertype = u16::from_be_bytes([frame_data[12], frame_data[13]]);
-                        if ethertype == 0x0806 {
-                            arp.process_arp(&frame_data);
-                            if let Some(gw_mac) = arp.gateway_mac() {
-                                if last_logged_gateway_mac != Some(*gw_mac) {
-                                    log_msg(&callbacks, 1, &format!(
-                                        "Learned gateway MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-                                        gw_mac[0], gw_mac[1], gw_mac[2], gw_mac[3], gw_mac[4], gw_mac[5]
-                                    ));
-                                    last_logged_gateway_mac = Some(*gw_mac);
+                            // Process ARP packets for gateway MAC learning
+                            if frame_data.len() >= 14 {
+                                let ethertype = u16::from_be_bytes([frame_data[12], frame_data[13]]);
+                                if ethertype == 0x0806 {
+                                    arp.process_arp(&frame_data);
+                                    if let Some(gw_mac) = arp.gateway_mac() {
+                                        if last_logged_gateway_mac != Some(*gw_mac) {
+                                            log_msg(&callbacks, 1, &format!(
+                                                "Learned gateway MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                                                gw_mac[0], gw_mac[1], gw_mac[2], gw_mac[3], gw_mac[4], gw_mac[5]
+                                            ));
+                                            last_logged_gateway_mac = Some(*gw_mac);
+                                        }
+                                    }
                                 }
                             }
-                        }
-                    }
 
-                    // Update receive statistics
-                    stats.packets_received.fetch_add(1, Ordering::Relaxed);
-                    stats.bytes_received.fetch_add(frame_data.len() as u64, Ordering::Relaxed);
+                            // Update receive statistics
+                            stats.packets_received.fetch_add(1, Ordering::Relaxed);
+                            stats.bytes_received.fetch_add(frame_data.len() as u64, Ordering::Relaxed);
 
-                    let len = frame_data.len() as u16;
-                    buffer.extend_from_slice(&len.to_be_bytes());
-                    buffer.extend_from_slice(&frame_data);
+                            // Reuse callback_buffer for UDP frames too
+                            callback_buffer.clear();
+                            let len = frame_data.len() as u16;
+                            callback_buffer.extend_from_slice(&len.to_be_bytes());
+                            callback_buffer.extend_from_slice(&frame_data);
 
-                    if let Some(cb) = callbacks.on_packets_received {
-                        cb(callbacks.context, buffer.as_ptr(), buffer.len(), 1);
-                    }
+                            if let Some(cb) = callbacks.on_packets_received {
+                                cb(callbacks.context, callback_buffer.as_ptr(), callback_buffer.len(), 1);
+                            }
                         }
                     }
                 }
@@ -1779,28 +1778,39 @@ async fn run_packet_loop(
                         match tunnel_codec.decode(&read_buf[..n]) {
                             Ok(frames) => {
                             if !frames.is_empty() {
-                                // Build length-prefixed buffer for callback
-                                let mut buffer = Vec::with_capacity(n + frames.len() * 2);
+                                // Reuse callback_buffer across iterations to reduce allocations
+                                callback_buffer.clear();
+                                // Pre-size: worst case is n bytes of data + 2 bytes len per frame
+                                callback_buffer.reserve(n + frames.len() * 2);
                                 let mut total_bytes: u64 = 0;
-                                // for (_frame_idx, frame) in frames.iter().enumerate() {
+                                let mut packet_count: u64 = 0;
+
                                 for frame in frames.iter() {
-                                    // Decompress if needed
-                                    let frame_data: Vec<u8> = if is_compressed(frame) {
+                                    // Fast path: check compression without allocation
+                                    let is_comp = is_compressed(frame);
+                                    
+                                    // Process frame data - avoid allocation for non-compressed
+                                    let frame_slice: &[u8];
+                                    let decompressed: Vec<u8>;
+                                    
+                                    if is_comp {
                                         match decompress(frame) {
-                                            Ok(d) => d,
-                                            Err(_) => frame.to_vec(),
+                                            Ok(d) => {
+                                                decompressed = d;
+                                                frame_slice = &decompressed;
+                                            }
+                                            Err(_) => continue, // Skip bad frames
                                         }
                                     } else {
-                                        frame.to_vec()
-                                    };
+                                        frame_slice = frame;
+                                        decompressed = Vec::new(); // Not used but needed for borrow checker
+                                    }
 
                                     // Process ARP packets for gateway MAC learning
-                                    if frame_data.len() >= 14 {
-                                        let ethertype = u16::from_be_bytes([frame_data[12], frame_data[13]]);
+                                    if frame_slice.len() >= 14 {
+                                        let ethertype = u16::from_be_bytes([frame_slice[12], frame_slice[13]]);
                                         if ethertype == 0x0806 {
-                                            // This is an ARP packet - process it
-                                            arp.process_arp(&frame_data);
-                                            // Log if MAC is new or changed
+                                            arp.process_arp(frame_slice);
                                             if let Some(gw_mac) = arp.gateway_mac() {
                                                 if last_logged_gateway_mac != Some(*gw_mac) {
                                                     log_msg(&callbacks, 1, &format!(
@@ -1813,18 +1823,21 @@ async fn run_packet_loop(
                                         }
                                     }
 
-                                    total_bytes += frame_data.len() as u64;
-                                    let len = frame_data.len() as u16;
-                                    buffer.extend_from_slice(&len.to_be_bytes());
-                                    buffer.extend_from_slice(&frame_data);
+                                    total_bytes += frame_slice.len() as u64;
+                                    packet_count += 1;
+                                    let len = frame_slice.len() as u16;
+                                    callback_buffer.extend_from_slice(&len.to_be_bytes());
+                                    callback_buffer.extend_from_slice(frame_slice);
                                 }
 
                                 // Update receive statistics
-                                stats.packets_received.fetch_add(frames.len() as u64, Ordering::Relaxed);
+                                stats.packets_received.fetch_add(packet_count, Ordering::Relaxed);
                                 stats.bytes_received.fetch_add(total_bytes, Ordering::Relaxed);
 
-                                if let Some(cb) = callbacks.on_packets_received {
-                                    cb(callbacks.context, buffer.as_ptr(), buffer.len(), frames.len() as u32);
+                                if packet_count > 0 {
+                                    if let Some(cb) = callbacks.on_packets_received {
+                                        cb(callbacks.context, callback_buffer.as_ptr(), callback_buffer.len(), packet_count as u32);
+                                    }
                                 }
                             }
                             }
