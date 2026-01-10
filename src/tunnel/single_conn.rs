@@ -17,9 +17,6 @@ use crate::adapter::WintunDevice;
 use crate::client::VpnConnection;
 use crate::error::Result;
 use crate::packet::{ArpHandler, DhcpConfig, BROADCAST_MAC};
-#[cfg(target_os = "windows")]
-use crate::protocol::compress;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::protocol::compress_into;
 use crate::protocol::{decompress_into, is_compressed, TunnelCodec};
 
@@ -325,6 +322,7 @@ impl TunnelRunner {
         let mut net_buf = vec![0u8; 65536];
         let mut send_buf = vec![0u8; 4096];
         let mut decomp_buf = vec![0u8; 4096];
+        let mut comp_buf = vec![0u8; 4096]; // Pre-allocated buffer for compression
 
         let mut arp = ArpHandler::new(self.mac);
         init_arp(
@@ -428,14 +426,14 @@ impl TunnelRunner {
 
                         let eth_frame = &send_buf[eth_start..eth_start + eth_len];
 
-                        match compress(eth_frame) {
-                            Ok(compressed) => {
-                                let comp_total = 8 + compressed.len();
+                        match compress_into(eth_frame, &mut comp_buf) {
+                            Ok(comp_len) => {
+                                let comp_total = 8 + comp_len;
                                 if comp_total <= send_buf.len() {
                                     send_buf[0..4].copy_from_slice(&1u32.to_be_bytes());
                                     send_buf[4..8]
-                                        .copy_from_slice(&(compressed.len() as u32).to_be_bytes());
-                                    send_buf[8..8 + compressed.len()].copy_from_slice(&compressed);
+                                        .copy_from_slice(&(comp_len as u32).to_be_bytes());
+                                    send_buf[8..8 + comp_len].copy_from_slice(&comp_buf[..comp_len]);
                                     if let Some(ref mut enc) = encryption {
                                         enc.encrypt(&mut send_buf[..comp_total]);
                                     }
