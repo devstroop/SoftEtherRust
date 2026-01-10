@@ -129,10 +129,9 @@ impl TunnelRunner {
                     #[cfg(target_os = "linux")]
                     let min_len = 1;
 
-                    if n > min_len as isize {
-                        if tun_tx.blocking_send((n as usize, read_buf)).is_err() {
-                            break;
-                        }
+                    if n > min_len as isize && tun_tx.blocking_send((n as usize, read_buf)).is_err()
+                    {
+                        break;
                     }
                 }
             }
