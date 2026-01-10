@@ -210,14 +210,12 @@ pub unsafe extern "C" fn softether_get_last_error() -> *const c_char {
     LAST_ERROR.with(|e| {
         let err = e.borrow();
         match err.as_ref() {
-            Some(msg) => {
-                ERROR_BUF.with(|buf| {
-                    let cstr = CString::new(msg.as_str()).unwrap_or_default();
-                    let ptr = cstr.as_ptr();
-                    *buf.borrow_mut() = Some(cstr);
-                    ptr
-                })
-            }
+            Some(msg) => ERROR_BUF.with(|buf| {
+                let cstr = CString::new(msg.as_str()).unwrap_or_default();
+                let ptr = cstr.as_ptr();
+                *buf.borrow_mut() = Some(cstr);
+                ptr
+            }),
             None => std::ptr::null(),
         }
     })
@@ -241,7 +239,7 @@ pub unsafe extern "C" fn softether_create(
     callbacks: *const SoftEtherCallbacks,
 ) -> SoftEtherHandle {
     clear_last_error();
-    
+
     if config.is_null() {
         set_last_error("config is null");
         return NULL_HANDLE;

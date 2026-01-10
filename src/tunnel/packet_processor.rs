@@ -15,9 +15,9 @@ use crate::packet::ArpHandler;
 use crate::protocol::TunnelCodec;
 
 /// Build an ethernet frame header in the send buffer (uncompressed path).
-/// 
+///
 /// Layout: [4: num_blocks=1][4: block_size][6: dst_mac][6: src_mac][2: ethertype][IP packet]
-/// 
+///
 /// Returns the total frame length (8-byte tunnel header + 14-byte eth header + IP packet),
 /// or None if packet is too large or invalid IP version.
 #[inline]
@@ -29,7 +29,7 @@ pub fn build_ethernet_frame(
 ) -> Option<usize> {
     let eth_len = 14 + ip_packet.len();
     let total_len = 8 + eth_len;
-    
+
     if total_len > send_buf.len() {
         warn!("Packet too large: {}", ip_packet.len());
         return None;
@@ -47,11 +47,11 @@ pub fn build_ethernet_frame(
     // Tunnel header: num_blocks = 1, block_size = eth_len
     send_buf[0..4].copy_from_slice(&1u32.to_be_bytes());
     send_buf[4..8].copy_from_slice(&(eth_len as u32).to_be_bytes());
-    
+
     // Ethernet header
     send_buf[8..14].copy_from_slice(gateway_mac);
     send_buf[14..20].copy_from_slice(my_mac);
-    
+
     // EtherType
     if ip_version == 4 {
         send_buf[20] = 0x08;
@@ -60,15 +60,15 @@ pub fn build_ethernet_frame(
         send_buf[20] = 0x86;
         send_buf[21] = 0xDD;
     }
-    
+
     // IP packet
     send_buf[22..22 + ip_packet.len()].copy_from_slice(ip_packet);
-    
+
     Some(total_len)
 }
 
 /// Build ethernet frame for compression path (frame at offset 8).
-/// 
+///
 /// Returns (eth_len, ip_version) or None if invalid.
 #[inline]
 pub fn build_ethernet_frame_for_compress(
@@ -79,7 +79,7 @@ pub fn build_ethernet_frame_for_compress(
 ) -> Option<(usize, u8)> {
     let eth_len = 14 + ip_packet.len();
     let total_len = 8 + eth_len;
-    
+
     if total_len > send_buf.len() || ip_packet.is_empty() {
         return None;
     }

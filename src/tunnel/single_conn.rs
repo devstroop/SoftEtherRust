@@ -17,10 +17,10 @@ use crate::adapter::WintunDevice;
 use crate::client::VpnConnection;
 use crate::error::Result;
 use crate::packet::{ArpHandler, DhcpConfig, BROADCAST_MAC};
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-use crate::protocol::compress_into;
 #[cfg(target_os = "windows")]
 use crate::protocol::compress;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use crate::protocol::compress_into;
 use crate::protocol::{decompress_into, is_compressed, TunnelCodec};
 
 use super::packet_processor::{
@@ -633,7 +633,8 @@ impl TunnelRunner {
                         {
                             let total_len = 4 + ip_packet.len();
                             if total_len <= tun_buf.len() {
-                                tun_buf[0..4].copy_from_slice(&(libc::AF_INET as u32).to_be_bytes());
+                                tun_buf[0..4]
+                                    .copy_from_slice(&(libc::AF_INET as u32).to_be_bytes());
                                 tun_buf[4..total_len].copy_from_slice(ip_packet);
                                 unsafe {
                                     libc::write(

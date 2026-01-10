@@ -199,7 +199,7 @@ fn build_tls_config(config: &VpnConfig) -> Result<ClientConfig> {
         debug!("Using certificate fingerprint pinning");
         Ok(ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
-            .map_err(|e| Error::Tls(format!("Failed to set TLS protocol versions: {e}")))?  
+            .map_err(|e| Error::Tls(format!("Failed to set TLS protocol versions: {e}")))?
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(verifier))
             .with_no_client_auth())
@@ -222,7 +222,7 @@ fn build_tls_config(config: &VpnConfig) -> Result<ClientConfig> {
         debug!("Using custom CA certificate for verification");
         Ok(ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
-            .map_err(|e| Error::Tls(format!("Failed to set TLS protocol versions: {e}")))?  
+            .map_err(|e| Error::Tls(format!("Failed to set TLS protocol versions: {e}")))?
             .with_root_certificates(root_store)
             .with_no_client_auth())
     } else if config.skip_tls_verify {
@@ -230,7 +230,7 @@ fn build_tls_config(config: &VpnConfig) -> Result<ClientConfig> {
         debug!("TLS verification disabled (skip_tls_verify=true)");
         Ok(ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
-            .map_err(|e| Error::Tls(format!("Failed to set TLS protocol versions: {e}")))?  
+            .map_err(|e| Error::Tls(format!("Failed to set TLS protocol versions: {e}")))?
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoVerifier))
             .with_no_client_auth())
@@ -241,7 +241,7 @@ fn build_tls_config(config: &VpnConfig) -> Result<ClientConfig> {
         // In production, you'd load system certs here
         Ok(ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
-            .map_err(|e| Error::Tls(format!("Failed to set TLS protocol versions: {e}")))?  
+            .map_err(|e| Error::Tls(format!("Failed to set TLS protocol versions: {e}")))?
             .with_root_certificates(root_store)
             .with_no_client_auth())
     }

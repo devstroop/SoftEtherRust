@@ -410,7 +410,11 @@ mod tests {
 
         // Clone should share underlying data
         let cloned = packet.data.clone();
-        assert_eq!(original.as_ptr(), cloned.as_ptr(), "Bytes should share memory");
+        assert_eq!(
+            original.as_ptr(),
+            cloned.as_ptr(),
+            "Bytes should share memory"
+        );
     }
 
     // ==========================================================================
@@ -662,7 +666,11 @@ mod tests {
         let _b4 = pool.get().await;
 
         let hit_rate = pool.hit_rate();
-        assert!((hit_rate - 75.0).abs() < 0.01, "Expected 75% hit rate, got {}", hit_rate);
+        assert!(
+            (hit_rate - 75.0).abs() < 0.01,
+            "Expected 75% hit rate, got {}",
+            hit_rate
+        );
     }
 
     #[tokio::test]
@@ -712,7 +720,10 @@ mod tests {
     fn test_buffer_pool_constants() {
         // Verify the constants make sense
         assert_eq!(DEFAULT_BUFFER_SIZE, 65536, "Should match max VPN packet");
-        assert!(BUFFERS_PER_READER >= 4, "Should have enough buffers per reader");
+        assert!(
+            BUFFERS_PER_READER >= 4,
+            "Should have enough buffers per reader"
+        );
     }
 
     #[tokio::test]
@@ -729,6 +740,9 @@ mod tests {
         // Get it back - should be cleared
         let buf2 = pool.get().await;
         assert!(buf2.is_empty(), "Buffer should be cleared after get");
-        assert!(buf2.capacity() >= 1024, "Buffer should have capacity reserved");
+        assert!(
+            buf2.capacity() >= 1024,
+            "Buffer should have capacity reserved"
+        );
     }
 }

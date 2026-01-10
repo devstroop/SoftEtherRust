@@ -16,7 +16,7 @@ use crate::adapter::WintunDevice;
 use crate::client::{ConcurrentReader, ConnectionManager};
 use crate::error::Result;
 use crate::packet::{ArpHandler, DhcpConfig};
-use crate::protocol::{compress, decompress_into, is_compressed, TunnelCodec};
+use crate::protocol::{compress_into, decompress_into, is_compressed, TunnelCodec};
 
 use super::DataLoopState;
 use super::TunnelRunner;
@@ -74,6 +74,7 @@ impl TunnelRunner {
         let mut bidir_read_buf = vec![0u8; 8192];
 
         let mut send_buf = vec![0u8; 4096];
+        let mut comp_buf = vec![0u8; 4096]; // Pre-allocated buffer for compression
         let mut decomp_buf = vec![0u8; 4096];
         let mut tun_write_buf = vec![0u8; 2048];
 
@@ -275,13 +276,13 @@ impl TunnelRunner {
 
                         let eth_frame = &send_buf[eth_start..eth_start + eth_len];
 
-                        match compress(eth_frame) {
-                            Ok(compressed) => {
-                                let comp_total = 8 + compressed.len();
+                        match compress_into(eth_frame, &mut comp_buf) {
+                            Ok(comp_len) => {
+                                let comp_total = 8 + comp_len;
                                 if comp_total <= send_buf.len() {
                                     send_buf[0..4].copy_from_slice(&1u32.to_be_bytes());
-                                    send_buf[4..8].copy_from_slice(&(compressed.len() as u32).to_be_bytes());
-                                    send_buf[8..8 + compressed.len()].copy_from_slice(&compressed);
+                                    send_buf[4..8].copy_from_slice(&(comp_len as u32).to_be_bytes());
+                                    send_buf[8..8 + comp_len].copy_from_slice(&comp_buf[..comp_len]);
                                     // Use per-connection encryption via ConnectionManager
                                     conn_mgr.write_all_encrypted(&mut send_buf[..comp_total]).await?;
                                 }
@@ -321,8 +322,8 @@ impl TunnelRunner {
                 Some(packet) = concurrent_recv => {
                     let conn_idx = packet.conn_index;
                     // Data is already decrypted by ConcurrentReader's per-connection cipher
-                    let data: Vec<u8> = packet.data.to_vec();
-                    process_vpn_data!(conn_idx, &data[..]);
+                    // Use &[u8] deref directly - Bytes implements Deref<Target=[u8]>
+                    process_vpn_data!(conn_idx, &packet.data[..]);
                 }
 
                 // Data from bidirectional connections (direct read with per-conn decryption)
@@ -408,6 +409,7 @@ impl TunnelRunner {
         let mut codecs: Vec<TunnelCodec> = (0..total_conns).map(|_| TunnelCodec::new()).collect();
         let mut bidir_read_buf = vec![0u8; 8192];
         let mut send_buf = vec![0u8; 4096];
+        let mut comp_buf = vec![0u8; 4096]; // Pre-allocated buffer for compression
         let mut decomp_buf = vec![0u8; 4096];
 
         // Per-connection encryption is now managed by ConnectionManager
@@ -565,13 +567,13 @@ impl TunnelRunner {
 
                         let eth_frame = &send_buf[eth_start..eth_start + eth_len];
 
-                        match compress(eth_frame) {
-                            Ok(compressed) => {
-                                let comp_total = 8 + compressed.len();
+                        match compress_into(eth_frame, &mut comp_buf) {
+                            Ok(comp_len) => {
+                                let comp_total = 8 + comp_len;
                                 if comp_total <= send_buf.len() {
                                     send_buf[0..4].copy_from_slice(&1u32.to_be_bytes());
-                                    send_buf[4..8].copy_from_slice(&(compressed.len() as u32).to_be_bytes());
-                                    send_buf[8..8 + compressed.len()].copy_from_slice(&compressed);
+                                    send_buf[4..8].copy_from_slice(&(comp_len as u32).to_be_bytes());
+                                    send_buf[8..8 + comp_len].copy_from_slice(&comp_buf[..comp_len]);
                                     conn_mgr.write_all_encrypted(&mut send_buf[..comp_total]).await?;
                                 }
                             }

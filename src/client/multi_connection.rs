@@ -1248,7 +1248,10 @@ mod tests {
         ];
 
         let has_send = remaining_directions.iter().any(|d| d.can_send());
-        assert!(has_send, "Should still have send connections after extraction");
+        assert!(
+            has_send,
+            "Should still have send connections after extraction"
+        );
     }
 
     // ==========================================================================
@@ -1267,7 +1270,7 @@ mod tests {
         // Simulate pending bytes decay over time
         let initial_pending = 10000u64;
         let elapsed_us = 500u64; // 500 microseconds
-        let decay_rate = 10u64;  // 10 bytes per microsecond (~10 MB/s)
+        let decay_rate = 10u64; // 10 bytes per microsecond (~10 MB/s)
 
         let decay = elapsed_us.saturating_mul(decay_rate);
         let remaining = initial_pending.saturating_sub(decay);
@@ -1308,9 +1311,9 @@ mod tests {
     fn test_least_loaded_selection() {
         // Simulate selecting least-loaded connection
         let pending_bytes = vec![
-            (0usize, 5000u64),  // Connection 0: 5KB pending
-            (1usize, 1000u64),  // Connection 1: 1KB pending (least loaded)
-            (2usize, 8000u64),  // Connection 2: 8KB pending
+            (0usize, 5000u64), // Connection 0: 5KB pending
+            (1usize, 1000u64), // Connection 1: 1KB pending (least loaded)
+            (2usize, 8000u64), // Connection 2: 8KB pending
         ];
 
         let (selected_idx, _) = pending_bytes
@@ -1319,17 +1322,16 @@ mod tests {
             .copied()
             .unwrap();
 
-        assert_eq!(selected_idx, 1, "Should select connection with least pending");
+        assert_eq!(
+            selected_idx, 1,
+            "Should select connection with least pending"
+        );
     }
 
     #[test]
     fn test_least_loaded_with_equal_pending() {
         // When pending is equal, should select consistently (first min)
-        let pending_bytes = vec![
-            (0usize, 1000u64),
-            (1usize, 1000u64),
-            (2usize, 1000u64),
-        ];
+        let pending_bytes = vec![(0usize, 1000u64), (1usize, 1000u64), (2usize, 1000u64)];
 
         let (selected_idx, _) = pending_bytes
             .iter()
@@ -1349,11 +1351,7 @@ mod tests {
         // Simulate sending 9 packets
         for _ in 0..9 {
             // Find least loaded
-            let (idx, _) = pending
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, p)| *p)
-                .unwrap();
+            let (idx, _) = pending.iter().enumerate().min_by_key(|(_, p)| *p).unwrap();
 
             pending[idx] += packet_size;
         }
@@ -1416,7 +1414,10 @@ mod tests {
 
         // Serialize and verify it's valid
         let bytes = pack.to_bytes();
-        assert!(!bytes.is_empty(), "Pack should serialize to non-empty bytes");
+        assert!(
+            !bytes.is_empty(),
+            "Pack should serialize to non-empty bytes"
+        );
 
         // Deserialize and verify roundtrip
         let pack2 = Pack::deserialize(&bytes).expect("Should deserialize");
