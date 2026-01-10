@@ -1788,11 +1788,11 @@ async fn run_packet_loop(
                                 for frame in frames.iter() {
                                     // Fast path: check compression without allocation
                                     let is_comp = is_compressed(frame);
-                                    
+
                                     // Process frame data - avoid allocation for non-compressed
                                     let frame_slice: &[u8];
                                     let decompressed: Vec<u8>;
-                                    
+
                                     if is_comp {
                                         match decompress(frame) {
                                             Ok(d) => {
