@@ -3,7 +3,7 @@
 //! This module provides C-callable functions for the VPN client with actual
 //! connection logic wired to the SoftEther protocol implementation.
 
-use std::ffi::{c_char, c_int, CStr};
+use std::ffi::{c_char, c_int, CStr, CString};
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -23,6 +23,28 @@ use crate::protocol::{
     HttpCodec, HttpRequest, Pack, RedirectInfo, TunnelCodec, CONTENT_TYPE_PACK,
     CONTENT_TYPE_SIGNATURE, SIGNATURE_TARGET, VPN_SIGNATURE, VPN_TARGET,
 };
+
+// =============================================================================
+// Thread-local error storage for FFI
+// =============================================================================
+
+thread_local! {
+    static LAST_ERROR: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Set the last error message (internal helper).
+fn set_last_error(msg: impl Into<String>) {
+    LAST_ERROR.with(|e| {
+        *e.borrow_mut() = Some(msg.into());
+    });
+}
+
+/// Clear the last error.
+fn clear_last_error() {
+    LAST_ERROR.with(|e| {
+        *e.borrow_mut() = None;
+    });
+}
 
 /// Channel capacity for packet queues - larger buffer for better throughput
 const PACKET_QUEUE_SIZE: usize = 128;
@@ -170,6 +192,43 @@ unsafe fn cstr_to_string(ptr: *const c_char) -> Option<String> {
 // FFI Functions - C ABI
 // =============================================================================
 
+/// Get the last error message.
+///
+/// Returns a pointer to a null-terminated string describing the last error,
+/// or null if no error occurred. The string is valid until the next FFI call
+/// on the same thread.
+///
+/// # Safety
+/// - The returned pointer is only valid until the next FFI call on this thread.
+/// - Caller must NOT free the returned pointer.
+#[no_mangle]
+pub unsafe extern "C" fn softether_get_last_error() -> *const c_char {
+    thread_local! {
+        static ERROR_BUF: std::cell::RefCell<Option<CString>> = const { std::cell::RefCell::new(None) };
+    }
+
+    LAST_ERROR.with(|e| {
+        let err = e.borrow();
+        match err.as_ref() {
+            Some(msg) => {
+                ERROR_BUF.with(|buf| {
+                    let cstr = CString::new(msg.as_str()).unwrap_or_default();
+                    let ptr = cstr.as_ptr();
+                    *buf.borrow_mut() = Some(cstr);
+                    ptr
+                })
+            }
+            None => std::ptr::null(),
+        }
+    })
+}
+
+/// Clear the last error message.
+#[no_mangle]
+pub extern "C" fn softether_clear_last_error() {
+    clear_last_error();
+}
+
 /// Create a new SoftEther VPN client.
 ///
 /// # Safety
@@ -181,23 +240,33 @@ pub unsafe extern "C" fn softether_create(
     config: *const SoftEtherConfig,
     callbacks: *const SoftEtherCallbacks,
 ) -> SoftEtherHandle {
+    clear_last_error();
+    
     if config.is_null() {
+        set_last_error("config is null");
         return NULL_HANDLE;
     }
 
     let config = &*config;
     if !config.is_valid() {
+        set_last_error("config validation failed: check server, hub, username, password_hash, port (1-65535), max_connections (1-32), mtu (576-1500)");
         return NULL_HANDLE;
     }
 
     // Parse configuration
     let server = match cstr_to_string(config.server) {
         Some(s) => s,
-        None => return NULL_HANDLE,
+        None => {
+            set_last_error("server is null or invalid UTF-8");
+            return NULL_HANDLE;
+        }
     };
     let hub = match cstr_to_string(config.hub) {
         Some(s) => s,
-        None => return NULL_HANDLE,
+        None => {
+            set_last_error("hub is null or invalid UTF-8");
+            return NULL_HANDLE;
+        }
     };
     let username = cstr_to_string(config.username).unwrap_or_default();
     let password_hash = cstr_to_string(config.password_hash);
