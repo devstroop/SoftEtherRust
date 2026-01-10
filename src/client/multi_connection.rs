@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use crate::config::VpnConfig;
+use crate::crypto::{Rc4KeyPair, TunnelEncryption};
 use crate::error::{Error, Result};
 use crate::protocol::{
     AuthResult, HelloResponse, HttpCodec, HttpRequest, Pack, CONTENT_TYPE_PACK, VPN_TARGET,
@@ -62,6 +63,10 @@ pub struct ManagedConnection {
     pub conn: VpnConnection,
     /// Connection direction for half-connection mode.
     pub direction: TcpDirection,
+    /// Per-connection RC4 encryption state (if enabled).
+    /// Each TCP socket has independent RC4 cipher state on the server,
+    /// so we must maintain independent state per connection on the client.
+    pub encryption: Option<TunnelEncryption>,
     /// When this connection was established.
     pub connected_at: Instant,
     /// Last activity time.
@@ -77,12 +82,13 @@ pub struct ManagedConnection {
 }
 
 impl ManagedConnection {
-    /// Create a new managed connection.
+    /// Create a new managed connection without encryption.
     pub fn new(conn: VpnConnection, direction: TcpDirection, index: usize) -> Self {
         let now = Instant::now();
         Self {
             conn,
             direction,
+            encryption: None,
             connected_at: now,
             last_activity: now,
             bytes_sent: 0,
@@ -90,6 +96,52 @@ impl ManagedConnection {
             healthy: true,
             index,
         }
+    }
+
+    /// Create a new managed connection with RC4 encryption.
+    ///
+    /// Each connection gets its own fresh RC4 cipher state because the server
+    /// maintains independent RC4 state per TCP socket.
+    pub fn with_encryption(
+        conn: VpnConnection,
+        direction: TcpDirection,
+        index: usize,
+        rc4_key_pair: &Rc4KeyPair,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            conn,
+            direction,
+            encryption: Some(TunnelEncryption::new(rc4_key_pair)),
+            connected_at: now,
+            last_activity: now,
+            bytes_sent: 0,
+            bytes_received: 0,
+            healthy: true,
+            index,
+        }
+    }
+
+    /// Encrypt data in-place for sending (if encryption is enabled).
+    #[inline]
+    pub fn encrypt(&mut self, data: &mut [u8]) {
+        if let Some(ref mut enc) = self.encryption {
+            enc.encrypt(data);
+        }
+    }
+
+    /// Decrypt data in-place after receiving (if encryption is enabled).
+    #[inline]
+    pub fn decrypt(&mut self, data: &mut [u8]) {
+        if let Some(ref mut enc) = self.encryption {
+            enc.decrypt(data);
+        }
+    }
+
+    /// Check if this connection has encryption enabled.
+    #[inline]
+    pub fn is_encrypted(&self) -> bool {
+        self.encryption.is_some()
     }
 
     /// Update activity timestamp.
@@ -128,6 +180,9 @@ pub struct ConnectionManager {
     /// Whether to use raw TCP mode (no TLS) for tunnel data.
     /// This is set when use_encrypt=false and server doesn't provide RC4 keys.
     use_raw_mode: bool,
+    /// RC4 key pair for creating per-connection encryption.
+    /// Each new connection gets fresh cipher state from this key pair.
+    rc4_key_pair: Option<Rc4KeyPair>,
 }
 
 impl ConnectionManager {
@@ -139,6 +194,10 @@ impl ConnectionManager {
     /// `use_raw_mode` indicates whether the server switched to raw TCP mode
     /// (when use_encrypt=false and no RC4 keys). Additional connections must
     /// also use raw TCP mode in this case.
+    ///
+    /// `rc4_key_pair` provides keys for per-connection RC4 encryption. Each connection
+    /// gets its own fresh cipher state because the server maintains independent RC4
+    /// state per TCP socket.
     pub fn new(
         primary_conn: VpnConnection,
         config: &VpnConfig,
@@ -146,6 +205,7 @@ impl ConnectionManager {
         actual_server: &str,
         actual_port: u16,
         use_raw_mode: bool,
+        rc4_key_pair: Option<Rc4KeyPair>,
     ) -> Self {
         // Use half_connection from config (user controls this, not auto-calculated)
         let half_connection = config.half_connection;
@@ -161,7 +221,13 @@ impl ConnectionManager {
             TcpDirection::Both
         };
 
-        let primary = ManagedConnection::new(primary_conn, direction, 0);
+        // Create primary connection with per-connection encryption if keys provided
+        let primary = if let Some(ref keys) = rc4_key_pair {
+            info!("RC4 encryption enabled for primary connection");
+            ManagedConnection::with_encryption(primary_conn, direction, 0, keys)
+        } else {
+            ManagedConnection::new(primary_conn, direction, 0)
+        };
 
         // Create a config pointing to the actual server (may be redirect server)
         let mut actual_config = config.clone();
@@ -179,6 +245,7 @@ impl ConnectionManager {
             send_index: 0,
             recv_index: 0,
             use_raw_mode,
+            rc4_key_pair,
         }
     }
 
@@ -286,7 +353,17 @@ impl ConnectionManager {
             index, direction
         );
 
-        Ok(ManagedConnection::new(conn, direction, index))
+        // Create managed connection with fresh per-connection RC4 encryption.
+        // Each TCP socket has independent RC4 state on the server, so we need
+        // fresh cipher state for each new connection.
+        let managed = if let Some(ref keys) = self.rc4_key_pair {
+            debug!("RC4 encryption enabled for additional connection {}", index);
+            ManagedConnection::with_encryption(conn, direction, index, keys)
+        } else {
+            ManagedConnection::new(conn, direction, index)
+        };
+
+        Ok(managed)
     }
 
     /// Upload VPN signature to server.
@@ -558,6 +635,76 @@ impl ConnectionManager {
         Ok(())
     }
 
+    /// Write data with per-connection encryption.
+    /// Encrypts using the selected connection's own cipher state, then sends.
+    /// Each TCP socket has independent RC4 state on the server.
+    pub async fn write_all_encrypted(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        // Select a send-capable connection
+        let idx = {
+            let send_capable: Vec<usize> = self
+                .connections
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.healthy && c.direction.can_send())
+                .map(|(i, _)| i)
+                .collect();
+
+            if send_capable.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "No send-capable connections available",
+                ));
+            }
+
+            self.send_index = (self.send_index + 1) % send_capable.len();
+            send_capable[self.send_index]
+        };
+
+        let conn = &mut self.connections[idx];
+        // Encrypt with this connection's own cipher state
+        conn.encrypt(buf);
+        conn.conn.write_all(buf).await?;
+        conn.conn.flush().await?; // Flush immediately for low latency
+        conn.bytes_sent += buf.len() as u64;
+        conn.touch();
+        Ok(())
+    }
+
+    /// Read data from a bidirectional connection with per-connection decryption.
+    /// Returns (connection_index, data_length) on success.
+    /// Decrypts in-place using the connection's own cipher state.
+    pub async fn read_any_decrypt(&mut self, buf: &mut [u8]) -> io::Result<(usize, usize)> {
+        // Get indices of receive-capable connections
+        let recv_indices: Vec<usize> = self
+            .connections
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.healthy && c.direction.can_recv())
+            .map(|(i, _)| i)
+            .collect();
+
+        if recv_indices.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "No receive-capable connections available",
+            ));
+        }
+
+        // Round-robin selection for fairness
+        self.recv_index = (self.recv_index + 1) % recv_indices.len();
+        let idx = recv_indices[self.recv_index];
+
+        let conn = &mut self.connections[idx];
+        let n = conn.conn.read(buf).await?;
+        if n > 0 {
+            // Decrypt with this connection's own cipher state
+            conn.decrypt(&mut buf[..n]);
+            conn.bytes_received += n as u64;
+            conn.touch();
+        }
+        Ok((idx, n))
+    }
+
     /// Mark a connection as unhealthy.
     pub fn mark_unhealthy(&mut self, index: usize) {
         if let Some(conn) = self.connections.get_mut(index) {
@@ -569,15 +716,20 @@ impl ConnectionManager {
     /// Extract receive-ONLY connections for concurrent reading.
     ///
     /// This removes ONLY receive-only connections (ServerToClient direction) from
-    /// the manager and returns them as (index, connection, direction) tuples for
-    /// use with ConcurrentReader.
+    /// the manager and returns them as (index, connection, direction, encryption) tuples
+    /// for use with ConcurrentReader.
     ///
     /// IMPORTANT: Bidirectional connections (Both) are NOT extracted because they
     /// are needed for sending. Only in half-connection mode with dedicated
     /// receive connections do we extract them.
     ///
+    /// Each connection includes its own RC4 encryption state (if enabled) for
+    /// per-connection decryption.
+    ///
     /// After calling this, bidirectional and send-only connections remain.
-    pub fn take_recv_connections(&mut self) -> Vec<(usize, super::VpnConnection, TcpDirection)> {
+    pub fn take_recv_connections(
+        &mut self,
+    ) -> Vec<(usize, super::VpnConnection, TcpDirection, Option<TunnelEncryption>)> {
         let mut recv_conns = Vec::new();
         let mut remaining = Vec::new();
 
@@ -585,7 +737,7 @@ impl ConnectionManager {
             // Only extract ServerToClient (receive-only) connections.
             // Both (bidirectional) connections must stay for sending!
             if managed.direction == TcpDirection::ServerToClient && managed.healthy {
-                recv_conns.push((i, managed.conn, managed.direction));
+                recv_conns.push((i, managed.conn, managed.direction, managed.encryption));
             } else {
                 remaining.push(managed);
             }

@@ -791,6 +791,7 @@ async fn connect_and_run_inner(
     // Determine if we need raw TCP mode (when use_encrypt=false and no RC4 keys)
     let use_raw_mode = !config.use_encrypt && final_auth.rc4_key_pair.is_none();
 
+    // Pass RC4 key pair for per-connection encryption (each connection gets fresh cipher state)
     let mut conn_mgr = ConnectionManager::new(
         active_conn,
         config,
@@ -798,6 +799,7 @@ async fn connect_and_run_inner(
         &actual_server_addr,
         actual_server_port,
         use_raw_mode,
+        final_auth.rc4_key_pair.clone(),
     );
 
     // Generate MAC address for DHCP

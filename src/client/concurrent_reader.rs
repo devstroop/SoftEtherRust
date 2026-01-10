@@ -3,6 +3,9 @@
 //! This module provides true concurrent reading from multiple VPN connections
 //! using spawned tasks and channels. This eliminates the sequential polling
 //! bottleneck that causes latency with multiple connections.
+//!
+//! Each connection has its own RC4 decryption state (if encryption is enabled)
+//! to handle per-connection cipher synchronization with the server.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -10,6 +13,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
+
+use crate::crypto::TunnelEncryption;
 
 use super::connection::VpnConnection;
 use super::multi_connection::TcpDirection;
@@ -49,17 +54,20 @@ pub struct ConcurrentReader {
 impl ConcurrentReader {
     /// Create a new concurrent reader from receive-capable connections.
     ///
-    /// Takes ownership of the connections and spawns reader tasks.
+    /// Takes ownership of the connections (with optional per-connection encryption)
+    /// and spawns reader tasks. Each task handles its own decryption if encryption
+    /// state is provided.
+    ///
     /// Returns the reader and a vec of (index, bytes_received) for stats tracking.
     pub fn new(
-        connections: Vec<(usize, VpnConnection, TcpDirection)>,
+        connections: Vec<(usize, VpnConnection, TcpDirection, Option<TunnelEncryption>)>,
         channel_size: usize,
     ) -> Self {
         let (tx, rx) = mpsc::channel(channel_size);
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut handles = Vec::with_capacity(connections.len());
 
-        for (index, conn, direction) in connections {
+        for (index, conn, direction, encryption) in connections {
             if !direction.can_recv() {
                 warn!("Connection {} cannot receive, skipping", index);
                 continue;
@@ -71,7 +79,8 @@ impl ConcurrentReader {
             let task_bytes = bytes_received.clone();
 
             let task = tokio::spawn(async move {
-                Self::reader_task(index, conn, task_tx, task_shutdown, task_bytes).await;
+                Self::reader_task(index, conn, encryption, task_tx, task_shutdown, task_bytes)
+                    .await;
             });
 
             handles.push(ReaderHandle {
@@ -93,10 +102,11 @@ impl ConcurrentReader {
         }
     }
 
-    /// Reader task for a single connection.
+    /// Reader task for a single connection with optional per-connection decryption.
     async fn reader_task(
         index: usize,
         mut conn: VpnConnection,
+        mut encryption: Option<TunnelEncryption>,
         tx: mpsc::Sender<ReceivedPacket>,
         shutdown: Arc<AtomicBool>,
         bytes_received: Arc<AtomicU64>,
@@ -116,6 +126,11 @@ impl ConcurrentReader {
                 }
                 Ok(n) => {
                     bytes_received.fetch_add(n as u64, Ordering::Relaxed);
+
+                    // Decrypt in-place if per-connection encryption is enabled
+                    if let Some(ref mut enc) = encryption {
+                        enc.decrypt(&mut buf[..n]);
+                    }
 
                     let packet = ReceivedPacket {
                         conn_index: index,

@@ -2,15 +2,39 @@
   "server": "vpn.example.com",
   "port": 443,
   "hub": "DEFAULT",
-  "username": "your_username",
-  "password_hash": "0000000000000000000000000000000000000000",
+  "timeout_seconds": 30,
+
+  "_comment_auth": "Authentication configuration. Methods: standard_password, radius_or_nt_domain, certificate, anonymous",
+  "auth": {
+    "method": "standard_password",
+    "username": "your_username",
+    "password_hash": "0000000000000000000000000000000000000000",
+    "_comment_radius": "For RADIUS/NT Domain auth, use 'password' instead of 'password_hash'",
+    "_comment_cert": "For certificate auth, use 'certificate_pem' and 'private_key_pem'"
+  },
+
+  "_comment_tls": "TLS configuration",
   "skip_tls_verify": true,
-  "nat_traversal": false,
+  "custom_ca_pem": null,
+  "cert_fingerprint_sha256": null,
+
+  "_comment_tunnel": "Tunnel features",
   "use_encrypt": true,
-  "use_compress": true,
+  "use_compress": false,
   "udp_accel": false,
+  "qos": true,
+
+  "_comment_session": "Session mode",
+  "nat_traversal": false,
+  "monitor_mode": false,
+
+  "_comment_performance": "Performance settings",
   "max_connections": 1,
+  "half_connection": false,
   "mtu": 1400,
+
+  "ip_version": "auto",
+
   "routing": {
     "default_route": false,
     "accept_pushed_routes": true,
@@ -19,21 +43,7 @@
     "ipv6_include": [],
     "ipv6_exclude": []
   },
-  "qos": false,
-  "timeout_seconds": 30,
-  
+
   "_comment_static_ip": "Static IP configuration (optional). When set, DHCP is skipped.",
-  "static_ip": {
-    "_comment": "Set these fields to use a static IP instead of DHCP",
-    "ipv4_address": null,
-    "ipv4_netmask": null,
-    "ipv4_gateway": null,
-    "ipv4_dns1": null,
-    "ipv4_dns2": null,
-    "ipv6_address": null,
-    "ipv6_prefix_len": null,
-    "ipv6_gateway": null,
-    "ipv6_dns1": null,
-    "ipv6_dns2": null
-  }
+  "static_ip": null
 }

@@ -240,6 +240,7 @@ impl VpnClient {
 
         // Create ConnectionManager for multi-connection support
         // Pass the actual server address (after redirect) for additional connections
+        // Pass RC4 key pair for per-connection encryption (each connection gets fresh cipher state)
         let mut conn_mgr = ConnectionManager::new(
             active_conn,
             &self.config,
@@ -247,6 +248,7 @@ impl VpnClient {
             &actual_server_addr,
             actual_server_port,
             use_raw_mode,
+            auth_result.rc4_key_pair.clone(),
         );
 
         // Start tunnel

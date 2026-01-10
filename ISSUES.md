@@ -9,30 +9,24 @@
 
 | Category | High | Medium | Low | Total |
 |----------|------|--------|-----|-------|
-| Bugs | 1 | 4 | 3 | 8 |
+| Issues | 0 | 4 | 3 | 7 |
 | Tech Debt | 2 | 4 | 2 | 8 |
 | Performance | 0 | 1 | 4 | 5 |
 | Missing Features | - | - | - | 7 |
 
 ---
 
-## 🐛 Bugs
+## 🐛 Issues
 
 ### High Severity
 
-#### BUG-1: RC4 Stream Corruption on Reconnect
-**Location:** `src/tunnel/runner.rs`, `src/ffi/client.rs`
-
-RC4 is a streaming cipher that maintains internal state. If a connection drops and reconnects, the cipher state may be out of sync with the server.
-
-**Impact:** Tunnel data corruption after reconnection.  
-**Fix:** Reinitialize RC4 ciphers on each new connection, not just on initial connect.
+*No high severity issues currently open.*
 
 ---
 
 ### Medium Severity
 
-#### BUG-2: Frame Split Across Multi-Connections
+#### ISSUE-2: Frame Split Across Multi-Connections
 **Location:** `src/tunnel/runner.rs:1580`
 
 ```rust
@@ -46,7 +40,7 @@ Each connection has its own `TunnelCodec`. If a tunnel frame splits across TCP s
 
 ---
 
-#### BUG-3: Missing Timeout on Additional Connection Establishment
+#### ISSUE-3: Missing Timeout on Additional Connection Establishment
 **Location:** `src/client/multi_connection.rs`
 
 ```rust
@@ -60,7 +54,7 @@ async fn establish_one_additional(&self) -> Result<ManagedConnection> {
 
 ---
 
-#### BUG-4: DHCP Response Race in Half-Connection Mode
+#### ISSUE-4: DHCP Response Race in Half-Connection Mode
 **Location:** `src/tunnel/runner.rs:1565`
 
 In half-connection mode, primary connection is temporarily bidirectional for DHCP. Responses may arrive on wrong connection.
@@ -69,7 +63,7 @@ In half-connection mode, primary connection is temporarily bidirectional for DHC
 
 ---
 
-#### BUG-5: Thread-Local Storage in iOS FFI
+#### ISSUE-5: Thread-Local Storage in iOS FFI
 **Location:** `src/ffi/ios.rs:95-110`
 
 ```rust
@@ -87,7 +81,7 @@ Returns pointer to thread-local storage. Different threads get different (stale)
 
 ### Low Severity
 
-#### BUG-6: Panic on Invalid Password Hash Length
+#### ISSUE-6: Panic on Invalid Password Hash Length
 **Location:** `src/client/mod.rs:522`
 
 ```rust
@@ -99,7 +93,7 @@ let password_hash_bytes: [u8; 20] = password_hash_vec.try_into().unwrap();
 
 ---
 
-#### BUG-7: Unchecked Array Index in ARP Parsing
+#### ISSUE-7: Unchecked Array Index in ARP Parsing
 **Location:** `src/packet/arp.rs:233`
 
 ```rust
@@ -111,7 +105,7 @@ let sender_mac: [u8; 6] = frame[arp_start + 8..arp_start + 14].try_into().unwrap
 
 ---
 
-#### BUG-8: UDP Accel Session Not Closed on Disconnect
+#### ISSUE-8: UDP Accel Session Not Closed on Disconnect
 **Location:** `src/net/udp_accel.rs`
 
 UDP socket relies on Drop instead of explicit close packet.
@@ -332,14 +326,15 @@ Multiple allocations when copying from JNI. Consider stack buffers.
 
 ## ✅ Recently Fixed
 
+- [x] **ISSUE-1: RC4 Stream Corruption** (Jan 2026) - Implemented per-connection RC4 cipher state. Each `ManagedConnection` now has its own `TunnelEncryption` instance, matching server's per-socket encryption model. Files: `multi_connection.rs`, `concurrent_reader.rs`, `runner.rs`
+- [x] **Config layer restructure** (Jan 2026) - Authentication moved to nested `auth` object with method selection (password, RADIUS, cert, anonymous)
 - [x] **Marvin Attack** (RUSTSEC-2023-0071) - Hardened RSA fork
 - [x] **Digest conflict** - Updated sha1 to 0.11.0-rc.3
-- [x] **Auth restructure** - Multiple auth methods (password, RADIUS, cert, anonymous)
 
 ---
 
 ## Contributing
 
-1. Reference this document in your PR (e.g., "Fixes BUG-3")
+1. Reference this document in your PR (e.g., "Fixes ISSUE-3")
 2. Add tests for the fix
 3. Update this document to mark as fixed with date
