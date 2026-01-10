@@ -1790,20 +1790,22 @@ async fn run_packet_loop(
                                     let is_comp = is_compressed(frame);
 
                                     // Process frame data - avoid allocation for non-compressed
+                                    // Use Option to hold decompressed data only when needed
+                                    let decompressed: Option<Vec<u8>>;
                                     let frame_slice: &[u8];
-                                    let decompressed: Vec<u8>;
 
                                     if is_comp {
                                         match decompress(frame) {
                                             Ok(d) => {
-                                                decompressed = d;
-                                                frame_slice = &decompressed;
+                                                decompressed = Some(d);
+                                                frame_slice = decompressed.as_ref().unwrap();
                                             }
                                             Err(_) => continue, // Skip bad frames
                                         }
                                     } else {
+                                        decompressed = None;
+                                        let _ = &decompressed; // Silence unused warning, keeps borrow alive
                                         frame_slice = frame;
-                                        decompressed = Vec::new(); // Not used but needed for borrow checker
                                     }
 
                                     // Process ARP packets for gateway MAC learning
