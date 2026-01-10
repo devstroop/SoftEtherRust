@@ -1,148 +1,284 @@
-# Issues & TODO
+# Known Issues & Technical Debt
 
-## 1. Critical
-
-_No critical issues._
-
----
-
-## 2. iOS Integration
-
-_All iOS integration issues resolved._
+> SoftEther VPN Rust Client - Issue Tracker  
+> Last updated: January 2026
 
 ---
 
-## 3. Android
+## 📊 Summary
 
-_All Android issues resolved._
-
----
-
-## 4. Protocol
-
-### 4.1 UDP Acceleration ✅ RESOLVED
-- ✅ UDP accel params sent during authentication (when `udp_accel: true`)
-- ✅ Server UDP accel response parsed (`UdpAccelServerResponse`)
-- ✅ UDP data path integrated into FFI packet loop
-- ✅ V1 protocol (RC4 + SHA-1) fully implemented
-- ✅ V2 protocol (ChaCha20-Poly1305 AEAD) fully implemented
-- ✅ Automatic fallback to TCP when UDP not ready
-- ✅ Parallel send/receive in packet loop
-- Impact: Provides lower-latency tunnel when UDP path established
+| Category | High | Medium | Low | Total |
+|----------|------|--------|-----|-------|
+| Issues | 0 | 0 | 0 | 0 |
+| Tech Debt | 0 | 1 | 2 | 3 |
+| Performance | 0 | 0 | 3 | 3 |
+| Missing Features | - | - | - | 7 |
 
 ---
 
-## 5. Performance
+## 🐛 Issues
 
-### 5.1 Packet Statistics ✅ RESOLVED
-- ✅ `bytes_sent`, `bytes_received`, `packets_sent`, `packets_received` now incremented in FFI packet loop
-- ✅ `packets_dropped` and `uptime_secs` work correctly
-- ✅ Stats wrapped in `Arc<FfiStats>` and passed through async task chain
-- Impact: Resolved - mobile apps can now show accurate traffic statistics
+### High Severity
 
-### 5.2 ARP / Gateway MAC Learning ✅ RESOLVED
-- ✅ Desktop learns gateway MAC via ARP responses
-- ✅ Mobile now sends gratuitous ARP and gateway ARP request at tunnel start
-- ✅ Incoming ARP packets processed to learn gateway MAC
-- ✅ Outgoing frames rewritten to use learned gateway MAC (falls back to broadcast if not learned)
-- Impact: Resolved - full parity with desktop ARP behavior
-
-### 5.3 QoS Packet Prioritization ✅ RESOLVED
-- ✅ `qos` config flag is parsed and sent to server
-- ✅ QoS module implemented (src/packet/qos.rs) with `is_priority_packet()` function
-- ✅ Priority detection matches official SoftEther: IPv4 ToS != 0, ICMP, VoIP ports
-- ✅ IPv6 traffic class and ICMPv6 also prioritized
-- ✅ FFI packet loop sorts priority packets to front when QoS enabled
-- Impact: Resolved - VoIP/real-time packets sent first in batch transmissions
+*No high severity issues currently open.*
 
 ---
 
-## 6. Code Quality
+### Medium Severity
 
-### 6.1 Function Complexity ✅ RESOLVED
-- ✅ `connect_and_run_inner` refactored from 343 to ~120 lines
-- ✅ Extracted helpers to `src/ffi/connection.rs`: `update_state`, `resolve_server_ip`, `generate_session_mac`, `create_session_from_dhcp`, `init_udp_acceleration`, `log_encryption_status`
-- ✅ `run_packet_loop` refactored using helpers in `src/ffi/packet_loop.rs`
-- ✅ Extracted: `process_arp_for_learning`, `prepare_outbound_frames`, `process_received_frame`, `build_callback_buffer`, `update_stats`, `parse_length_prefixed_packets`
-- ✅ Converted inline `log_msg` helpers to `callbacks.log_info/warn/error()` method calls
-- Location: `src/ffi/client.rs`, `src/ffi/connection.rs`, `src/ffi/packet_loop.rs`
-
-### 6.2 Performance Optimizations ✅ RESOLVED
-- ✅ Pack now uses `UniCase<String>` for case-insensitive key storage
-- ✅ Eliminates redundant `to_lowercase()` on storage (keys stored once at insert)
-- ✅ Lookups still require allocation but benefit from UniCase's optimized comparison
-- ❌ `Vec::new()` allocations in packet parsing - use `Cow<[u8]>` for zero-copy (deferred)
-- Location: `src/protocol/pack.rs`
-- Impact: Minor improvement - reduces allocations during Pack construction
-
-### 6.3 Dead Code Cleanup ✅ RESOLVED
-- ✅ `DhcpHandler` is actually used in `src/tunnel/data_loop.rs` (DataLoopState)
-- ✅ `#[allow(dead_code)]` annotations reviewed and documented:
-  - `notify_connected` in ffi/client.rs - reserved for future API
-  - `notify_state` annotation removed (method is used)
-  - Protocol constants (qos.rs, dhcpv6.rs, udp_accel.rs) - kept for API completeness
-  - `is_last` in fragment.rs - stored for debugging
-  - `configure_routes` in runner.rs - platform-specific, used on Linux
-- Location: Various files
-
-### 6.4 API Design (Low Priority)
-- ❌ `SoftEtherConfig` has 20+ fields - group into sub-structs
-- Location: `src/ffi/types.rs`
-- Recommendation: Group into `ConnectionConfig`, `SecurityConfig`, `RoutingConfig`, `FeatureFlags`
+*No medium severity issues currently open.*
 
 ---
 
-## 7. Half-Connection Mode
+### Low Severity
 
-_All half-connection mode issues resolved._
+*No low severity issues currently open.*
 
 ---
 
-## 8. Resolved
+## 🔧 Technical Debt
 
-- ✅ Compression latency (switched to fast level)
-- ✅ Android socket protection
-- ✅ DHCP through tunnel
-- ✅ C header state enum fixed
-- ✅ Half-connection mode direction parsing (TcpDirection enum)
-- ✅ RC4 Tunnel Encryption (src/crypto/rc4.rs with streaming cipher)
-- ✅ RC4 Key Pair parsing from server Welcome packet
-- ✅ RC4 integration in tunnel TX/RX paths (single-conn Unix & Windows)
-- ✅ Swift bridge field name mismatches fixed (skip_tls_verify, timeout_seconds, mtu, etc.)
-- ✅ Swift bridge missing fields added (useEncrypt, udpAccel, qos, natTraversal, routing)
-- ✅ Swift Session mac_address and gateway_mac added
-- ✅ Swift log callback wired (on_log)
-- ✅ Kotlin bridge all config options exposed (MTU, encrypt, udpAccel, qos, routing)
-- ✅ Kotlin Session now includes macAddress from session
-- ✅ VpnService uses session MAC instead of hardcoded
-- ✅ Kotlin log callback and socket protection callback added
-- ✅ UseSSLDataEncryption flag handled (skip RC4 when no keys present)
-- ✅ NAT-T port keepalive signaling implemented (encode_keepalive_with_nat_t)
-- ✅ Compression switched to fast level for low latency
-- ✅ Tokio worker threads reduced to 1 for mobile battery
-- ✅ Certificate pinning implemented (custom CA PEM and SHA-256 fingerprint verification)
-- ✅ Packet queue backpressure implemented (QueueFull result code, dropped packet stats)
-- ✅ UDP acceleration auth flow wired (params sent, server response parsed)
-- ✅ FIFO buffer pre-allocation (compress_into for zero-alloc hot path, pre-alloc comp_buf)
-- ✅ iOS socket protection via setsockopt(SO_NET_SERVICE_TYPE, NET_SERVICE_TYPE_VV)
-- ✅ RC4 encryption in FFI/mobile packet loop (TunnelEncryption with encrypt/decrypt)
-- ✅ Android IP exclusion callback (exclude_ip for cluster redirects)
-- ✅ iOS IP exclusion callback (exclude_ip wired to Swift onExcludeIp)
-- ✅ Multi-connection support for mobile (establish_additional_connections after DHCP)
-- ✅ Half-connection mode for mobile (auto-enabled when max_connections > 1)
-- ✅ Android TLS cert pinning (custom_ca_pem and cert_fingerprint_sha256 wired in JNI)
-- ✅ Keepalive encryption (RC4 applied to keepalive packets on mobile)
-- ✅ Half-connection mode direction verified (TcpDirection 0=Both, 1=ServerToClient, 2=ClientToServer matches official C; primary always ClientToServer; can_send/can_recv filters connections correctly)
-- ✅ DHCPv6 integration for FFI/mobile (perform_dhcpv6 after DHCPv4, session includes ipv6_address/dns1_v6/dns2_v6)
-- ✅ Reconnection logic for FFI/mobile (retry with 10s delay for UserAlreadyLoggedIn, up to 5 attempts)
-- ✅ ARP/Gateway MAC learning for FFI/mobile (GARP + gateway request sent, ARP replies processed, outgoing frames use learned MAC)
-- ✅ QoS packet prioritization (is_priority_packet() detects ToS/DSCP, ICMP, VoIP ports; FFI sorts priority packets first)
-- ✅ UDP Acceleration V2 (ChaCha20-Poly1305 AEAD encryption for UDP packets)
-- ✅ Packet statistics in FFI (bytes_sent/received, packets_sent/received now tracked via Arc<FfiStats>)
-- ✅ Code deduplication: `TunnelEncryption` moved to shared `src/crypto/mod.rs`
-- ✅ Code deduplication: `is_dhcp_response()` / `is_dhcpv6_response()` moved to `src/packet/mod.rs`
-- ✅ Added `SoftEtherCallbacks::log()` method to eliminate duplicate log helpers
-- ✅ Clippy warnings fixed (collapsible if, range contains, unnecessary to_vec)
-- ✅ Function complexity: `connect_and_run_inner` refactored 343→120 lines (helpers in connection.rs)
-- ✅ Function complexity: `run_packet_loop` refactored with helpers in packet_loop.rs
-- ✅ Dead code audit: `#[allow(dead_code)]` annotations reviewed and documented
+### Medium Priority
+
+#### DEBT-5: Missing Integration Tests for Multi-Connection *(Fixed)*
+
+**Status:** RESOLVED - Added 28 unit tests covering multi-connection logic.
+
+**Test Coverage Added:**
+| Module | Tests | Coverage |
+|--------|-------|----------|
+| `multi_connection.rs` | 17 | TcpDirection, ConnectionStats, round-robin, extraction |
+| `concurrent_reader.rs` | 11 | ReceivedPacket, shutdown flags, bytes tracking |
+
+**Tested Scenarios:**
+- TcpDirection parsing from server (0=Both, 1=S2C, 2=C2S)
+- Half-connection mode direction assignment
+- Connection distribution for 4 and 8 connections
+- Round-robin send/recv selection
+- Connection extraction for ConcurrentReader
+- Per-connection RC4 cipher independence
+- Pack format for additional_connect method
+- Shutdown flag propagation across tasks
+- Connection index preservation
+
+---
+
+#### DEBT-6: Windows TUN Incomplete
+**Location:** `src/adapter/windows.rs`
+
+Missing DNS configuration and route cleanup on drop.
+
+---
+
+### Low Priority
+
+#### DEBT-2: Large File - ffi/client.rs (2727 lines) *(Intentional Design)*
+
+**Status:** Closed - intentional architectural split. FFI layer has different I/O model (callbacks vs TUN). Shared logic already extracted to `TunnelCodec`, `DhcpClient`, `ConnectionManager`.
+
+---
+
+#### DEBT-1: Large File - tunnel/runner.rs (2219 lines) *(Fixed)*
+
+**Status:** RESOLVED - Split into multiple focused modules.
+
+**Original File:** 2219 lines
+
+**New Structure:**
+| File | Lines | Purpose |
+|------|-------|---------|
+| `runner.rs` | 329 | Core TunnelRunner struct, entry points, routes |
+| `dhcp_handler.rs` | 384 | DHCP handling (single + multi-connection) |
+| `single_conn.rs` | 697 | Single-connection data loop (Unix + Windows) |
+| `multi_conn.rs` | 659 | Multi-connection data loop (half-connection mode) |
+| `packet_processor.rs` | 209 | Shared packet processing utilities |
+
+Each file now has a single responsibility and is under 700 lines.
+
+---
+
+#### DEBT-7: Multiple `unwrap()` in TLS Config *(Fixed)*
+**Location:** `src/client/connection.rs:202-244`
+
+**Status:** RESOLVED - Replaced 4 `unwrap()` calls with proper `?` operator and `map_err()` to convert rustls errors to `Error::Tls`.
+
+**Changes:**
+- All 4 `with_safe_default_protocol_versions().unwrap()` calls now use `.map_err(|e| Error::Tls(...))?`
+- Errors now propagate with descriptive message: "Failed to set TLS protocol versions: {error}"
+
+---
+
+#### DEBT-8: Duplicated Auth Pack Logic *(Fixed)*
+**Location:** `src/protocol/auth.rs`
+
+**Status:** RESOLVED - Refactored `new()` and `new_ticket()` to use `add_client_fields()`.
+
+**Changes:**
+- `AuthPack::new()`: Replaced ~75 lines of inline code with call to `add_client_fields()`
+- `AuthPack::new_ticket()`: Replaced ~70 lines of inline code with call to `add_client_fields()`
+- All 5 constructors now consistently use the shared helper function
+- File reduced from 978 → 872 lines (~106 lines removed)
+
+---
+
+## 📈 Performance
+
+### Medium Priority
+
+#### PERF-1: Buffer Pool for Receive Allocations *(Fixed)*
+**Location:** `src/client/concurrent_reader.rs`
+
+**Status:** RESOLVED - Implemented `BufferPool` using pre-allocated `BytesMut` buffers.
+
+**Implementation:**
+- `BufferPool` struct with channel-based buffer recycling
+- Pre-allocates `BUFFERS_PER_READER * num_connections + channel_size` buffers
+- Reader tasks grab from pool, read directly into `BytesMut`, freeze to `Bytes` (zero-copy)
+- `try_reclaim()` method recycles `Bytes` back to `BytesMut` when sole owner
+- Stats tracking: `pool_stats()` returns (hits, misses, hit_rate%)
+- Graceful degradation: allocates new buffer when pool empty
+
+**Before:** `Bytes::copy_from_slice(&buf[..n])` - allocation per packet
+**After:** `buf.freeze()` - zero-copy conversion from pooled BytesMut
+
+---
+
+#### PERF-6: Upload Path Throttling and Latency Oscillation *(Fixed)*
+**Location:** `src/client/multi_connection.rs`
+
+**Status:** RESOLVED - Implemented least-loaded connection selection and removed blocking flushes.
+
+**Root Causes:**
+1. Round-robin selection didn't consider TCP buffer pressure
+2. `flush().await` after every write blocked on TCP ACKs
+3. No load balancing across send connections
+
+**Fixes:**
+- Added `pending_send_bytes` tracking with time-based decay (~10 MB/s assumed)
+- `get_send_connection()` now selects least-loaded connection
+- Removed explicit `flush()` calls (TCP_NODELAY ensures immediate send)
+- Added `record_write()` to track per-connection send load
+- Added `estimated_pending()` with automatic decay calculation
+
+---
+
+### Low Priority
+
+#### PERF-2: Redundant Compression Check
+**Location:** `src/tunnel/runner.rs`
+
+Called for every packet even when compression is disabled.
+
+**Recommendation:** Check `use_compress` flag first.
+
+---
+
+#### PERF-3: RC4 Batch Processing
+**Location:** `src/crypto/rc4.rs`
+
+Single buffer at a time. Batching could reduce overhead.
+
+---
+
+#### PERF-4: Fragment Reassembly HashMap Growth
+**Location:** `src/packet/fragment.rs`
+
+HashMap grows unbounded until cleanup. Use `with_capacity()`.
+
+---
+
+#### PERF-5: JNI String Allocations
+**Location:** `src/ffi/android.rs`
+
+Multiple allocations when copying from JNI. Consider stack buffers.
+
+---
+
+## 📋 Missing Features
+
+| Feature | Status | Location |
+|---------|--------|----------|
+| Daemon Mode (CLI) | Not implemented | `src/main.rs` |
+| DHCP Lease Renewal | Partial - timer not wired | `src/packet/dhcp.rs` |
+| DHCPv6 Lease Renewal | Not implemented | `src/packet/dhcpv6.rs` |
+| IPv6 Default Route | Not implemented | `src/tunnel/runner.rs` |
+| Graceful Reconnection | Not implemented | `src/client/mod.rs` |
+| UDP Accel V2 NAT-T | Partial | `src/net/udp_accel.rs` |
+| Per-Connection Stats | Partial | `src/ffi/client.rs` |
+
+---
+
+## 🏗️ Architecture
+
+### ✅ Positive Patterns
+
+| Pattern | Description |
+|---------|-------------|
+| Zero-copy networking | `bytes::Bytes` and slice references throughout |
+| Modular crypto | SHA-0, RC4, ChaCha20-Poly1305 in separate modules |
+| Platform abstraction | `TunAdapter` trait for cross-platform TUN |
+| Good test coverage | Most packet/protocol modules have unit tests |
+| Clear separation | protocol/, packet/, net/, client/, ffi/ |
+| Concurrent reader | Channel-based concurrent TCP reader |
+
+### ⚠️ Areas for Improvement
+
+| Issue | Impact |
+|-------|--------|
+| FFI/Desktop split | Two implementations instead of shared core |
+| Large files | ~~runner.rs (2247)~~ and client.rs (2725) - runner.rs split, client.rs intentional |
+| Error propagation | Mix of `Result`, `Option`, and panics |
+| State machine clarity | Connection states could use proper FSM pattern |
+
+---
+
+## 🧪 Test Coverage
+
+| Module | Status | Notes |
+|--------|--------|-------|
+| `packet/arp.rs` | ✅ | Good coverage |
+| `packet/dhcp.rs` | ✅ | State machine tests |
+| `packet/dhcpv6.rs` | ✅ | Basic coverage |
+| `packet/ethernet.rs` | ✅ | Zero-copy helpers |
+| `packet/fragment.rs` | ✅ | Reassembly tested |
+| `packet/qos.rs` | ✅ | Priority detection |
+| `protocol/pack.rs` | ✅ | Serialization |
+| `protocol/auth.rs` | ✅ | Auth pack building |
+| `crypto/sha0.rs` | ✅ | Known test vectors |
+| `crypto/rc4.rs` | ✅ | Stream cipher |
+| `net/udp_accel.rs` | ⚠️ | Structure tests only |
+| `tunnel/runner.rs` | ❌ | Complex, needs mocking |
+| `ffi/client.rs` | ❌ | Needs integration tests |
+| `client/mod.rs` | ⚠️ | Connection tests only |
+
+---
+
+## ✅ Recently Fixed
+
+- [x] **PERF-6: Upload Path Throttling** (Jan 2026) - Replaced round-robin send selection with least-loaded connection selection using `pending_send_bytes` tracking. Removed blocking `flush()` calls that caused latency oscillation. TCP_NODELAY ensures immediate transmission. Added 7 tests (test count 154 → 161).
+- [x] **PERF-1: Buffer Pool for Receive Allocations** (Jan 2026) - Implemented `BufferPool` in `concurrent_reader.rs` using pre-allocated `BytesMut` buffers. Reader tasks grab from pool, read directly, freeze to `Bytes` (zero-copy). Includes `try_reclaim()` for buffer recycling and stats tracking. Added 9 new tests (test count 145 → 154).
+- [x] **DEBT-8: Duplicated Auth Pack Logic** (Jan 2026) - Refactored `AuthPack::new()` and `AuthPack::new_ticket()` to use `add_client_fields()` helper. All 5 auth constructors now share common code. File reduced from 978 → 872 lines (~106 lines removed).
+- [x] **DEBT-7: Multiple `unwrap()` in TLS Config** (Jan 2026) - Replaced 4 `unwrap()` calls in `create_tls_config()` with proper error handling using `map_err()` to convert rustls errors to `Error::Tls`. Errors now propagate correctly instead of panicking.
+- [x] **DEBT-5: Missing Integration Tests for Multi-Connection** (Jan 2026) - Added 28 unit tests: 17 in `multi_connection.rs` (TcpDirection, ConnectionStats, round-robin, half-connection distribution, RC4 independence) and 11 in `concurrent_reader.rs` (ReceivedPacket, bytes tracking, shutdown flags, connection index preservation). Test count increased from 118 to 145.
+- [x] **DEBT-1: Large File - tunnel/runner.rs** (Jan 2026) - Split into 5 modules: `runner.rs` (329 lines), `dhcp_handler.rs` (384 lines), `single_conn.rs` (697 lines), `multi_conn.rs` (659 lines), `packet_processor.rs` (209 lines). Each module has a single responsibility.
+- [x] **DEBT-3: Duplicated Data Loop Code** (Jan 2026) - Created `src/tunnel/packet_processor.rs` with shared utilities (`init_arp`, `send_keepalive_if_needed`, `send_periodic_garp_if_needed`, `send_pending_arp_reply`, `send_frame_encrypted`, `build_ethernet_frame`). Updated both `run_data_loop_unix` and `run_data_loop_windows` to use shared functions, eliminating ~60 lines of duplication.
+- [x] **DEBT-4: Inconsistent FFI Error Handling** (Jan 2026) - Added `softether_get_last_error()` and `softether_clear_last_error()` FFI functions. Thread-local storage holds detailed error message on failure. Updated `softether_create()` to set specific error messages (e.g., "config is null", "server is null or invalid UTF-8").
+- [x] **ISSUE-7: ARP Array Index Panic** (Jan 2026) - **Closed as safe code.** Line 201 validates `frame.len() >= 42` before any access. The slice `[arp_start+8..arp_start+14]` = `[22..28]` only needs indices 0-27, well within the 42-byte minimum. The `unwrap()` is unreachable.
+- [x] **ISSUE-6: Password Hash Panic** (Jan 2026) - **Closed as safe code.** The `unwrap()` at line 524 is preceded by explicit length validation (lines 518-523) that returns `Error::Config` if not 20 bytes. The `unwrap()` is unreachable on invalid input.
+- [x] **ISSUE-4: DHCP Response Race** (Jan 2026) - **Closed as works-as-designed.** FFI does DHCP on single bidirectional connection before additional connections. Desktop establishes all connections before DHCP. No race condition possible.
+- [x] **ISSUE-8: UDP Accel Session Not Closed** (Jan 2026) - **Closed as works-as-designed.** Official SoftEther `FreeUdpAccel()` also relies on socket close + server keepalive timeout (9s). No explicit close packet in protocol.
+- [x] **ISSUE-5: Thread-Local Storage in iOS FFI** (Jan 2026) - Changed `softether_ios_get_session()` and `softether_ios_get_stats()` to use caller-provided buffers instead of thread-local storage. Prevents stale data across threads and pointer invalidation. API now consistent with other iOS helper functions.
+- [x] **ISSUE-3: Missing Timeout on Additional Connection** (Jan 2026) - Wrapped `establish_one_additional()` with `tokio::time::timeout()` using `config.timeout_seconds`. Prevents hanging if server accepts TCP but never responds to handshake.
+- [x] **ISSUE-2: Frame Split Across Multi-Connections** (Jan 2026) - **Closed as not a bug.** Analysis of official SoftEther source (Connection.c) confirms each TCP socket has independent `RecvFifo` and frame parsing state. Server sends complete frames to individual connections (never splits across connections). Per-connection `TunnelCodec` is correct.
+- [x] **ISSUE-1: RC4 Stream Corruption** (Jan 2026) - Implemented per-connection RC4 cipher state. Each `ManagedConnection` now has its own `TunnelEncryption` instance, matching server's per-socket encryption model. Files: `multi_connection.rs`, `concurrent_reader.rs`, `runner.rs`
+- [x] **Config layer restructure** (Jan 2026) - Authentication moved to nested `auth` object with method selection (password, RADIUS, cert, anonymous)
+- [x] **Marvin Attack** (RUSTSEC-2023-0071) - Hardened RSA fork
+- [x] **Digest conflict** - Updated sha1 to 0.11.0-rc.3
+
+---
+
+## Contributing
+
+1. Reference this document in your PR (e.g., "Fixes ISSUE-3")
+2. Add tests for the fix
+3. Update this document to mark as fixed with date

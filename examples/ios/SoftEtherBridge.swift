@@ -41,6 +41,7 @@ public class SoftEtherBridge {
         public let dns1: UInt32
         public let dns2: UInt32
         public let connectedServerIP: String
+        public let originalServerIP: String
         public let serverVersion: UInt32
         public let serverBuild: UInt32
         public let macAddress: [UInt8]
@@ -370,15 +371,17 @@ public class SoftEtherBridge {
         // Create client
         handle = softether_create(&cConfig, &cCallbacks)
         guard let h = handle else {
-            throw BridgeError.createFailed
+            let errorMsg = SoftEtherBridge.lastError
+            throw BridgeError.createFailed(message: errorMsg)
         }
         
         // Start connection
         let result = softether_connect(h)
         if result != SOFTETHER_OK {
+            let errorMsg = SoftEtherBridge.lastError
             softether_destroy(h)
             handle = nil
-            throw BridgeError.connectFailed(code: Int(result.rawValue))
+            throw BridgeError.connectFailed(code: Int(result.rawValue), message: errorMsg)
         }
     }
     
@@ -495,6 +498,18 @@ public class SoftEtherBridge {
     public static var version: String {
         String(cString: softether_version())
     }
+    
+    /// Get the last error message from the library.
+    /// Returns nil if no error occurred.
+    public static var lastError: String? {
+        guard let ptr = softether_get_last_error() else { return nil }
+        return String(cString: ptr)
+    }
+    
+    /// Clear the last error message.
+    public static func clearLastError() {
+        softether_clear_last_error()
+    }
 }
 
 // MARK: - Callback Context
@@ -523,6 +538,11 @@ private func connectedCallback(context: UnsafeMutableRawPointer?, session: Unsaf
         dns1: s.dns1,
         dns2: s.dns2,
         connectedServerIP: withUnsafePointer(to: s.connected_server_ip) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 64) {
+                String(cString: $0)
+            }
+        },
+        originalServerIP: withUnsafePointer(to: s.original_server_ip) {
             $0.withMemoryRebound(to: CChar.self, capacity: 64) {
                 String(cString: $0)
             }
@@ -620,11 +640,31 @@ private func excludeIpCallback(context: UnsafeMutableRawPointer?, ip: UnsafePoin
 
 // MARK: - Errors
 
-public enum BridgeError: Error {
+public enum BridgeError: Error, LocalizedError {
     case alreadyConnected
-    case createFailed
-    case connectFailed(code: Int)
+    case createFailed(message: String?)
+    case connectFailed(code: Int, message: String?)
     case sendFailed(code: Int)
     case disconnected(code: Int)
     case queueFull  // Backpressure - caller should retry
+    
+    public var errorDescription: String? {
+        switch self {
+        case .alreadyConnected:
+            return "Already connected"
+        case .createFailed(let message):
+            return message ?? "Failed to create VPN client"
+        case .connectFailed(let code, let message):
+            if let msg = message {
+                return msg
+            }
+            return "Connection failed with code \(code)"
+        case .sendFailed(let code):
+            return "Send failed with code \(code)"
+        case .disconnected(let code):
+            return "Disconnected with code \(code)"
+        case .queueFull:
+            return "Queue full - retry later"
+        }
+    }
 }

@@ -135,63 +135,49 @@ pub extern "C" fn softether_ios_is_valid_ipv4(ip: u32) -> c_int {
     }
 }
 
-/// Simplified session getter that returns a pointer to session data.
-/// This avoids Swift having to construct the entire SoftEtherSession struct.
-/// Returns NULL if not connected or handle is invalid.
+/// Get session data into a caller-provided buffer.
+/// Returns SoftEtherResult indicating success or failure.
+///
+/// This is the recommended API - caller manages the memory, avoiding
+/// thread-local storage issues and stale pointer problems.
 ///
 /// # Safety
-/// The `handle` must be a valid handle returned from `softether_create`.
+/// - The `handle` must be a valid handle returned from `softether_create`.
+/// - The `session_out` pointer must be valid and point to a writable `SoftEtherSession`.
 #[no_mangle]
 pub unsafe extern "C" fn softether_ios_get_session(
     handle: SoftEtherHandle,
-) -> *const SoftEtherSession {
+    session_out: *mut SoftEtherSession,
+) -> SoftEtherResult {
     if handle.is_null() {
-        return std::ptr::null();
+        return SoftEtherResult::InvalidParam;
+    }
+    if session_out.is_null() {
+        return SoftEtherResult::InvalidParam;
     }
 
-    // We need a place to store the session - use thread-local storage
-    thread_local! {
-        static SESSION_STORAGE: std::cell::RefCell<SoftEtherSession> =
-            std::cell::RefCell::new(SoftEtherSession::default());
-    }
-
-    SESSION_STORAGE.with(|storage| {
-        let mut session = storage.borrow_mut();
-        let result = unsafe { softether_get_session(handle, &mut *session as *mut _) };
-
-        if result == SoftEtherResult::Ok {
-            &*session as *const SoftEtherSession
-        } else {
-            std::ptr::null()
-        }
-    })
+    unsafe { softether_get_session(handle, session_out) }
 }
 
-/// Simplified statistics getter.
+/// Get statistics into a caller-provided buffer.
+/// Returns SoftEtherResult indicating success or failure.
 ///
 /// # Safety
-/// The `handle` must be a valid handle returned from `softether_create`.
+/// - The `handle` must be a valid handle returned from `softether_create`.
+/// - The `stats_out` pointer must be valid and point to a writable `SoftEtherStats`.
 #[no_mangle]
-pub unsafe extern "C" fn softether_ios_get_stats(handle: SoftEtherHandle) -> *const SoftEtherStats {
+pub unsafe extern "C" fn softether_ios_get_stats(
+    handle: SoftEtherHandle,
+    stats_out: *mut SoftEtherStats,
+) -> SoftEtherResult {
     if handle.is_null() {
-        return std::ptr::null();
+        return SoftEtherResult::InvalidParam;
+    }
+    if stats_out.is_null() {
+        return SoftEtherResult::InvalidParam;
     }
 
-    thread_local! {
-        static STATS_STORAGE: std::cell::RefCell<SoftEtherStats> =
-            std::cell::RefCell::new(SoftEtherStats::default());
-    }
-
-    STATS_STORAGE.with(|storage| {
-        let mut stats = storage.borrow_mut();
-        let result = unsafe { softether_get_stats(handle, &mut *stats as *mut _) };
-
-        if result == SoftEtherResult::Ok {
-            &*stats as *const SoftEtherStats
-        } else {
-            std::ptr::null()
-        }
-    })
+    unsafe { softether_get_stats(handle, stats_out) }
 }
 
 /// Format bytes as human-readable string (KB, MB, GB).

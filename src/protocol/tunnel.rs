@@ -325,8 +325,8 @@ impl TunnelCodec {
                         // Consume size
                         self.buffer.advance(4);
 
-                        // Read block data
-                        let block_data = self.buffer.copy_to_bytes(block_size);
+                        // Read block data - split_to + freeze is zero-copy when possible
+                        let block_data = self.buffer.split_to(block_size).freeze();
                         self.packets.push(block_data);
                         self.remaining_blocks -= 1;
 
