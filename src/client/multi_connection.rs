@@ -325,7 +325,25 @@ impl ConnectionManager {
     }
 
     /// Establish a single additional connection.
+    /// Wrapped with a timeout to prevent hanging if server doesn't respond.
     async fn establish_one_additional(&self) -> Result<ManagedConnection> {
+        use tokio::time::timeout;
+
+        // Use the same timeout as primary connection establishment
+        let connect_timeout = Duration::from_secs(self.config.timeout_seconds);
+
+        timeout(connect_timeout, self.establish_one_additional_inner())
+            .await
+            .map_err(|_| {
+                Error::TimeoutMessage(format!(
+                    "Additional connection establishment timed out after {}s",
+                    self.config.timeout_seconds
+                ))
+            })?
+    }
+
+    /// Inner implementation of additional connection establishment.
+    async fn establish_one_additional_inner(&self) -> Result<ManagedConnection> {
         let index = self.connections.len();
 
         // Create a new TCP connection to the server

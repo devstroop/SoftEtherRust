@@ -9,7 +9,7 @@
 
 | Category | High | Medium | Low | Total |
 |----------|------|--------|-----|-------|
-| Issues | 0 | 4 | 3 | 7 |
+| Issues | 0 | 2 | 3 | 5 |
 | Tech Debt | 2 | 4 | 2 | 8 |
 | Performance | 0 | 1 | 4 | 5 |
 | Missing Features | - | - | - | 7 |
@@ -25,34 +25,6 @@
 ---
 
 ### Medium Severity
-
-#### ISSUE-2: Frame Split Across Multi-Connections
-**Location:** `src/tunnel/runner.rs:1580`
-
-```rust
-let mut codecs: Vec<TunnelCodec> = (0..num_conns).map(|_| TunnelCodec::new()).collect();
-```
-
-Each connection has its own `TunnelCodec`. If a tunnel frame splits across TCP segments on different connections (half-connection mode), reassembly fails.
-
-**Impact:** Packet loss or decode errors in multi-connection mode.  
-**Investigation:** Verify SoftEther protocol guarantees frame boundaries per connection.
-
----
-
-#### ISSUE-3: Missing Timeout on Additional Connection Establishment
-**Location:** `src/client/multi_connection.rs`
-
-```rust
-async fn establish_one_additional(&self) -> Result<ManagedConnection> {
-    // No timeout wrapper - could hang indefinitely
-}
-```
-
-**Impact:** Connection setup hangs forever if server doesn't respond.  
-**Fix:** Wrap in `tokio::time::timeout()`.
-
----
 
 #### ISSUE-4: DHCP Response Race in Half-Connection Mode
 **Location:** `src/tunnel/runner.rs:1565`
@@ -326,6 +298,8 @@ Multiple allocations when copying from JNI. Consider stack buffers.
 
 ## ✅ Recently Fixed
 
+- [x] **ISSUE-3: Missing Timeout on Additional Connection** (Jan 2026) - Wrapped `establish_one_additional()` with `tokio::time::timeout()` using `config.timeout_seconds`. Prevents hanging if server accepts TCP but never responds to handshake.
+- [x] **ISSUE-2: Frame Split Across Multi-Connections** (Jan 2026) - **Closed as not a bug.** Analysis of official SoftEther source (Connection.c) confirms each TCP socket has independent `RecvFifo` and frame parsing state. Server sends complete frames to individual connections (never splits across connections). Per-connection `TunnelCodec` is correct.
 - [x] **ISSUE-1: RC4 Stream Corruption** (Jan 2026) - Implemented per-connection RC4 cipher state. Each `ManagedConnection` now has its own `TunnelEncryption` instance, matching server's per-socket encryption model. Files: `multi_connection.rs`, `concurrent_reader.rs`, `runner.rs`
 - [x] **Config layer restructure** (Jan 2026) - Authentication moved to nested `auth` object with method selection (password, RADIUS, cert, anonymous)
 - [x] **Marvin Attack** (RUSTSEC-2023-0071) - Hardened RSA fork
