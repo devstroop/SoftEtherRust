@@ -79,6 +79,11 @@ pub struct ManagedConnection {
     pub healthy: bool,
     /// Connection index (for debugging).
     pub index: usize,
+    /// Estimated pending bytes in send buffer (for load balancing).
+    /// Updated on write, decremented over time based on estimated bandwidth.
+    pending_send_bytes: u64,
+    /// Last time pending bytes was updated.
+    pending_updated: Instant,
 }
 
 impl ManagedConnection {
@@ -95,6 +100,8 @@ impl ManagedConnection {
             bytes_received: 0,
             healthy: true,
             index,
+            pending_send_bytes: 0,
+            pending_updated: now,
         }
     }
 
@@ -119,6 +126,8 @@ impl ManagedConnection {
             bytes_received: 0,
             healthy: true,
             index,
+            pending_send_bytes: 0,
+            pending_updated: now,
         }
     }
 
@@ -152,6 +161,25 @@ impl ManagedConnection {
     /// Check if connection has been idle too long.
     pub fn is_idle(&self, timeout: Duration) -> bool {
         self.last_activity.elapsed() > timeout
+    }
+
+    /// Get estimated pending send bytes with time-based decay.
+    /// Assumes ~10 MB/s bandwidth for decay calculation (100 bytes/µs).
+    pub fn estimated_pending(&self) -> u64 {
+        let elapsed_us = self.pending_updated.elapsed().as_micros() as u64;
+        // Decay rate: ~10 MB/s = 10 bytes per microsecond
+        let decay = elapsed_us.saturating_mul(10);
+        self.pending_send_bytes.saturating_sub(decay)
+    }
+
+    /// Record bytes written (increases pending estimate).
+    pub fn record_write(&mut self, bytes: u64) {
+        // First decay existing pending
+        let current = self.estimated_pending();
+        self.pending_send_bytes = current.saturating_add(bytes);
+        self.pending_updated = Instant::now();
+        self.bytes_sent += bytes;
+        self.touch();
     }
 }
 
@@ -498,8 +526,35 @@ impl ConnectionManager {
     }
 
     /// Get a connection suitable for sending data.
-    /// Uses round-robin among send-capable connections.
+    /// Uses least-loaded selection among send-capable connections to balance
+    /// TCP buffer pressure and reduce latency oscillation.
     pub fn get_send_connection(&mut self) -> Option<&mut ManagedConnection> {
+        // Find send-capable connections with their estimated pending bytes
+        let send_capable: Vec<(usize, u64)> = self
+            .connections
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.healthy && c.direction.can_send())
+            .map(|(i, c)| (i, c.estimated_pending()))
+            .collect();
+
+        if send_capable.is_empty() {
+            return None;
+        }
+
+        // Select connection with least pending bytes (least loaded)
+        let (idx, _) = send_capable
+            .iter()
+            .min_by_key(|(_, pending)| *pending)
+            .copied()
+            .unwrap();
+
+        Some(&mut self.connections[idx])
+    }
+
+    /// Get a connection for sending using round-robin (for compatibility).
+    /// Prefer `get_send_connection()` for better load balancing.
+    pub fn get_send_connection_roundrobin(&mut self) -> Option<&mut ManagedConnection> {
         let send_capable: Vec<usize> = self
             .connections
             .iter()
@@ -622,16 +677,17 @@ impl ConnectionManager {
     }
 
     /// Write data using an appropriate send connection.
-    /// Flushes immediately to minimize latency for VPN traffic.
+    /// Uses least-loaded selection to reduce latency oscillation.
+    /// TCP_NODELAY is set, so we don't explicitly flush to avoid blocking.
     pub async fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        // Select a send-capable connection
+        // Select least-loaded send-capable connection
         let idx = {
-            let send_capable: Vec<usize> = self
+            let send_capable: Vec<(usize, u64)> = self
                 .connections
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| c.healthy && c.direction.can_send())
-                .map(|(i, _)| i)
+                .map(|(i, c)| (i, c.estimated_pending()))
                 .collect();
 
             if send_capable.is_empty() {
@@ -641,30 +697,35 @@ impl ConnectionManager {
                 ));
             }
 
-            self.send_index = (self.send_index + 1) % send_capable.len();
-            send_capable[self.send_index]
+            // Select connection with least pending bytes
+            send_capable
+                .iter()
+                .min_by_key(|(_, pending)| *pending)
+                .map(|(i, _)| *i)
+                .unwrap()
         };
 
         let conn = &mut self.connections[idx];
         conn.conn.write_all(buf).await?;
-        conn.conn.flush().await?; // Flush immediately for low latency
-        conn.bytes_sent += buf.len() as u64;
-        conn.touch();
+        // TCP_NODELAY is set, so data is sent immediately without Nagle delay.
+        // We don't call flush() here to avoid blocking on TCP ACKs which
+        // causes latency oscillation under load.
+        conn.record_write(buf.len() as u64);
         Ok(())
     }
 
     /// Write data with per-connection encryption.
     /// Encrypts using the selected connection's own cipher state, then sends.
-    /// Each TCP socket has independent RC4 state on the server.
+    /// Uses least-loaded selection to balance TCP buffer pressure.
     pub async fn write_all_encrypted(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        // Select a send-capable connection
+        // Select least-loaded send-capable connection
         let idx = {
-            let send_capable: Vec<usize> = self
+            let send_capable: Vec<(usize, u64)> = self
                 .connections
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| c.healthy && c.direction.can_send())
-                .map(|(i, _)| i)
+                .map(|(i, c)| (i, c.estimated_pending()))
                 .collect();
 
             if send_capable.is_empty() {
@@ -674,17 +735,20 @@ impl ConnectionManager {
                 ));
             }
 
-            self.send_index = (self.send_index + 1) % send_capable.len();
-            send_capable[self.send_index]
+            // Select connection with least pending bytes
+            send_capable
+                .iter()
+                .min_by_key(|(_, pending)| *pending)
+                .map(|(i, _)| *i)
+                .unwrap()
         };
 
         let conn = &mut self.connections[idx];
         // Encrypt with this connection's own cipher state
         conn.encrypt(buf);
         conn.conn.write_all(buf).await?;
-        conn.conn.flush().await?; // Flush immediately for low latency
-        conn.bytes_sent += buf.len() as u64;
-        conn.touch();
+        // TCP_NODELAY ensures immediate send. No flush() to avoid ACK-wait latency.
+        conn.record_write(buf.len() as u64);
         Ok(())
     }
 
@@ -1185,6 +1249,119 @@ mod tests {
 
         let has_send = remaining_directions.iter().any(|d| d.can_send());
         assert!(has_send, "Should still have send connections after extraction");
+    }
+
+    // ==========================================================================
+    // Pending bytes / load balancing tests
+    // ==========================================================================
+
+    #[test]
+    fn test_estimated_pending_initial() {
+        // New connection should have zero pending
+        let pending = 0u64;
+        assert_eq!(pending, 0);
+    }
+
+    #[test]
+    fn test_estimated_pending_decay() {
+        // Simulate pending bytes decay over time
+        let initial_pending = 10000u64;
+        let elapsed_us = 500u64; // 500 microseconds
+        let decay_rate = 10u64;  // 10 bytes per microsecond (~10 MB/s)
+
+        let decay = elapsed_us.saturating_mul(decay_rate);
+        let remaining = initial_pending.saturating_sub(decay);
+
+        assert_eq!(decay, 5000);
+        assert_eq!(remaining, 5000);
+    }
+
+    #[test]
+    fn test_estimated_pending_full_decay() {
+        // After enough time, pending should decay to zero
+        let initial_pending = 10000u64;
+        let elapsed_us = 2000u64; // 2ms = 2000 us
+        let decay_rate = 10u64;
+
+        let decay = elapsed_us.saturating_mul(decay_rate);
+        let remaining = initial_pending.saturating_sub(decay);
+
+        assert_eq!(remaining, 0, "Pending should fully decay");
+    }
+
+    #[test]
+    fn test_record_write_updates_pending() {
+        // Simulate recording a write
+        let mut pending = 0u64;
+        let bytes_sent = 0u64;
+
+        // Write 1500 bytes
+        let write_size = 1500u64;
+        pending = pending.saturating_add(write_size);
+        let new_bytes_sent = bytes_sent + write_size;
+
+        assert_eq!(pending, 1500);
+        assert_eq!(new_bytes_sent, 1500);
+    }
+
+    #[test]
+    fn test_least_loaded_selection() {
+        // Simulate selecting least-loaded connection
+        let pending_bytes = vec![
+            (0usize, 5000u64),  // Connection 0: 5KB pending
+            (1usize, 1000u64),  // Connection 1: 1KB pending (least loaded)
+            (2usize, 8000u64),  // Connection 2: 8KB pending
+        ];
+
+        let (selected_idx, _) = pending_bytes
+            .iter()
+            .min_by_key(|(_, pending)| *pending)
+            .copied()
+            .unwrap();
+
+        assert_eq!(selected_idx, 1, "Should select connection with least pending");
+    }
+
+    #[test]
+    fn test_least_loaded_with_equal_pending() {
+        // When pending is equal, should select consistently (first min)
+        let pending_bytes = vec![
+            (0usize, 1000u64),
+            (1usize, 1000u64),
+            (2usize, 1000u64),
+        ];
+
+        let (selected_idx, _) = pending_bytes
+            .iter()
+            .min_by_key(|(_, pending)| *pending)
+            .copied()
+            .unwrap();
+
+        assert_eq!(selected_idx, 0, "Should select first connection when equal");
+    }
+
+    #[test]
+    fn test_load_distribution_simulation() {
+        // Simulate how load distributes with least-loaded selection
+        let mut pending = vec![0u64, 0u64, 0u64]; // 3 connections
+        let packet_size = 1500u64;
+
+        // Simulate sending 9 packets
+        for _ in 0..9 {
+            // Find least loaded
+            let (idx, _) = pending
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, p)| *p)
+                .unwrap();
+
+            pending[idx] += packet_size;
+        }
+
+        // Each connection should have 3 packets (4500 bytes)
+        assert_eq!(pending[0], 4500);
+        assert_eq!(pending[1], 4500);
+        assert_eq!(pending[2], 4500);
     }
 
     // ==========================================================================

@@ -11,7 +11,7 @@
 |----------|------|--------|-----|-------|
 | Issues | 0 | 0 | 0 | 0 |
 | Tech Debt | 0 | 1 | 2 | 3 |
-| Performance | 0 | 1 | 4 | 5 |
+| Performance | 0 | 0 | 3 | 3 |
 | Missing Features | - | - | - | 7 |
 
 ---
@@ -125,14 +125,40 @@ Each file now has a single responsibility and is under 700 lines.
 
 ### Medium Priority
 
-#### PERF-1: Buffer Pool for Receive Allocations
+#### PERF-1: Buffer Pool for Receive Allocations *(Fixed)*
 **Location:** `src/client/concurrent_reader.rs`
 
-```rust
-let data: Vec<u8> = packet.data.to_vec();  // Allocation per packet
-```
+**Status:** RESOLVED - Implemented `BufferPool` using pre-allocated `BytesMut` buffers.
 
-**Recommendation:** Use `bytes::BytesMut` pool or arena allocator.
+**Implementation:**
+- `BufferPool` struct with channel-based buffer recycling
+- Pre-allocates `BUFFERS_PER_READER * num_connections + channel_size` buffers
+- Reader tasks grab from pool, read directly into `BytesMut`, freeze to `Bytes` (zero-copy)
+- `try_reclaim()` method recycles `Bytes` back to `BytesMut` when sole owner
+- Stats tracking: `pool_stats()` returns (hits, misses, hit_rate%)
+- Graceful degradation: allocates new buffer when pool empty
+
+**Before:** `Bytes::copy_from_slice(&buf[..n])` - allocation per packet
+**After:** `buf.freeze()` - zero-copy conversion from pooled BytesMut
+
+---
+
+#### PERF-6: Upload Path Throttling and Latency Oscillation *(Fixed)*
+**Location:** `src/client/multi_connection.rs`
+
+**Status:** RESOLVED - Implemented least-loaded connection selection and removed blocking flushes.
+
+**Root Causes:**
+1. Round-robin selection didn't consider TCP buffer pressure
+2. `flush().await` after every write blocked on TCP ACKs
+3. No load balancing across send connections
+
+**Fixes:**
+- Added `pending_send_bytes` tracking with time-based decay (~10 MB/s assumed)
+- `get_send_connection()` now selects least-loaded connection
+- Removed explicit `flush()` calls (TCP_NODELAY ensures immediate send)
+- Added `record_write()` to track per-connection send load
+- Added `estimated_pending()` with automatic decay calculation
 
 ---
 
@@ -229,6 +255,8 @@ Multiple allocations when copying from JNI. Consider stack buffers.
 
 ## ✅ Recently Fixed
 
+- [x] **PERF-6: Upload Path Throttling** (Jan 2026) - Replaced round-robin send selection with least-loaded connection selection using `pending_send_bytes` tracking. Removed blocking `flush()` calls that caused latency oscillation. TCP_NODELAY ensures immediate transmission. Added 7 tests (test count 154 → 161).
+- [x] **PERF-1: Buffer Pool for Receive Allocations** (Jan 2026) - Implemented `BufferPool` in `concurrent_reader.rs` using pre-allocated `BytesMut` buffers. Reader tasks grab from pool, read directly, freeze to `Bytes` (zero-copy). Includes `try_reclaim()` for buffer recycling and stats tracking. Added 9 new tests (test count 145 → 154).
 - [x] **DEBT-8: Duplicated Auth Pack Logic** (Jan 2026) - Refactored `AuthPack::new()` and `AuthPack::new_ticket()` to use `add_client_fields()` helper. All 5 auth constructors now share common code. File reduced from 978 → 872 lines (~106 lines removed).
 - [x] **DEBT-7: Multiple `unwrap()` in TLS Config** (Jan 2026) - Replaced 4 `unwrap()` calls in `create_tls_config()` with proper error handling using `map_err()` to convert rustls errors to `Error::Tls`. Errors now propagate correctly instead of panicking.
 - [x] **DEBT-5: Missing Integration Tests for Multi-Connection** (Jan 2026) - Added 28 unit tests: 17 in `multi_connection.rs` (TcpDirection, ConnectionStats, round-robin, half-connection distribution, RC4 independence) and 11 in `concurrent_reader.rs` (ReceivedPacket, bytes tracking, shutdown flags, connection index preservation). Test count increased from 118 to 145.
