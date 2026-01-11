@@ -229,6 +229,11 @@ build_android_armv7() {
 build_android_auto() {
     log_info "Detecting connected device architecture..."
     
+    if [ -z "$ANDROID_NDK_HOME" ]; then
+        log_error "ANDROID_NDK_HOME not set"
+        exit 1
+    fi
+    
     if ! command -v adb &> /dev/null; then
         log_error "adb not found. Install Android SDK platform-tools."
         exit 1
