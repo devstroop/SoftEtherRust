@@ -760,6 +760,9 @@ impl ConnectionManager {
     /// Read data from a bidirectional connection with per-connection decryption.
     /// Returns (connection_index, data_length) on success.
     /// Decrypts in-place using the connection's own cipher state.
+    ///
+    /// NOTE: This uses round-robin which can add latency. For low-latency reads,
+    /// use `read_concurrent_decrypt` instead.
     pub async fn read_any_decrypt(&mut self, buf: &mut [u8]) -> io::Result<(usize, usize)> {
         // Get indices of receive-capable connections
         let recv_indices: Vec<usize> = self

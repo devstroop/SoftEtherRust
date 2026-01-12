@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use super::callbacks::*;
 use super::types::*;
 use crate::client::{ConnectionManager, VpnConnection};
-use crate::crypto::Rc4KeyPair;
+use crate::crypto::{Rc4KeyPair, TunnelEncryption};
 use crate::packet::{
     ArpHandler, DhcpClient, DhcpConfig, DhcpState, Dhcpv6Client, Dhcpv6Config, Dhcpv6State,
 };
@@ -1260,21 +1260,11 @@ async fn perform_dhcp(
     let mut buf = vec![0u8; 65536];
     let mut send_buf = vec![0u8; 2048];
 
-    // Check if encryption is enabled - ConnectionManager handles per-connection cipher state
-    let has_encryption = conn_mgr.has_encryption();
-
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
 
-    // Send DHCP DISCOVER (use encryption if available)
+    // Send DHCP DISCOVER (unencrypted - encryption starts after DHCP)
     let discover = dhcp.build_discover();
-    send_frame_encrypted(
-        conn_mgr,
-        &discover,
-        &mut send_buf,
-        use_compress,
-        has_encryption,
-    )
-    .await?;
+    send_frame(conn_mgr, &discover, &mut send_buf, use_compress).await?;
 
     // Wait for OFFER/ACK
     loop {
@@ -1284,14 +1274,8 @@ async fn perform_dhcp(
             ));
         }
 
-        // Use per-connection decryption if encryption is enabled
-        let read_result = if has_encryption {
-            timeout(Duration::from_secs(3), conn_mgr.read_any_decrypt(&mut buf)).await
-        } else {
-            timeout(Duration::from_secs(3), conn_mgr.read_any(&mut buf)).await
-        };
-
-        match read_result {
+        // Read unencrypted - encryption starts after DHCP
+        match timeout(Duration::from_secs(3), conn_mgr.read_any(&mut buf)).await {
             Ok(Ok((_conn_idx, n))) if n > 0 => {
                 // Decode tunnel frames
                 let frames = codec.feed(&buf[..n])?;
@@ -1317,16 +1301,10 @@ async fn perform_dhcp(
                                     // Got ACK
                                     return Ok(dhcp.config().clone());
                                 } else if dhcp.state() == DhcpState::DiscoverSent {
-                                    // Got OFFER, send REQUEST
+                                    // Got OFFER, send REQUEST (unencrypted)
                                     if let Some(request) = dhcp.build_request() {
-                                        send_frame_encrypted(
-                                            conn_mgr,
-                                            &request,
-                                            &mut send_buf,
-                                            use_compress,
-                                            has_encryption,
-                                        )
-                                        .await?;
+                                        send_frame(conn_mgr, &request, &mut send_buf, use_compress)
+                                            .await?;
                                     }
                                 }
                             }
@@ -1341,27 +1319,13 @@ async fn perform_dhcp(
                 // Read error - continue
             }
             Err(_) => {
-                // Timeout, retry
+                // Timeout, retry (unencrypted)
                 if dhcp.state() == DhcpState::DiscoverSent {
                     let discover = dhcp.build_discover();
-                    send_frame_encrypted(
-                        conn_mgr,
-                        &discover,
-                        &mut send_buf,
-                        use_compress,
-                        has_encryption,
-                    )
-                    .await?;
+                    send_frame(conn_mgr, &discover, &mut send_buf, use_compress).await?;
                 } else if dhcp.state() == DhcpState::RequestSent {
                     if let Some(request) = dhcp.build_request() {
-                        send_frame_encrypted(
-                            conn_mgr,
-                            &request,
-                            &mut send_buf,
-                            use_compress,
-                            has_encryption,
-                        )
-                        .await?;
+                        send_frame(conn_mgr, &request, &mut send_buf, use_compress).await?;
                     }
                 }
             }
@@ -1387,23 +1351,14 @@ async fn perform_dhcpv6(
     let mut buf = vec![0u8; 65536];
     let mut send_buf = vec![0u8; 2048];
 
-    // Check if encryption is enabled
-    let has_encryption = conn_mgr.has_encryption();
-
     // DHCPv6 has shorter timeout - it's optional
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
 
-    // Send DHCPv6 SOLICIT
+    // Send DHCPv6 SOLICIT (unencrypted - encryption starts after DHCP)
     let solicit = dhcpv6.build_solicit();
-    if send_frame_encrypted(
-        conn_mgr,
-        &solicit,
-        &mut send_buf,
-        use_compress,
-        has_encryption,
-    )
-    .await
-    .is_err()
+    if send_frame(conn_mgr, &solicit, &mut send_buf, use_compress)
+        .await
+        .is_err()
     {
         return None;
     }
@@ -1414,14 +1369,8 @@ async fn perform_dhcpv6(
             return None;
         }
 
-        // Use per-connection decryption if encryption is enabled
-        let read_result = if has_encryption {
-            timeout(Duration::from_secs(2), conn_mgr.read_any_decrypt(&mut buf)).await
-        } else {
-            timeout(Duration::from_secs(2), conn_mgr.read_any(&mut buf)).await
-        };
-
-        match read_result {
+        // Read unencrypted - encryption starts after DHCP
+        match timeout(Duration::from_secs(2), conn_mgr.read_any(&mut buf)).await {
             Ok(Ok((_conn_idx, n))) if n > 0 => {
                 // Decode tunnel frames
                 if let Ok(frames) = codec.feed(&buf[..n]) {
@@ -1441,20 +1390,18 @@ async fn perform_dhcpv6(
                                     packet.to_vec()
                                 };
 
-                                // Check if this is a DHCPv6 response
                                 if is_dhcpv6_response(&packet_data) {
                                     if dhcpv6.process_response(&packet_data) {
                                         // Got REPLY with address
                                         return Some(dhcpv6.config().clone());
                                     } else if dhcpv6.state() == Dhcpv6State::SolicitSent {
-                                        // Got ADVERTISE, send REQUEST
+                                        // Got ADVERTISE, send REQUEST (unencrypted)
                                         if let Some(request) = dhcpv6.build_request() {
-                                            if send_frame_encrypted(
+                                            if send_frame(
                                                 conn_mgr,
                                                 &request,
                                                 &mut send_buf,
                                                 use_compress,
-                                                has_encryption,
                                             )
                                             .await
                                             .is_err()
@@ -1477,32 +1424,20 @@ async fn perform_dhcpv6(
                 return None;
             }
             Err(_) => {
-                // Timeout, retry
+                // Timeout, retry (unencrypted)
                 if dhcpv6.state() == Dhcpv6State::SolicitSent {
                     let solicit = dhcpv6.build_solicit();
-                    if send_frame_encrypted(
-                        conn_mgr,
-                        &solicit,
-                        &mut send_buf,
-                        use_compress,
-                        has_encryption,
-                    )
-                    .await
-                    .is_err()
+                    if send_frame(conn_mgr, &solicit, &mut send_buf, use_compress)
+                        .await
+                        .is_err()
                     {
                         return None;
                     }
                 } else if dhcpv6.state() == Dhcpv6State::RequestSent {
                     if let Some(request) = dhcpv6.build_request() {
-                        if send_frame_encrypted(
-                            conn_mgr,
-                            &request,
-                            &mut send_buf,
-                            use_compress,
-                            has_encryption,
-                        )
-                        .await
-                        .is_err()
+                        if send_frame(conn_mgr, &request, &mut send_buf, use_compress)
+                            .await
+                            .is_err()
                         {
                             return None;
                         }
@@ -1592,14 +1527,9 @@ async fn run_packet_loop(
         }
     }
 
-    // Create per-connection tunnel codecs - each TCP connection has independent stream state
-    // This is CRITICAL: mixing data from different connections into the same codec
-    // corrupts the framing state and causes "Packet too large" errors
-    let num_connections = conn_mgr.connection_count().max(1);
-    let mut tunnel_codecs: Vec<TunnelCodec> =
-        (0..num_connections).map(|_| TunnelCodec::new()).collect();
-    // Keep a codec for encoding outbound data (all connections share the same encoding format)
-    let encode_codec = TunnelCodec::new();
+    // OLD WORKING PATTERN: Single mutable tunnel_codec for BOTH encode AND decode
+    // TunnelCodec has internal framing state - using separate codecs breaks this
+    let mut tunnel_codec = TunnelCodec::new();
 
     let mut read_buf = vec![0u8; 65536];
     let _udp_recv_buf = vec![0u8; 65536];
@@ -1614,11 +1544,11 @@ async fn run_packet_loop(
     // Track last logged gateway MAC to avoid duplicate logs
     let mut last_logged_gateway_mac: Option<[u8; 6]> = None;
 
-    // Check if RC4 encryption is enabled - ConnectionManager handles per-connection cipher state
-    let has_encryption = rc4_key_pair.is_some();
+    // Create LOCAL RC4 encryption state - this is CRITICAL for correct cipher sync
+    // The OLD working code used a fresh local encryption, not conn_mgr's encryption
+    let mut encryption = rc4_key_pair.map(TunnelEncryption::new);
 
     // Send gratuitous ARP to announce our presence
-    // Use per-connection encryption via ConnectionManager
     let garp = arp.build_gratuitous_arp();
     let garp_bytes = garp.to_vec();
     let garp_data: Vec<u8> = if use_compress {
@@ -1626,22 +1556,19 @@ async fn run_packet_loop(
     } else {
         garp_bytes
     };
-    let encoded_garp = encode_codec.encode(&[&garp_data]);
-    if has_encryption {
-        let mut garp_to_send = encoded_garp.to_vec();
-        conn_mgr
-            .write_all_encrypted(&mut garp_to_send)
-            .await
-            .map_err(crate::error::Error::Io)?;
+    let garp_to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
+        let mut data = tunnel_codec.encode(&[&garp_data]).to_vec();
+        enc.encrypt(&mut data);
+        data
     } else {
-        conn_mgr
-            .write_all(&encoded_garp.to_vec())
-            .await
-            .map_err(crate::error::Error::Io)?;
-    }
+        tunnel_codec.encode(&[&garp_data]).to_vec()
+    };
+    conn_mgr
+        .write_all(&garp_to_send)
+        .await
+        .map_err(crate::error::Error::Io)?;
 
     // Send ARP request for gateway MAC
-    // Use per-connection encryption via ConnectionManager
     let gateway_arp = arp.build_gateway_request();
     let gateway_arp_bytes = gateway_arp.to_vec();
     let gateway_arp_data: Vec<u8> = if use_compress {
@@ -1649,19 +1576,17 @@ async fn run_packet_loop(
     } else {
         gateway_arp_bytes
     };
-    let encoded_gw = encode_codec.encode(&[&gateway_arp_data]);
-    if has_encryption {
-        let mut gw_to_send = encoded_gw.to_vec();
-        conn_mgr
-            .write_all_encrypted(&mut gw_to_send)
-            .await
-            .map_err(crate::error::Error::Io)?;
+    let gw_to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
+        let mut data = tunnel_codec.encode(&[&gateway_arp_data]).to_vec();
+        enc.encrypt(&mut data);
+        data
     } else {
-        conn_mgr
-            .write_all(&encoded_gw.to_vec())
-            .await
-            .map_err(crate::error::Error::Io)?;
-    }
+        tunnel_codec.encode(&[&gateway_arp_data]).to_vec()
+    };
+    conn_mgr
+        .write_all(&gw_to_send)
+        .await
+        .map_err(crate::error::Error::Io)?;
 
     // Track UDP acceleration state
     let mut udp_ready_logged = false;
@@ -1679,38 +1604,34 @@ async fn run_packet_loop(
         }
     }
 
-    // Send first keepalive immediately - use per-connection encryption
-    let keepalive = encode_codec.encode_keepalive();
-    if has_encryption {
-        let mut first_keepalive = keepalive.to_vec();
-        conn_mgr
-            .write_all_encrypted(&mut first_keepalive)
-            .await
-            .map_err(crate::error::Error::Io)?;
+    // Send first keepalive immediately - use local encryption
+    let first_keepalive: Vec<u8> = if let Some(ref mut enc) = encryption {
+        let mut data = tunnel_codec.encode_keepalive().to_vec();
+        enc.encrypt(&mut data);
+        data
     } else {
-        conn_mgr
-            .write_all(&keepalive.to_vec())
-            .await
-            .map_err(crate::error::Error::Io)?;
-    }
+        tunnel_codec.encode_keepalive().to_vec()
+    };
+    conn_mgr
+        .write_all(&first_keepalive)
+        .await
+        .map_err(crate::error::Error::Io)?;
     let mut last_keepalive = std::time::Instant::now();
 
     while running.load(Ordering::SeqCst) {
         // Check if we need to send keepalive (TCP)
         if last_keepalive.elapsed() >= Duration::from_secs(keepalive_interval_secs) {
-            // Use per-connection encryption via ConnectionManager
-            let keepalive = encode_codec.encode_keepalive();
-            if has_encryption {
-                let mut to_send = keepalive.to_vec();
-                if let Err(e) = conn_mgr.write_all_encrypted(&mut to_send).await {
-                    log_msg(&callbacks, 3, &format!("Keepalive failed: {e}"));
-                    return Err(crate::error::Error::Io(e));
-                }
+            // Use local encryption
+            let to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
+                let mut data = tunnel_codec.encode_keepalive().to_vec();
+                enc.encrypt(&mut data);
+                data
             } else {
-                if let Err(e) = conn_mgr.write_all(&keepalive.to_vec()).await {
-                    log_msg(&callbacks, 3, &format!("Keepalive failed: {e}"));
-                    return Err(crate::error::Error::Io(e));
-                }
+                tunnel_codec.encode_keepalive().to_vec()
+            };
+            if let Err(e) = conn_mgr.write_all(&to_send).await {
+                log_msg(&callbacks, 3, &format!("Keepalive failed: {e}"));
+                return Err(crate::error::Error::Io(e));
             }
             last_keepalive = std::time::Instant::now();
         }
@@ -1791,21 +1712,18 @@ async fn run_packet_loop(
                             modified_frames
                         };
 
-                        // Encode frames into tunnel format
-                        let encoded = encode_codec.encode(&frames_to_encode.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
-
-                        // Use per-connection encryption via ConnectionManager
-                        if has_encryption {
-                            let mut to_send = encoded.to_vec();
-                            if let Err(e) = conn_mgr.write_all_encrypted(&mut to_send).await {
-                                log_msg(&callbacks, 3, &format!("TX error: {e}"));
-                                return Err(crate::error::Error::Io(e));
-                            }
+                        // Encode frames into tunnel format and encrypt with local encryption
+                        let encoded = tunnel_codec.encode(&frames_to_encode.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
+                        let to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
+                            let mut data = encoded.to_vec();
+                            enc.encrypt(&mut data);
+                            data
                         } else {
-                            if let Err(e) = conn_mgr.write_all(&encoded.to_vec()).await {
-                                log_msg(&callbacks, 3, &format!("TX error: {e}"));
-                                return Err(crate::error::Error::Io(e));
-                            }
+                            encoded.to_vec()
+                        };
+                        if let Err(e) = conn_mgr.write_all(&to_send).await {
+                            log_msg(&callbacks, 3, &format!("TX error: {e}"));
+                            return Err(crate::error::Error::Io(e));
                         }
                     }
 
@@ -1864,23 +1782,18 @@ async fn run_packet_loop(
             }
 
             // Data from VPN server to send to mobile app (TCP)
-            // Use read_any_decrypt for per-connection decryption (or read_any if no encryption)
-            result = tokio::time::timeout(Duration::from_millis(500), async {
-                if has_encryption {
-                    conn_mgr.read_any_decrypt(&mut read_buf).await
-                } else {
-                    conn_mgr.read_any(&mut read_buf).await
-                }
-            }) => {
+            // Use local encryption for decryption (like old working code)
+            // 500ms timeout (matches old working code)
+            result = tokio::time::timeout(Duration::from_millis(500), conn_mgr.read_any(&mut read_buf)) => {
                 match result {
-                    Ok(Ok((conn_idx, n))) if n > 0 => {
-                        // Use per-connection codec to maintain proper frame state
-                        // This is CRITICAL: each TCP connection has independent stream framing
-                        // Clamp conn_idx to valid range to avoid panic
-                        let safe_idx = if conn_idx < tunnel_codecs.len() { conn_idx } else { 0 };
-                        let codec = &mut tunnel_codecs[safe_idx];
+                    Ok(Ok((_conn_idx, n))) if n > 0 => {
+                        // Decrypt with local encryption (CRITICAL: use same cipher state as TX)
+                        if let Some(ref mut enc) = encryption {
+                            enc.decrypt(&mut read_buf[..n]);
+                        }
 
-                        match codec.decode(&read_buf[..n]) {
+                        // Use same tunnel_codec for decode as we do for encode (OLD working pattern)
+                        match tunnel_codec.decode(&read_buf[..n]) {
                             Ok(frames) => {
                             if !frames.is_empty() {
                                 // Reuse callback_buffer across iterations to reduce allocations
@@ -1949,7 +1862,7 @@ async fn run_packet_loop(
                             }
                             }
                             Err(e) => {
-                                log_msg(&callbacks, 3, &format!("RX decode error on conn {conn_idx}: {e:?}"));
+                                log_msg(&callbacks, 3, &format!("RX decode error: {e:?}"));
                             }
                         }
                     }
