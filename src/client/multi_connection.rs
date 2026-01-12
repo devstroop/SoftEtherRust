@@ -292,6 +292,11 @@ impl ConnectionManager {
         self.half_connection
     }
 
+    /// Check if per-connection RC4 encryption is enabled.
+    pub fn has_encryption(&self) -> bool {
+        self.rc4_key_pair.is_some()
+    }
+
     /// Temporarily enable bidirectional mode on the primary connection.
     /// This is needed for DHCP before additional connections are established.
     /// Returns the original direction so it can be restored.
