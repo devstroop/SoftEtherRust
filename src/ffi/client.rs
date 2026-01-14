@@ -1500,6 +1500,8 @@ async fn run_packet_loop(
 ) -> crate::error::Result<()> {
     use crate::packet::is_priority_packet;
     use crate::protocol::compress;
+    use std::sync::atomic::AtomicU64;
+    
     fn log_msg(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
         if let Some(cb) = callbacks.on_log {
             if let Ok(cstr) = std::ffi::CString::new(msg) {
@@ -1507,12 +1509,76 @@ async fn run_packet_loop(
             }
         }
     }
+    
+    // Download path statistics for debugging
+    static DL_TCP_READS: AtomicU64 = AtomicU64::new(0);
+    static DL_TCP_BYTES: AtomicU64 = AtomicU64::new(0);
+    static DL_FRAMES_DECODED: AtomicU64 = AtomicU64::new(0);
+    static DL_CALLBACKS: AtomicU64 = AtomicU64::new(0);
+    static DL_CALLBACK_PACKETS: AtomicU64 = AtomicU64::new(0);
+    static DL_CALLBACK_BYTES: AtomicU64 = AtomicU64::new(0);
+    
+    // Upload path statistics
+    static UL_TX_RECV: AtomicU64 = AtomicU64::new(0);
+    static UL_PACKETS: AtomicU64 = AtomicU64::new(0);
+    static UL_BYTES: AtomicU64 = AtomicU64::new(0);
+    
+    // Deep timing statistics
+    static SELECT_ITERATIONS: AtomicU64 = AtomicU64::new(0);
+    static DL_BRANCH_HITS: AtomicU64 = AtomicU64::new(0);
+    static UL_BRANCH_HITS: AtomicU64 = AtomicU64::new(0);
+    static DL_TCP_READ_TIME_US: AtomicU64 = AtomicU64::new(0);
+    static DL_DECODE_TIME_US: AtomicU64 = AtomicU64::new(0);
+    static DL_CALLBACK_TIME_US: AtomicU64 = AtomicU64::new(0);
+    static UL_PROCESS_TIME_US: AtomicU64 = AtomicU64::new(0);
+    static UL_WRITE_TIME_US: AtomicU64 = AtomicU64::new(0);
+    static DL_MAX_READ_BYTES: AtomicU64 = AtomicU64::new(0);
+    static UL_MAX_DRAIN_COUNT: AtomicU64 = AtomicU64::new(0);
+    
+    // Reset counters at start
+    DL_TCP_READS.store(0, Ordering::Relaxed);
+    DL_TCP_BYTES.store(0, Ordering::Relaxed);
+    DL_FRAMES_DECODED.store(0, Ordering::Relaxed);
+    DL_CALLBACKS.store(0, Ordering::Relaxed);
+    DL_CALLBACK_PACKETS.store(0, Ordering::Relaxed);
+    DL_CALLBACK_BYTES.store(0, Ordering::Relaxed);
+    UL_TX_RECV.store(0, Ordering::Relaxed);
+    UL_PACKETS.store(0, Ordering::Relaxed);
+    UL_BYTES.store(0, Ordering::Relaxed);
+    SELECT_ITERATIONS.store(0, Ordering::Relaxed);
+    DL_BRANCH_HITS.store(0, Ordering::Relaxed);
+    UL_BRANCH_HITS.store(0, Ordering::Relaxed);
+    DL_TCP_READ_TIME_US.store(0, Ordering::Relaxed);
+    DL_DECODE_TIME_US.store(0, Ordering::Relaxed);
+    DL_CALLBACK_TIME_US.store(0, Ordering::Relaxed);
+    UL_PROCESS_TIME_US.store(0, Ordering::Relaxed);
+    UL_WRITE_TIME_US.store(0, Ordering::Relaxed);
+    DL_MAX_READ_BYTES.store(0, Ordering::Relaxed);
+    UL_MAX_DRAIN_COUNT.store(0, Ordering::Relaxed);
+    
+    let mut last_dl_stats_log = std::time::Instant::now();
+    let dl_stats_interval = Duration::from_secs(5);
 
     let mut tunnel_codec = TunnelCodec::new();
-    let mut read_buf = vec![0u8; 65536];
+    let mut read_buf = vec![0u8; 131072]; // 128KB buffer for batching TLS records
     let _udp_recv_buf = vec![0u8; 65536];
     let mut callback_buffer = Vec::with_capacity(65536); // Reusable buffer for callback
     let keepalive_interval_secs = 5u64;
+
+    // Create async write queue - upload path pushes here, separate branch writes to TCP
+    // This decouples upload processing from TCP write blocking
+    let (write_tx, mut write_rx) = mpsc::channel::<Vec<u8>>(64);
+    static WRITE_QUEUE_DEPTH: AtomicU64 = AtomicU64::new(0);
+    static WRITE_QUEUE_BLOCKED: AtomicU64 = AtomicU64::new(0);
+    static TCP_WRITES: AtomicU64 = AtomicU64::new(0);
+    static TCP_WRITE_BYTES: AtomicU64 = AtomicU64::new(0);
+    WRITE_QUEUE_DEPTH.store(0, Ordering::Relaxed);
+    WRITE_QUEUE_BLOCKED.store(0, Ordering::Relaxed);
+    TCP_WRITES.store(0, Ordering::Relaxed);
+    TCP_WRITE_BYTES.store(0, Ordering::Relaxed);
+    
+    // Track pending write data for non-blocking approach
+    let mut pending_write: Option<Vec<u8>> = None;
 
     // Set up ARP handler for gateway MAC learning
     let mut arp = ArpHandler::new(mac);
@@ -1599,6 +1665,93 @@ async fn run_packet_loop(
     let mut last_keepalive = std::time::Instant::now();
 
     while running.load(Ordering::SeqCst) {
+        // Track select iterations
+        SELECT_ITERATIONS.fetch_add(1, Ordering::Relaxed);
+        
+        // Log download stats periodically
+        if last_dl_stats_log.elapsed() >= dl_stats_interval {
+            let tcp_reads = DL_TCP_READS.load(Ordering::Relaxed);
+            let tcp_bytes = DL_TCP_BYTES.load(Ordering::Relaxed);
+            let frames = DL_FRAMES_DECODED.load(Ordering::Relaxed);
+            let cb_count = DL_CALLBACKS.load(Ordering::Relaxed);
+            let cb_packets = DL_CALLBACK_PACKETS.load(Ordering::Relaxed);
+            let cb_bytes = DL_CALLBACK_BYTES.load(Ordering::Relaxed);
+            
+            // Upload stats
+            let ul_recv = UL_TX_RECV.load(Ordering::Relaxed);
+            let ul_pkts = UL_PACKETS.load(Ordering::Relaxed);
+            let ul_bytes = UL_BYTES.load(Ordering::Relaxed);
+            
+            // Timing stats
+            let select_iters = SELECT_ITERATIONS.load(Ordering::Relaxed);
+            let dl_hits = DL_BRANCH_HITS.load(Ordering::Relaxed);
+            let ul_hits = UL_BRANCH_HITS.load(Ordering::Relaxed);
+            let dl_read_us = DL_TCP_READ_TIME_US.load(Ordering::Relaxed);
+            let dl_decode_us = DL_DECODE_TIME_US.load(Ordering::Relaxed);
+            let dl_cb_us = DL_CALLBACK_TIME_US.load(Ordering::Relaxed);
+            let ul_proc_us = UL_PROCESS_TIME_US.load(Ordering::Relaxed);
+            let ul_write_us = UL_WRITE_TIME_US.load(Ordering::Relaxed);
+            let max_read = DL_MAX_READ_BYTES.load(Ordering::Relaxed);
+            let max_drain = UL_MAX_DRAIN_COUNT.load(Ordering::Relaxed);
+            
+            // Write queue stats
+            let wq_depth = WRITE_QUEUE_DEPTH.load(Ordering::Relaxed);
+            let wq_blocked = WRITE_QUEUE_BLOCKED.load(Ordering::Relaxed);
+            let tcp_writes = TCP_WRITES.load(Ordering::Relaxed);
+            let tcp_write_bytes = TCP_WRITE_BYTES.load(Ordering::Relaxed);
+            
+            let dl_mbps = (tcp_bytes as f64 * 8.0) / (5.0 * 1_000_000.0);
+            let ul_mbps = (ul_bytes as f64 * 8.0) / (5.0 * 1_000_000.0);
+            
+            // Log main throughput stats
+            log_msg(&callbacks, 1, &format!(
+                "[DL] TCP: {} reads, {:.1} Mbps, {} frames, {} cb | [UL] {} recv, {} pkts, {:.1} Mbps",
+                tcp_reads, dl_mbps, frames, cb_count, ul_recv, ul_pkts, ul_mbps
+            ));
+            
+            // Log deep timing stats
+            let avg_dl_read = if dl_hits > 0 { dl_read_us / dl_hits } else { 0 };
+            let avg_dl_decode = if dl_hits > 0 { dl_decode_us / dl_hits } else { 0 };
+            let avg_dl_cb = if cb_count > 0 { dl_cb_us / cb_count } else { 0 };
+            let avg_ul_proc = if ul_hits > 0 { ul_proc_us / ul_hits } else { 0 };
+            let avg_ul_write = if ul_hits > 0 { ul_write_us / ul_hits } else { 0 };
+            
+            log_msg(&callbacks, 1, &format!(
+                "[TIMING] iters:{} DL:{} UL:{} | DL avg: read {}us, decode {}us, cb {}us | UL avg: proc {}us, write {}us",
+                select_iters, dl_hits, ul_hits, avg_dl_read, avg_dl_decode, avg_dl_cb, avg_ul_proc, avg_ul_write
+            ));
+            
+            log_msg(&callbacks, 1, &format!(
+                "[MAX] DL read: {} bytes | UL drain: {} msgs | WQ: depth {} blocked {} writes {} bytes {}",
+                max_read, max_drain, wq_depth, wq_blocked, tcp_writes, tcp_write_bytes
+            ));
+            
+            // Reset for next interval
+            DL_TCP_READS.store(0, Ordering::Relaxed);
+            DL_TCP_BYTES.store(0, Ordering::Relaxed);
+            DL_FRAMES_DECODED.store(0, Ordering::Relaxed);
+            DL_CALLBACKS.store(0, Ordering::Relaxed);
+            DL_CALLBACK_PACKETS.store(0, Ordering::Relaxed);
+            DL_CALLBACK_BYTES.store(0, Ordering::Relaxed);
+            UL_TX_RECV.store(0, Ordering::Relaxed);
+            UL_PACKETS.store(0, Ordering::Relaxed);
+            UL_BYTES.store(0, Ordering::Relaxed);
+            SELECT_ITERATIONS.store(0, Ordering::Relaxed);
+            DL_BRANCH_HITS.store(0, Ordering::Relaxed);
+            UL_BRANCH_HITS.store(0, Ordering::Relaxed);
+            DL_TCP_READ_TIME_US.store(0, Ordering::Relaxed);
+            DL_DECODE_TIME_US.store(0, Ordering::Relaxed);
+            DL_CALLBACK_TIME_US.store(0, Ordering::Relaxed);
+            UL_PROCESS_TIME_US.store(0, Ordering::Relaxed);
+            UL_WRITE_TIME_US.store(0, Ordering::Relaxed);
+            DL_MAX_READ_BYTES.store(0, Ordering::Relaxed);
+            UL_MAX_DRAIN_COUNT.store(0, Ordering::Relaxed);
+            WRITE_QUEUE_BLOCKED.store(0, Ordering::Relaxed);
+            TCP_WRITES.store(0, Ordering::Relaxed);
+            TCP_WRITE_BYTES.store(0, Ordering::Relaxed);
+            last_dl_stats_log = std::time::Instant::now();
+        }
+        
         // Check if we need to send keepalive (TCP)
         if last_keepalive.elapsed() >= Duration::from_secs(keepalive_interval_secs) {
             // Encrypt keepalive if RC4 is enabled
@@ -1636,140 +1789,27 @@ async fn run_packet_loop(
         }
 
         tokio::select! {
+            // BIASED with download FIRST - ensures TCP reads always get priority
+            // over upload sends. This prevents upload from starving download.
             biased;
 
-            // Packets from mobile app to send to VPN server
-            Some(frame_data) = tx_recv.recv() => {
-                let frames = parse_length_prefixed_packets(&frame_data);
-                if !frames.is_empty() {
-                    // Rewrite destination MAC to use learned gateway MAC if available
-                    let gateway_mac = arp.gateway_mac_or_broadcast();
-                    let mut modified_frames: Vec<Vec<u8>> = frames.into_iter().map(|mut frame| {
-                        if frame.len() >= 14 {
-                            // Replace destination MAC (first 6 bytes)
-                            frame[0..6].copy_from_slice(&gateway_mac);
-                        }
-                        frame
-                    }).collect();
-
-                    // QoS: Sort priority packets to front if enabled
-                    // This ensures VoIP/real-time packets are sent first
-                    if qos_enabled && modified_frames.len() > 1 {
-                        modified_frames.sort_by(|a, b| {
-                            let a_prio = is_priority_packet(a);
-                            let b_prio = is_priority_packet(b);
-                            // Priority packets (true) should come first
-                            b_prio.cmp(&a_prio)
-                        });
-                    }
-
-                    // Calculate bytes being sent for stats
-                    let total_bytes: usize = modified_frames.iter().map(|f| f.len()).sum();
-                    let packet_count = modified_frames.len() as u64;
-
-                    // Try UDP acceleration first if ready
-                    let mut sent_via_udp = false;
-                    if let Some(ref mut ua) = udp_accel {
-                        if ua.is_send_ready() {
-                            // Send each frame via UDP (no tunnel framing needed)
-                            for frame in &modified_frames {
-                                if let Err(e) = ua.send(frame, false).await {
-                                    log_msg(&callbacks, 2, &format!("UDP send failed: {e}"));
-                                    break;
-                                }
-                            }
-                            sent_via_udp = true;
-                        }
-                    }
-
-                    // Fallback to TCP if UDP not ready or not available
-                    if !sent_via_udp {
-                        // Compress frames if enabled
-                        let frames_to_encode: Vec<Vec<u8>> = if use_compress {
-                            modified_frames.iter().map(|f| {
-                                compress(f).unwrap_or_else(|_| f.clone())
-                            }).collect()
-                        } else {
-                            modified_frames
-                        };
-
-                        // Encode frames into tunnel format
-                        let encoded = tunnel_codec.encode(&frames_to_encode.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
-
-                        // Encrypt if RC4 is enabled, otherwise send as-is
-                        let to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
-                            let mut data = encoded.to_vec();
-                            enc.encrypt(&mut data);
-                            data
-                        } else {
-                            encoded.to_vec()
-                        };
-
-                        // Write to TCP - don't use timeout, let TCP flow control handle backpressure
-                        if let Err(e) = conn_mgr.write_all(&to_send).await {
-                            log_msg(&callbacks, 3, &format!("TX error: {e}"));
-                            return Err(crate::error::Error::Io(e));
-                        }
-                    }
-
-                    // Update send statistics
-                    stats.packets_sent.fetch_add(packet_count, Ordering::Relaxed);
-                    stats.bytes_sent.fetch_add(total_bytes as u64, Ordering::Relaxed);
-                }
-            }
-
-            // UDP receive (if UDP acceleration is available)
-            result = async {
-                if let Some(ref ua) = udp_accel {
-                    ua.try_recv().await
-                } else {
-                    // No UDP - just wait forever (will be cancelled by other branches)
-                    std::future::pending::<crate::error::Result<Option<(Vec<u8>, std::net::SocketAddr)>>>().await
-                }
-            } => {
-                if let Ok(Some((raw_data, src_addr))) = result {
-                    // Process the received UDP packet through the accelerator
-                    if let Some(ref mut ua) = udp_accel {
-                        if let Some((frame_data, _compressed)) = ua.process_recv(&raw_data, src_addr) {
-                            // Process ARP packets for gateway MAC learning
-                            if frame_data.len() >= 14 {
-                                let ethertype = u16::from_be_bytes([frame_data[12], frame_data[13]]);
-                                if ethertype == 0x0806 {
-                                    arp.process_arp(&frame_data);
-                                    if let Some(gw_mac) = arp.gateway_mac() {
-                                        if last_logged_gateway_mac != Some(*gw_mac) {
-                                            log_msg(&callbacks, 1, &format!(
-                                                "Learned gateway MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-                                                gw_mac[0], gw_mac[1], gw_mac[2], gw_mac[3], gw_mac[4], gw_mac[5]
-                                            ));
-                                            last_logged_gateway_mac = Some(*gw_mac);
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Update receive statistics
-                            stats.packets_received.fetch_add(1, Ordering::Relaxed);
-                            stats.bytes_received.fetch_add(frame_data.len() as u64, Ordering::Relaxed);
-
-                            // Reuse callback_buffer for UDP frames too
-                            callback_buffer.clear();
-                            let len = frame_data.len() as u16;
-                            callback_buffer.extend_from_slice(&len.to_be_bytes());
-                            callback_buffer.extend_from_slice(&frame_data);
-
-                            if let Some(cb) = callbacks.on_packets_received {
-                                cb(callbacks.context, callback_buffer.as_ptr(), callback_buffer.len(), 1);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Data from VPN server to send to mobile app (TCP)
-            result = tokio::time::timeout(Duration::from_millis(500), conn_mgr.read_any(&mut read_buf)) => {
+            // Data from VPN server to send to mobile app (TCP) - HIGHEST PRIORITY
+            result = conn_mgr.read_any(&mut read_buf) => {
+                let branch_start = std::time::Instant::now();
+                DL_BRANCH_HITS.fetch_add(1, Ordering::Relaxed);
+                
                 match result {
-                    Ok(Ok((_conn_idx, n))) if n > 0 => {
+                    Ok((_conn_idx, n)) if n > 0 => {
+                        // Track TCP read stats and max read size
+                        DL_TCP_READS.fetch_add(1, Ordering::Relaxed);
+                        DL_TCP_BYTES.fetch_add(n as u64, Ordering::Relaxed);
+                        let _ = DL_MAX_READ_BYTES.fetch_max(n as u64, Ordering::Relaxed);
+                        
+                        let read_time = branch_start.elapsed();
+                        DL_TCP_READ_TIME_US.fetch_add(read_time.as_micros() as u64, Ordering::Relaxed);
+                        
+                        let decode_start = std::time::Instant::now();
+                        
                         // Decrypt if RC4 is enabled
                         if let Some(ref mut enc) = encryption {
                             enc.decrypt(&mut read_buf[..n]);
@@ -1777,6 +1817,9 @@ async fn run_packet_loop(
 
                         match tunnel_codec.decode(&read_buf[..n]) {
                             Ok(frames) => {
+                            let decode_time = decode_start.elapsed();
+                            DL_DECODE_TIME_US.fetch_add(decode_time.as_micros() as u64, Ordering::Relaxed);
+                            
                             if !frames.is_empty() {
                                 // Reuse callback_buffer across iterations to reduce allocations
                                 callback_buffer.clear();
@@ -1835,10 +1878,17 @@ async fn run_packet_loop(
                                 // Update receive statistics
                                 stats.packets_received.fetch_add(packet_count, Ordering::Relaxed);
                                 stats.bytes_received.fetch_add(total_bytes, Ordering::Relaxed);
+                                DL_FRAMES_DECODED.fetch_add(packet_count, Ordering::Relaxed);
 
                                 if packet_count > 0 {
                                     if let Some(cb) = callbacks.on_packets_received {
+                                        let cb_start = std::time::Instant::now();
+                                        DL_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+                                        DL_CALLBACK_PACKETS.fetch_add(packet_count, Ordering::Relaxed);
+                                        DL_CALLBACK_BYTES.fetch_add(callback_buffer.len() as u64, Ordering::Relaxed);
                                         cb(callbacks.context, callback_buffer.as_ptr(), callback_buffer.len(), packet_count as u32);
+                                        let cb_time = cb_start.elapsed();
+                                        DL_CALLBACK_TIME_US.fetch_add(cb_time.as_micros() as u64, Ordering::Relaxed);
                                     }
                                 }
                             }
@@ -1848,19 +1898,219 @@ async fn run_packet_loop(
                             }
                         }
                     }
-                    Ok(Ok(_)) => {
+                    Ok(_) => {
                         log_msg(&callbacks, 2, "Connection closed by server");
                         break;
                     }
-                    Ok(Err(e)) => {
+                    Err(e) => {
                         log_msg(&callbacks, 3, &format!("Read error: {e}"));
                         return Err(crate::error::Error::Io(e));
                     }
-                    Err(_) => {
-                        // Timeout - this is normal, no need to log
+                }
+            }
+
+            // Packets from mobile app to send to VPN server - LOWER PRIORITY
+            // CRITICAL: Drain ALL pending messages to reduce select iterations
+            Some(first_frame_data) = tx_recv.recv() => {
+                let branch_start = std::time::Instant::now();
+                UL_BRANCH_HITS.fetch_add(1, Ordering::Relaxed);
+                
+                // Collect the first message plus all immediately available messages
+                let mut all_frames: Vec<Vec<u8>> = Vec::with_capacity(64);
+                let mut drain_count = 1u64;
+                
+                // Parse first message
+                all_frames.extend(parse_length_prefixed_packets(&first_frame_data));
+                
+                // Drain up to 63 more messages without blocking (total 64 max per iteration)
+                while drain_count < 64 {
+                    match tx_recv.try_recv() {
+                        Ok(frame_data) => {
+                            all_frames.extend(parse_length_prefixed_packets(&frame_data));
+                            drain_count += 1;
+                        }
+                        Err(_) => break, // Channel empty or disconnected
+                    }
+                }
+                
+                // Track max drain count
+                let _ = UL_MAX_DRAIN_COUNT.fetch_max(drain_count, Ordering::Relaxed);
+                
+                let proc_time = branch_start.elapsed();
+                UL_PROCESS_TIME_US.fetch_add(proc_time.as_micros() as u64, Ordering::Relaxed);
+                
+                UL_TX_RECV.fetch_add(drain_count, Ordering::Relaxed);
+                
+                if !all_frames.is_empty() {
+                    // Track upload stats
+                    let total_bytes: usize = all_frames.iter().map(|f| f.len()).sum();
+                    UL_PACKETS.fetch_add(all_frames.len() as u64, Ordering::Relaxed);
+                    UL_BYTES.fetch_add(total_bytes as u64, Ordering::Relaxed);
+                    
+                    // Rewrite destination MAC to use learned gateway MAC if available
+                    let gateway_mac = arp.gateway_mac_or_broadcast();
+                    let mut modified_frames: Vec<Vec<u8>> = all_frames.into_iter().map(|mut frame| {
+                        if frame.len() >= 14 {
+                            // Replace destination MAC (first 6 bytes)
+                            frame[0..6].copy_from_slice(&gateway_mac);
+                        }
+                        frame
+                    }).collect();
+
+                    // QoS: Sort priority packets to front if enabled
+                    // This ensures VoIP/real-time packets are sent first
+                    if qos_enabled && modified_frames.len() > 1 {
+                        modified_frames.sort_by(|a, b| {
+                            let a_prio = is_priority_packet(a);
+                            let b_prio = is_priority_packet(b);
+                            // Priority packets (true) should come first
+                            b_prio.cmp(&a_prio)
+                        });
+                    }
+
+                    // Calculate bytes being sent for stats
+                    let packet_count = modified_frames.len() as u64;
+
+                    // Try UDP acceleration first if ready
+                    let mut sent_via_udp = false;
+                    if let Some(ref mut ua) = udp_accel {
+                        if ua.is_send_ready() {
+                            // Send each frame via UDP (no tunnel framing needed)
+                            for frame in &modified_frames {
+                                if let Err(e) = ua.send(frame, false).await {
+                                    log_msg(&callbacks, 2, &format!("UDP send failed: {e}"));
+                                    break;
+                                }
+                            }
+                            sent_via_udp = true;
+                        }
+                    }
+
+                    // Fallback to TCP if UDP not ready or not available
+                    if !sent_via_udp {
+                        // Compress frames if enabled
+                        let frames_to_encode: Vec<Vec<u8>> = if use_compress {
+                            modified_frames.iter().map(|f| {
+                                compress(f).unwrap_or_else(|_| f.clone())
+                            }).collect()
+                        } else {
+                            modified_frames
+                        };
+
+                        // Encode frames into tunnel format
+                        let encoded = tunnel_codec.encode(&frames_to_encode.iter().map(|f| f.as_slice()).collect::<Vec<_>>());
+
+                        // Encrypt if RC4 is enabled, otherwise send as-is
+                        let to_send: Vec<u8> = if let Some(ref mut enc) = encryption {
+                            let mut data = encoded.to_vec();
+                            enc.encrypt(&mut data);
+                            data
+                        } else {
+                            encoded.to_vec()
+                        };
+
+                        // NON-BLOCKING: Queue data for async write instead of blocking here
+                        // This prevents upload from blocking TCP reads
+                        match write_tx.try_send(to_send) {
+                            Ok(_) => {
+                                WRITE_QUEUE_DEPTH.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(mpsc::error::TrySendError::Full(data)) => {
+                                // Queue full - apply backpressure by doing blocking send
+                                // This only happens when network is congested
+                                WRITE_QUEUE_BLOCKED.fetch_add(1, Ordering::Relaxed);
+                                if write_tx.send(data).await.is_err() {
+                                    log_msg(&callbacks, 2, "Write queue closed");
+                                    break;
+                                }
+                                WRITE_QUEUE_DEPTH.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                log_msg(&callbacks, 2, "Write queue closed");
+                                break;
+                            }
+                        }
+                        
+                        let proc_time = branch_start.elapsed();
+                        UL_PROCESS_TIME_US.fetch_add(proc_time.as_micros() as u64, Ordering::Relaxed);
+                    }
+
+                    // Update send statistics
+                    stats.packets_sent.fetch_add(packet_count, Ordering::Relaxed);
+                    stats.bytes_sent.fetch_add(total_bytes as u64, Ordering::Relaxed);
+                }
+            }
+            
+            // TCP write branch - drains the write queue and writes to TCP
+            // This runs independently of the upload processing branch
+            Some(data) = write_rx.recv(), if pending_write.is_none() => {
+                WRITE_QUEUE_DEPTH.fetch_sub(1, Ordering::Relaxed);
+                pending_write = Some(data);
+            }
+
+            // UDP receive (if UDP acceleration is available)
+            result = async {
+                if let Some(ref ua) = udp_accel {
+                    ua.try_recv().await
+                } else {
+                    // No UDP - just wait forever (will be cancelled by other branches)
+                    std::future::pending::<crate::error::Result<Option<(Vec<u8>, std::net::SocketAddr)>>>().await
+                }
+            } => {
+                if let Ok(Some((raw_data, src_addr))) = result {
+                    // Process the received UDP packet through the accelerator
+                    if let Some(ref mut ua) = udp_accel {
+                        if let Some((frame_data, _compressed)) = ua.process_recv(&raw_data, src_addr) {
+                            // Process ARP packets for gateway MAC learning
+                            if frame_data.len() >= 14 {
+                                let ethertype = u16::from_be_bytes([frame_data[12], frame_data[13]]);
+                                if ethertype == 0x0806 {
+                                    arp.process_arp(&frame_data);
+                                    if let Some(gw_mac) = arp.gateway_mac() {
+                                        if last_logged_gateway_mac != Some(*gw_mac) {
+                                            log_msg(&callbacks, 1, &format!(
+                                                "Learned gateway MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                                                gw_mac[0], gw_mac[1], gw_mac[2], gw_mac[3], gw_mac[4], gw_mac[5]
+                                            ));
+                                            last_logged_gateway_mac = Some(*gw_mac);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Update receive statistics
+                            stats.packets_received.fetch_add(1, Ordering::Relaxed);
+                            stats.bytes_received.fetch_add(frame_data.len() as u64, Ordering::Relaxed);
+
+                            // Reuse callback_buffer for UDP frames too
+                            callback_buffer.clear();
+                            let len = frame_data.len() as u16;
+                            callback_buffer.extend_from_slice(&len.to_be_bytes());
+                            callback_buffer.extend_from_slice(&frame_data);
+
+                            if let Some(cb) = callbacks.on_packets_received {
+                                cb(callbacks.context, callback_buffer.as_ptr(), callback_buffer.len(), 1);
+                            }
+                        }
                     }
                 }
             }
+        }
+        
+        // Handle pending TCP write - this happens after select returns
+        // Write one chunk at a time to interleave with reads
+        if let Some(data) = pending_write.take() {
+            let write_start = std::time::Instant::now();
+            
+            if let Err(e) = conn_mgr.write_all(&data).await {
+                log_msg(&callbacks, 3, &format!("TX error: {e}"));
+                return Err(crate::error::Error::Io(e));
+            }
+            
+            let write_time = write_start.elapsed();
+            UL_WRITE_TIME_US.fetch_add(write_time.as_micros() as u64, Ordering::Relaxed);
+            TCP_WRITES.fetch_add(1, Ordering::Relaxed);
+            TCP_WRITE_BYTES.fetch_add(data.len() as u64, Ordering::Relaxed);
         }
     }
 

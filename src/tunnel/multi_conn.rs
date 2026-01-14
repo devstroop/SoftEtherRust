@@ -3,8 +3,14 @@
 //! This module contains the packet forwarding loop for half-connection mode
 //! with multiple TCP connections (receive-only + bidirectional).
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+// Download statistics for performance debugging
+static DL_READS: AtomicU64 = AtomicU64::new(0);
+static DL_BYTES: AtomicU64 = AtomicU64::new(0);
+static DL_FRAMES: AtomicU64 = AtomicU64::new(0);
+static DL_TUN_WRITES: AtomicU64 = AtomicU64::new(0);
 
 use tokio::sync::mpsc;
 use tokio::time::interval;
@@ -71,7 +77,8 @@ impl TunnelRunner {
         }
 
         // Buffer for reading from bidirectional connections
-        let mut bidir_read_buf = vec![0u8; 8192];
+        // 128KB to batch multiple TLS records (each max 16KB)
+        let mut bidir_read_buf = vec![0u8; 131072];
 
         let mut send_buf = vec![0u8; 4096];
         let mut comp_buf = vec![0u8; 4096]; // Pre-allocated buffer for compression
@@ -149,11 +156,35 @@ impl TunnelRunner {
         let our_ip = dhcp_config.ip;
         let use_compress = self.config.use_compress;
         let my_mac = self.mac;
+        
+        // Stats logging interval
+        let mut last_stats_log = Instant::now();
+        let stats_log_interval = Duration::from_secs(2);
 
         while self.running.load(Ordering::SeqCst) {
+            // Log download stats every 2 seconds
+            if last_stats_log.elapsed() >= stats_log_interval {
+                let reads = DL_READS.swap(0, Ordering::Relaxed);
+                let bytes = DL_BYTES.swap(0, Ordering::Relaxed);
+                let frames = DL_FRAMES.swap(0, Ordering::Relaxed);
+                let tun_writes = DL_TUN_WRITES.swap(0, Ordering::Relaxed);
+                
+                if reads > 0 || bytes > 0 {
+                    let avg_bytes = if reads > 0 { bytes / reads } else { 0 };
+                    let mbps = (bytes * 8) as f64 / 2_000_000.0;
+                    info!("[DL-MULTI] reads={} bytes={} frames={} tunWrites={} | avgBytes={} mbps={:.1}", 
+                          reads, bytes, frames, tun_writes, avg_bytes, mbps);
+                }
+                last_stats_log = Instant::now();
+            }
+            
             // Helper macro to process received VPN data
             macro_rules! process_vpn_data {
-                ($conn_idx:expr, $data:expr) => {{
+                ($conn_idx:expr, $data:expr, $data_len:expr) => {{
+                    // Track stats for this read
+                    DL_READS.fetch_add(1, Ordering::Relaxed);
+                    DL_BYTES.fetch_add($data_len as u64, Ordering::Relaxed);
+                    
                     match codecs.get_mut($conn_idx).map(|c| c.feed($data)) {
                         Some(Ok(frames)) => {
                             for frame in frames {
@@ -163,6 +194,7 @@ impl TunnelRunner {
                                 }
 
                                 if let Some(packets) = frame.packets() {
+                                    DL_FRAMES.fetch_add(packets.len() as u64, Ordering::Relaxed);
                                     for packet in packets {
                                         let frame_data: &[u8] = if is_compressed(packet) {
                                             match decompress_into(packet, &mut decomp_buf) {
@@ -173,6 +205,7 @@ impl TunnelRunner {
                                             packet
                                         };
 
+                                        DL_TUN_WRITES.fetch_add(1, Ordering::Relaxed);
                                         if let Err(e) = self.process_frame_zerocopy(
                                             tun_fd,
                                             &mut tun_write_buf,
@@ -229,8 +262,7 @@ impl TunnelRunner {
             };
 
             tokio::select! {
-                // Biased: prioritize data paths over timers to minimize latency
-                biased;
+                // NOT biased - fair polling ensures download isn't starved by upload ACKs
 
                 // Packet from TUN device (from local applications)
                 Some((len, tun_buf)) = tun_rx.recv() => {
@@ -321,9 +353,10 @@ impl TunnelRunner {
                 // ConcurrentReader handles per-connection decryption internally
                 Some(packet) = concurrent_recv => {
                     let conn_idx = packet.conn_index;
+                    let data_len = packet.data.len();
                     // Data is already decrypted by ConcurrentReader's per-connection cipher
                     // Use &[u8] deref directly - Bytes implements Deref<Target=[u8]>
-                    process_vpn_data!(conn_idx, &packet.data[..]);
+                    process_vpn_data!(conn_idx, &packet.data[..], data_len);
                 }
 
                 // Data from bidirectional connections (direct read with per-conn decryption)
@@ -332,7 +365,7 @@ impl TunnelRunner {
                         if n > 0 {
                             // Data is already decrypted by read_any_decrypt
                             let data = &bidir_read_buf[..n];
-                            process_vpn_data!(conn_idx, data);
+                            process_vpn_data!(conn_idx, data, n);
                         }
                     }
                 }
@@ -407,7 +440,8 @@ impl TunnelRunner {
         };
 
         let mut codecs: Vec<TunnelCodec> = (0..total_conns).map(|_| TunnelCodec::new()).collect();
-        let mut bidir_read_buf = vec![0u8; 8192];
+        // 128KB buffer to batch multiple TLS records
+        let mut bidir_read_buf = vec![0u8; 131072];
         let mut send_buf = vec![0u8; 4096];
         let mut comp_buf = vec![0u8; 4096]; // Pre-allocated buffer for compression
         let mut decomp_buf = vec![0u8; 4096];
@@ -530,7 +564,7 @@ impl TunnelRunner {
             };
 
             tokio::select! {
-                biased;
+                // NOT biased - fair polling ensures download isn't starved
 
                 Some(ip_packet) = tun_rx.recv() => {
                     if ip_packet.is_empty() {
