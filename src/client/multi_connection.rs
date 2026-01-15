@@ -777,6 +777,7 @@ impl ConnectionManager {
         let idx = recv_indices[self.recv_index];
 
         let conn = &mut self.connections[idx];
+        // Simple read - let TCP/TLS handle buffering
         let n = conn.conn.read(buf).await?;
         if n > 0 {
             // Decrypt with this connection's own cipher state

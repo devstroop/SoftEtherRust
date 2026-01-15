@@ -264,37 +264,59 @@ socket.set_nodelay(true)?;
 
 ### PERF-12: Multiple Download Buffering Layers (iOS)
 **Severity:** 🔴 Critical  
-**Location:** `src/ffi/client.rs`, `WorxVPNTunnel/SoftEtherBridge.swift`  
+**Location:** `src/ffi/client.rs:1562-1569`, `WorxVPNTunnel/SoftEtherBridge.swift:490-567`  
 **Impact:** +500-2000ms latency on iOS  
 **Status:** Open
 
-Download path has **4 buffering points**:
+Download path has **5+ buffering points** (compare to C's 1):
 
-1. **Rust read_buf** (128KB) - client.rs L1514
-2. **callback_buffer** (65KB) - client.rs L1516
-3. **Swift PacketBuffer** (8 batches max) - SoftEtherBridge.swift
-4. **iOS packetFlow** - kernel buffer
+| # | Buffer | Size | Location | Latency Added |
+|---|--------|------|----------|---------------|
+| 1 | `read_buf` | 128KB | client.rs:1562 | Needed |
+| 2 | `callback_buffer` | 65KB | client.rs:1564 | **+copy** |
+| 3 | `write_tx` channel | 64 slots | client.rs:1569 | **+240ms** |
+| 4 | Swift `PacketBuffer` | 8 batches | SoftEtherBridge.swift:490 | **+500-2000ms** |
+| 5 | `DispatchQueue.async` | unbounded | SoftEtherBridge.swift:567 | **+async hop** |
+| 6 | `packetFlow` | kernel | iOS | Needed |
 
-Each layer adds latency. The Swift PacketBuffer is particularly problematic:
-
+**Swift PacketBuffer (SoftEtherBridge.swift:490-530):**
 ```swift
-// Adds async queue on already-async path
-packetBuffer.enqueue(batch: packets)  // Up to 8 batches buffered!
+private class PacketBuffer {
+    private var pendingPackets: [[Data]] = []
+    private let maxPendingBatches = 8  // Up to 8 batches queued!
+    
+    func enqueue(_ packets: [Data], callback: @escaping ([Data]) -> Void) {
+        queue.async { [self] in  // ← ASYNC HOP adds latency
+            pendingPackets.append(packets)
+            // ...
+        }
+    }
+}
 ```
 
-**Fix:** Remove PacketBuffer, write directly to TUN in callback (sync path).
+**Compare to C (Session.c:369):**
+```c
+// Direct kernel call - NO intermediate buffering
+while ((b = GetNext(c->ReceivedBlocks)) != NULL) {
+    pa->PutPacket(s, b->Buf, b->Size);  // Synchronous write
+    FreeBlock(b);
+}
+```
+
+**Fix:** Remove PacketBuffer entirely, write directly to TUN in callback (sync path).
 
 ---
 
 ### PERF-13: Async Write After Select
 **Severity:** 🟠 High  
-**Location:** `src/ffi/client.rs` L2100-2114  
+**Location:** `src/ffi/client.rs:2100-2114`  
 **Impact:** Head-of-line blocking, variable latency  
 **Status:** Open
 
 TCP writes happen *after* the select loop:
 
 ```rust
+// client.rs:2100-2114
 // Handle pending TCP write - this happens AFTER select returns
 if let Some(data) = pending_write.take() {
     conn_mgr.write_all(&data).await;  // Blocks next iteration!
@@ -309,7 +331,7 @@ if let Some(data) = pending_write.take() {
 
 ### PERF-14: Per-Frame Allocation in Hot Path
 **Severity:** 🟠 High  
-**Location:** `src/ffi/client.rs` L1762-1777  
+**Location:** `src/ffi/client.rs:1840`  
 **Impact:** -15% throughput, GC pressure  
 **Status:** Open
 
@@ -336,7 +358,7 @@ var recv_scratch: [512 * 1600]u8 = undefined;  // Stack, reused
 
 ### PERF-15: Biased Select Causes UL/DL Contention ⚠️ ROOT CAUSE
 **Severity:** 🔴 Critical  
-**Location:** `src/ffi/client.rs` L1661-1680  
+**Location:** `src/ffi/client.rs:1790`  
 **Impact:** Upload/download starve each other - one works, other breaks  
 **Status:** Open - **FIX THIS FIRST**
 
@@ -382,13 +404,15 @@ Select(&set, time, c1, c2);  // Uses select() not tokio::select!
 
 ### PERF-16: Callback Buffer Intermediate Copy
 **Severity:** 🟡 Medium  
-**Location:** `src/ffi/client.rs` L1516, L1795-1800  
+**Location:** `src/ffi/client.rs:1564`, `client.rs:1880-1890`  
 **Impact:** Extra memory copy per callback  
 **Status:** Open
 
 ```rust
+// client.rs:1564
 let mut callback_buffer = Vec::with_capacity(65536);
-// ... later ...
+
+// client.rs:1880-1890
 callback_buffer.extend_from_slice(&len.to_be_bytes());
 callback_buffer.extend_from_slice(frame_slice);
 ```
@@ -399,7 +423,7 @@ Frames are copied into callback_buffer before being passed to Swift. Could pass 
 
 ### ARCH-1: SoftEtherBridge Layer Redundancy
 **Severity:** 🟡 Medium  
-**Location:** `WorxVPNTunnel/SoftEtherBridge.swift`  
+**Location:** `WorxVPNTunnel/SoftEtherBridge.swift:490-700`  
 **Impact:** Unnecessary complexity, contributes to buffering issues  
 **Status:** Open
 
@@ -478,7 +502,7 @@ TLS Read → channelRead → onBatchReceived callback → TUN Write
 
 ---
 
-## �🐛 Issues
+## 🐛 Other Issues
 
 ### High Severity
 

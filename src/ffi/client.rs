@@ -1567,7 +1567,9 @@ async fn run_packet_loop(
 
     // Create async write queue - upload path pushes here, separate branch writes to TCP
     // This decouples upload processing from TCP write blocking
-    let (write_tx, mut write_rx) = mpsc::channel::<Vec<u8>>(64);
+    // Reduced from 64 to 4 slots to minimize bufferbloat - backpressure kicks in earlier
+    // At ~24KB avg frame size: 4 slots = ~96KB max buffered = ~15ms at 50Mbps (was ~240ms)
+    let (write_tx, mut write_rx) = mpsc::channel::<Vec<u8>>(4);
     static WRITE_QUEUE_DEPTH: AtomicU64 = AtomicU64::new(0);
     static WRITE_QUEUE_BLOCKED: AtomicU64 = AtomicU64::new(0);
     static TCP_WRITES: AtomicU64 = AtomicU64::new(0);
@@ -1789,11 +1791,12 @@ async fn run_packet_loop(
         }
 
         tokio::select! {
-            // BIASED with download FIRST - ensures TCP reads always get priority
-            // over upload sends. This prevents upload from starving download.
-            biased;
+            // FAIR scheduling (no biased) - lets tokio randomly pick between ready branches
+            // This prevents the seesaw behavior where one direction starves the other.
+            // Matches the fair I/O multiplexing pattern used by official SoftEther C code
+            // which uses select()/poll() to fairly handle all sockets.
 
-            // Data from VPN server to send to mobile app (TCP) - HIGHEST PRIORITY
+            // Data from VPN server to send to mobile app (TCP download)
             result = conn_mgr.read_any(&mut read_buf) => {
                 let branch_start = std::time::Instant::now();
                 DL_BRANCH_HITS.fetch_add(1, Ordering::Relaxed);

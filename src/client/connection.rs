@@ -279,6 +279,13 @@ impl VpnConnection {
         // Set TCP options
         stream.set_nodelay(true)?;
 
+        // Increase receive buffer to allow TCP data to accumulate
+        // This reduces the number of small reads and improves throughput
+        let sock_ref = SockRef::from(&stream);
+        if let Err(e) = sock_ref.set_recv_buffer_size(256 * 1024) {
+            debug!("Failed to set SO_RCVBUF: {} (using default)", e);
+        }
+
         // Enable TCP keepalive to prevent NAT timeouts
         // This is critical for mobile networks where NAT mappings can expire quickly
         let sock_ref = SockRef::from(&stream);
@@ -356,9 +363,14 @@ impl VpnConnection {
         // Set TCP options
         stream.set_nodelay(true)?;
 
+        // Increase receive buffer to allow TCP data to accumulate
+        let sock_ref = SockRef::from(&stream);
+        if let Err(e) = sock_ref.set_recv_buffer_size(256 * 1024) {
+            debug!("Failed to set SO_RCVBUF: {} (using default)", e);
+        }
+
         // Enable TCP keepalive to prevent NAT timeouts
         // This is critical for mobile networks where NAT mappings can expire quickly
-        let sock_ref = SockRef::from(&stream);
         let keepalive = TcpKeepalive::new()
             .with_time(Duration::from_secs(10)) // Start keepalive probes after 10s idle
             .with_interval(Duration::from_secs(5)); // Send probes every 5s
@@ -409,6 +421,64 @@ impl VpnConnection {
             VpnConnection::Plain(stream) => stream.read(buf).await,
             VpnConnection::Tls(stream) => stream.read(buf).await,
         }
+    }
+
+    /// Read data from the connection, draining all immediately available data.
+    /// This helps batch small TCP segments into larger reads for better throughput.
+    /// Uses poll to check if more data is ready without blocking.
+    pub async fn read_drain(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        use std::future::poll_fn;
+        use std::pin::Pin;
+        use std::task::Poll;
+        use tokio::io::AsyncRead;
+
+        // First read - this one blocks until data arrives
+        let mut total = self.read(buf).await?;
+        if total == 0 || total >= buf.len() {
+            return Ok(total);
+        }
+
+        // Try to drain any additional immediately available data (non-blocking)
+        // This batches small TCP segments into larger reads
+        loop {
+            let remaining = &mut buf[total..];
+            if remaining.is_empty() {
+                break;
+            }
+
+            let result = poll_fn(|cx| {
+                let pinned = match self {
+                    VpnConnection::Plain(stream) => {
+                        let mut pinned = Pin::new(stream);
+                        let mut read_buf = tokio::io::ReadBuf::new(remaining);
+                        match pinned.as_mut().poll_read(cx, &mut read_buf) {
+                            Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+                            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                            Poll::Pending => Poll::Ready(Ok(0)), // No more data ready
+                        }
+                    }
+                    VpnConnection::Tls(stream) => {
+                        let mut pinned = Pin::new(stream);
+                        let mut read_buf = tokio::io::ReadBuf::new(remaining);
+                        match pinned.as_mut().poll_read(cx, &mut read_buf) {
+                            Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+                            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                            Poll::Pending => Poll::Ready(Ok(0)), // No more data ready
+                        }
+                    }
+                };
+                pinned
+            })
+            .await;
+
+            match result {
+                Ok(0) => break,  // No more data immediately available
+                Ok(n) => total += n,
+                Err(_) => break, // Error - return what we have
+            }
+        }
+
+        Ok(total)
     }
 
     /// Write data to the connection.

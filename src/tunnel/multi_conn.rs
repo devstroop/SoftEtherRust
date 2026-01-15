@@ -105,7 +105,9 @@ impl TunnelRunner {
         let mut last_activity = Instant::now();
 
         // Zero-copy TUN reader using fixed buffer
-        let (tun_tx, mut tun_rx) = mpsc::channel::<(usize, [u8; 2048])>(256);
+        // 8 slots balances latency vs throughput - enough buffer without adding delay
+        // 64 slots: enough buffer for upload bursts without adding latency
+        let (tun_tx, mut tun_rx) = mpsc::channel::<(usize, [u8; 2048])>(64);
         let tun_fd = tun.raw_fd();
         let running = self.running.clone();
 
@@ -265,85 +267,76 @@ impl TunnelRunner {
                 // NOT biased - fair polling ensures download isn't starved by upload ACKs
 
                 // Packet from TUN device (from local applications)
+                // Process up to 16 packets per iteration to batch uploads
                 Some((len, tun_buf)) = tun_rx.recv() => {
+                    // Process first packet inline
                     #[cfg(target_os = "macos")]
                     let ip_packet = &tun_buf[4..len];
                     #[cfg(target_os = "linux")]
                     let ip_packet = &tun_buf[..len];
 
-                    if ip_packet.is_empty() {
-                        continue;
-                    }
-
-                    let gateway_mac = arp.gateway_mac_or_broadcast();
-
-                    // Build tunnel frame
-                    let eth_len = 14 + ip_packet.len();
-                    let total_len = 8 + eth_len;
-
-                    if total_len > send_buf.len() {
-                        warn!("Packet too large: {}", ip_packet.len());
-                        continue;
-                    }
-
-                    let ip_version = (ip_packet[0] >> 4) & 0x0F;
-                    if ip_version != 4 && ip_version != 6 {
-                        continue;
-                    }
-
-                    if use_compress {
-                        // Compression path
-                        let eth_start = 8;
-                        send_buf[eth_start..eth_start + 6].copy_from_slice(&gateway_mac);
-                        send_buf[eth_start + 6..eth_start + 12].copy_from_slice(&my_mac);
-                        if ip_version == 4 {
-                            send_buf[eth_start + 12] = 0x08;
-                            send_buf[eth_start + 13] = 0x00;
-                        } else {
-                            send_buf[eth_start + 12] = 0x86;
-                            send_buf[eth_start + 13] = 0xDD;
-                        }
-                        send_buf[eth_start + 14..eth_start + 14 + ip_packet.len()]
-                            .copy_from_slice(ip_packet);
-
-                        let eth_frame = &send_buf[eth_start..eth_start + eth_len];
-
-                        match compress_into(eth_frame, &mut comp_buf) {
-                            Ok(comp_len) => {
-                                let comp_total = 8 + comp_len;
-                                if comp_total <= send_buf.len() {
-                                    send_buf[0..4].copy_from_slice(&1u32.to_be_bytes());
-                                    send_buf[4..8].copy_from_slice(&(comp_len as u32).to_be_bytes());
-                                    send_buf[8..8 + comp_len].copy_from_slice(&comp_buf[..comp_len]);
-                                    // Use per-connection encryption via ConnectionManager
-                                    conn_mgr.write_all_encrypted(&mut send_buf[..comp_total]).await?;
-                                }
-                            }
-                            Err(e) => {
-                                warn!("Compression failed: {}", e);
+                    if !ip_packet.is_empty() {
+                        let ip_version = (ip_packet[0] >> 4) & 0x0F;
+                        if ip_version == 4 || ip_version == 6 {
+                            let gateway_mac = arp.gateway_mac_or_broadcast();
+                            let eth_len = 14 + ip_packet.len();
+                            let total_len = 8 + eth_len;
+                            if total_len <= send_buf.len() {
                                 send_buf[0..4].copy_from_slice(&1u32.to_be_bytes());
                                 send_buf[4..8].copy_from_slice(&(eth_len as u32).to_be_bytes());
-                                // Use per-connection encryption via ConnectionManager
+                                send_buf[8..14].copy_from_slice(&gateway_mac);
+                                send_buf[14..20].copy_from_slice(&my_mac);
+                                if ip_version == 4 {
+                                    send_buf[20] = 0x08;
+                                    send_buf[21] = 0x00;
+                                } else {
+                                    send_buf[20] = 0x86;
+                                    send_buf[21] = 0xDD;
+                                }
+                                send_buf[22..22 + ip_packet.len()].copy_from_slice(ip_packet);
                                 conn_mgr.write_all_encrypted(&mut send_buf[..total_len]).await?;
                             }
                         }
-                    } else {
-                        // Uncompressed path
-                        send_buf[0..4].copy_from_slice(&1u32.to_be_bytes());
-                        send_buf[4..8].copy_from_slice(&(eth_len as u32).to_be_bytes());
-                        send_buf[8..14].copy_from_slice(&gateway_mac);
-                        send_buf[14..20].copy_from_slice(&my_mac);
-                        if ip_version == 4 {
-                            send_buf[20] = 0x08;
-                            send_buf[21] = 0x00;
-                        } else {
-                            send_buf[20] = 0x86;
-                            send_buf[21] = 0xDD;
-                        }
-                        send_buf[22..22 + ip_packet.len()].copy_from_slice(ip_packet);
+                    }
 
-                        // Use per-connection encryption via ConnectionManager
-                        conn_mgr.write_all_encrypted(&mut send_buf[..total_len]).await?;
+                    // Batch: drain up to 15 more packets without yielding
+                    for _ in 0..15 {
+                        match tun_rx.try_recv() {
+                            Ok((len, tun_buf)) => {
+                                #[cfg(target_os = "macos")]
+                                let ip_packet = &tun_buf[4..len];
+                                #[cfg(target_os = "linux")]
+                                let ip_packet = &tun_buf[..len];
+
+                                if ip_packet.is_empty() {
+                                    continue;
+                                }
+                                let ip_version = (ip_packet[0] >> 4) & 0x0F;
+                                if ip_version != 4 && ip_version != 6 {
+                                    continue;
+                                }
+                                let gateway_mac = arp.gateway_mac_or_broadcast();
+                                let eth_len = 14 + ip_packet.len();
+                                let total_len = 8 + eth_len;
+                                if total_len > send_buf.len() {
+                                    continue;
+                                }
+                                send_buf[0..4].copy_from_slice(&1u32.to_be_bytes());
+                                send_buf[4..8].copy_from_slice(&(eth_len as u32).to_be_bytes());
+                                send_buf[8..14].copy_from_slice(&gateway_mac);
+                                send_buf[14..20].copy_from_slice(&my_mac);
+                                if ip_version == 4 {
+                                    send_buf[20] = 0x08;
+                                    send_buf[21] = 0x00;
+                                } else {
+                                    send_buf[20] = 0x86;
+                                    send_buf[21] = 0xDD;
+                                }
+                                send_buf[22..22 + ip_packet.len()].copy_from_slice(ip_packet);
+                                conn_mgr.write_all_encrypted(&mut send_buf[..total_len]).await?;
+                            }
+                            Err(_) => break, // No more packets ready
+                        }
                     }
 
                     last_activity = Instant::now();
@@ -464,7 +457,9 @@ impl TunnelRunner {
         let mut keepalive_interval = interval(Duration::from_secs(self.config.keepalive_interval));
         let mut last_activity = Instant::now();
 
-        let (tun_tx, mut tun_rx) = mpsc::channel::<Vec<u8>>(256);
+        // 8 slots balances latency vs throughput - enough buffer without adding delay
+        // 64 slots: enough buffer for upload bursts without adding latency
+        let (tun_tx, mut tun_rx) = mpsc::channel::<Vec<u8>>(64);
         let session = tun.session();
         let running = self.running.clone();
 
@@ -566,59 +561,23 @@ impl TunnelRunner {
             tokio::select! {
                 // NOT biased - fair polling ensures download isn't starved
 
+                // Packet from TUN - batch up to 16 packets per iteration
                 Some(ip_packet) = tun_rx.recv() => {
-                    if ip_packet.is_empty() {
-                        continue;
-                    }
-
-                    let gateway_mac = arp.gateway_mac_or_broadcast();
-                    let eth_len = 14 + ip_packet.len();
-                    let total_len = 8 + eth_len;
-
-                    if total_len > send_buf.len() {
-                        warn!("Packet too large: {}", ip_packet.len());
-                        continue;
-                    }
-
-                    let ip_version = (ip_packet[0] >> 4) & 0x0F;
-                    if ip_version != 4 && ip_version != 6 {
-                        continue;
-                    }
-
-                    if use_compress {
-                        let eth_start = 8;
-                        send_buf[eth_start..eth_start + 6].copy_from_slice(&gateway_mac);
-                        send_buf[eth_start + 6..eth_start + 12].copy_from_slice(&my_mac);
-                        if ip_version == 4 {
-                            send_buf[eth_start + 12] = 0x08;
-                            send_buf[eth_start + 13] = 0x00;
-                        } else {
-                            send_buf[eth_start + 12] = 0x86;
-                            send_buf[eth_start + 13] = 0xDD;
+                    // Helper to send one packet
+                    let mut send_one = |ip_packet: &[u8]| -> Option<usize> {
+                        if ip_packet.is_empty() {
+                            return None;
                         }
-                        send_buf[eth_start + 14..eth_start + 14 + ip_packet.len()]
-                            .copy_from_slice(&ip_packet);
-
-                        let eth_frame = &send_buf[eth_start..eth_start + eth_len];
-
-                        match compress_into(eth_frame, &mut comp_buf) {
-                            Ok(comp_len) => {
-                                let comp_total = 8 + comp_len;
-                                if comp_total <= send_buf.len() {
-                                    send_buf[0..4].copy_from_slice(&1u32.to_be_bytes());
-                                    send_buf[4..8].copy_from_slice(&(comp_len as u32).to_be_bytes());
-                                    send_buf[8..8 + comp_len].copy_from_slice(&comp_buf[..comp_len]);
-                                    conn_mgr.write_all_encrypted(&mut send_buf[..comp_total]).await?;
-                                }
-                            }
-                            Err(e) => {
-                                warn!("Compression failed: {}", e);
-                                send_buf[0..4].copy_from_slice(&1u32.to_be_bytes());
-                                send_buf[4..8].copy_from_slice(&(eth_len as u32).to_be_bytes());
-                                conn_mgr.write_all_encrypted(&mut send_buf[..total_len]).await?;
-                            }
+                        let gateway_mac = arp.gateway_mac_or_broadcast();
+                        let eth_len = 14 + ip_packet.len();
+                        let total_len = 8 + eth_len;
+                        if total_len > send_buf.len() {
+                            return None;
                         }
-                    } else {
+                        let ip_version = (ip_packet[0] >> 4) & 0x0F;
+                        if ip_version != 4 && ip_version != 6 {
+                            return None;
+                        }
                         send_buf[0..4].copy_from_slice(&1u32.to_be_bytes());
                         send_buf[4..8].copy_from_slice(&(eth_len as u32).to_be_bytes());
                         send_buf[8..14].copy_from_slice(&gateway_mac);
@@ -630,9 +589,25 @@ impl TunnelRunner {
                             send_buf[20] = 0x86;
                             send_buf[21] = 0xDD;
                         }
-                        send_buf[22..22 + ip_packet.len()].copy_from_slice(&ip_packet);
+                        send_buf[22..22 + ip_packet.len()].copy_from_slice(ip_packet);
+                        Some(total_len)
+                    };
 
+                    // Process first packet
+                    if let Some(total_len) = send_one(&ip_packet) {
                         conn_mgr.write_all_encrypted(&mut send_buf[..total_len]).await?;
+                    }
+
+                    // Batch: drain up to 15 more without yielding
+                    for _ in 0..15 {
+                        match tun_rx.try_recv() {
+                            Ok(ip_packet) => {
+                                if let Some(total_len) = send_one(&ip_packet) {
+                                    conn_mgr.write_all_encrypted(&mut send_buf[..total_len]).await?;
+                                }
+                            }
+                            Err(_) => break,
+                        }
                     }
 
                     last_activity = Instant::now();

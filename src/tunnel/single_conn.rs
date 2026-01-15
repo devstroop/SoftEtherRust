@@ -95,7 +95,9 @@ impl TunnelRunner {
         let mut last_activity = Instant::now();
 
         // Zero-copy TUN reader using fixed buffer
-        let (tun_tx, mut tun_rx) = mpsc::channel::<(usize, [u8; 2048])>(256);
+        // 8 slots balances latency vs throughput - enough buffer without adding delay
+        // 64 slots: enough buffer for upload bursts without adding latency
+        let (tun_tx, mut tun_rx) = mpsc::channel::<(usize, [u8; 2048])>(64);
         let tun_fd = tun.raw_fd();
         let running = self.running.clone();
 
@@ -142,7 +144,9 @@ impl TunnelRunner {
 
         while self.running.load(Ordering::SeqCst) {
             tokio::select! {
-                biased;
+                // FAIR scheduling - no biased. Matches official SoftEther C code
+                // which uses select()/poll() for fair I/O multiplexing.
+                // Prevents upload/download seesaw behavior.
 
                 Some((len, tun_buf)) = tun_rx.recv() => {
                     #[cfg(target_os = "macos")]
@@ -338,7 +342,9 @@ impl TunnelRunner {
         let mut keepalive_interval = interval(Duration::from_secs(self.config.keepalive_interval));
         let mut last_activity = Instant::now();
 
-        let (tun_tx, mut tun_rx) = mpsc::channel::<Vec<u8>>(256);
+        // 8 slots balances latency vs throughput - enough buffer without adding delay
+        // 64 slots: enough buffer for upload bursts without adding latency
+        let (tun_tx, mut tun_rx) = mpsc::channel::<Vec<u8>>(64);
         let session = tun.session();
         let running = self.running.clone();
 
@@ -389,7 +395,9 @@ impl TunnelRunner {
 
         while self.running.load(Ordering::SeqCst) {
             tokio::select! {
-                biased;
+                // FAIR scheduling - no biased. Matches official SoftEther C code
+                // which uses select()/poll() for fair I/O multiplexing.
+                // Prevents upload/download seesaw behavior.
 
                 Some(ip_packet) = tun_rx.recv() => {
                     if ip_packet.is_empty() {
