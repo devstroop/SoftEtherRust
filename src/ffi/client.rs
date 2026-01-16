@@ -1204,22 +1204,37 @@ async fn connect_redirect(
     let request_bytes = request.build(&host);
 
     log_msg(callbacks, 1, "Sending ticket authentication");
-    conn.write_all(&request_bytes).await?;
+    if let Err(e) = conn.write_all(&request_bytes).await {
+        log_msg(callbacks, 3, &format!("Failed to send ticket auth: {e}"));
+        return Err(e.into());
+    }
+    log_msg(callbacks, 1, "Ticket auth sent, waiting for response...");
 
     // Read response
     let mut codec = HttpCodec::new();
     let mut buf = vec![0u8; 8192];
 
     loop {
-        let n = conn.read(&mut buf).await?;
+        let n = match conn.read(&mut buf).await {
+            Ok(n) => n,
+            Err(e) => {
+                log_msg(callbacks, 3, &format!("Failed to read redirect auth response: {e}"));
+                return Err(e.into());
+            }
+        };
         if n == 0 {
+            log_msg(callbacks, 3, "Connection closed during redirect auth (read returned 0)");
             return Err(crate::error::Error::ConnectionFailed(
                 "Connection closed during redirect auth".into(),
             ));
         }
+        
+        log_msg(callbacks, 1, &format!("Received {} bytes from redirect server", n));
 
         if let Some(response) = codec.feed(&buf[..n])? {
+            log_msg(callbacks, 1, &format!("HTTP response status: {}", response.status_code));
             if response.status_code != 200 {
+                log_msg(callbacks, 3, &format!("Redirect server returned non-200 status: {}", response.status_code));
                 return Err(crate::error::Error::AuthenticationFailed(format!(
                     "Redirect server returned status {}",
                     response.status_code
@@ -1231,6 +1246,7 @@ async fn connect_redirect(
                 let result = AuthResult::from_pack(&pack)?;
 
                 if result.error > 0 {
+                    log_msg(callbacks, 3, &format!("Redirect auth error code: {}", result.error));
                     return Err(crate::error::Error::AuthenticationFailed(format!(
                         "Redirect auth error: {}",
                         result.error
@@ -1247,6 +1263,7 @@ async fn connect_redirect(
                 );
                 return Ok((conn, result));
             } else {
+                log_msg(callbacks, 3, "Empty response body from redirect server");
                 return Err(crate::error::Error::ServerError(
                     "Empty redirect auth response".into(),
                 ));
