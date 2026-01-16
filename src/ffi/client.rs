@@ -806,6 +806,15 @@ async fn connect_and_run_inner(
     // Determine if we need raw TCP mode (when use_encrypt=false and no RC4 keys)
     let use_raw_mode = !config.use_encrypt && final_auth.rc4_key_pair.is_none();
 
+    // Convert primary connection to raw TCP if needed
+    // When use_encrypt=false, the server expects raw TCP tunnel protocol, not TLS
+    let active_conn = if use_raw_mode {
+        log_message(callbacks, 1, "Switching to raw TCP mode (use_encrypt=false)");
+        active_conn.into_plain()
+    } else {
+        active_conn
+    };
+
     // Pass RC4 key pair for per-connection encryption (each connection gets fresh cipher state)
     let mut conn_mgr = ConnectionManager::new(
         active_conn,
