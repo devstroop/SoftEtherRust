@@ -567,15 +567,23 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
             }
             Err(ref e) => {
                 if let Some(cb) = callbacks.on_log {
+                    // Log both user-friendly message and debug details
                     if let Ok(cstr) = std::ffi::CString::new(format!("Connection error: {e}")) {
+                        cb(callbacks.context, 3, cstr.as_ptr());
+                    }
+                    if let Ok(cstr) = std::ffi::CString::new(format!("Error details: {e:?}")) {
                         cb(callbacks.context, 3, cstr.as_ptr());
                     }
                 }
                 match e {
                     crate::error::Error::AuthenticationFailed(_) => SoftEtherResult::AuthFailed,
                     crate::error::Error::ConnectionFailed(_) => SoftEtherResult::ConnectionFailed,
-                    crate::error::Error::Timeout => SoftEtherResult::Timeout,
+                    crate::error::Error::Timeout | crate::error::Error::TimeoutMessage(_) => SoftEtherResult::Timeout,
                     crate::error::Error::UserAlreadyLoggedIn => SoftEtherResult::AuthFailed,
+                    crate::error::Error::Io(_) => SoftEtherResult::IoError,
+                    crate::error::Error::Tls(_) => SoftEtherResult::ConnectionFailed,
+                    crate::error::Error::DhcpFailed(_) => SoftEtherResult::DhcpFailed,
+                    crate::error::Error::ServerError(_) | crate::error::Error::ServerErrorCode { .. } => SoftEtherResult::ConnectionFailed,
                     _ => SoftEtherResult::InternalError,
                 }
             }
@@ -792,6 +800,10 @@ async fn connect_and_run_inner(
             drop(conn);
 
             // Connect to redirect server
+            // NOTE: Tickets are one-time use, so we cannot retry with the same ticket.
+            // If redirect fails, the upper layer should reconnect from scratch.
+            log_message(callbacks, 1, "Connecting to redirect server...");
+            
             match connect_redirect(config, &redirect, callbacks).await {
                 Ok((redirect_conn, redirect_auth)) => {
                     let new_ip = match redirect_ip.parse::<Ipv4Addr>() {
@@ -802,12 +814,13 @@ async fn connect_and_run_inner(
                         redirect_conn,
                         redirect_auth,
                         new_ip,
-                        redirect_ip,
+                        redirect_ip.clone(),
                         redirect.port,
                     )
                 }
                 Err(e) => {
-                    log_message(callbacks, 3, &format!("Redirect failed: {e}"));
+                    log_message(callbacks, 3, &format!("Redirect connection failed: {e}"));
+                    log_message(callbacks, 3, "Ticket authentication failed - ticket may have been consumed or expired. Please reconnect.");
                     return Err(e);
                 }
             }
@@ -1279,8 +1292,33 @@ async fn connect_redirect(
                 n
             }
             Ok(Err(e)) => {
-                log_msg(callbacks, 3, &format!("Failed to read redirect auth response: {e}"));
-                return Err(e.into());
+                // Log detailed error info for TLS errors
+                let error_str = format!("{e}");
+                let error_debug = format!("{e:?}");
+                log_msg(callbacks, 1, &format!("REDIRECT_READ_ERROR: {}", error_str));
+                log_msg(callbacks, 1, &format!("REDIRECT_ERROR_DEBUG: {}", error_debug));
+                
+                // Check error type for specific handling
+                let is_tls_content_error = error_str.contains("InvalidContentType") 
+                    || error_str.contains("corrupt message")
+                    || error_str.contains("decrypt")
+                    || error_str.contains("AlertReceived");
+                    
+                let is_connection_reset = error_str.contains("reset") 
+                    || error_str.contains("Connection reset")
+                    || error_str.contains("broken pipe");
+                
+                if is_tls_content_error {
+                    log_msg(callbacks, 1, "REDIRECT_FAILURE: TLS protocol error - server may have sent unexpected data");
+                    log_msg(callbacks, 1, "This can occur if the server doesn't support the requested encryption settings");
+                } else if is_connection_reset {
+                    log_msg(callbacks, 1, "REDIRECT_FAILURE: Connection was reset by server");
+                    log_msg(callbacks, 1, "The server may have rejected the ticket or closed the connection");
+                }
+                
+                return Err(crate::error::Error::ConnectionFailed(
+                    format!("Redirect read failed: {}", error_str)
+                ));
             }
             Err(_) => {
                 log_msg(callbacks, 3, "Timeout waiting for redirect auth response (30s)");
