@@ -1277,6 +1277,13 @@ async fn connect_redirect(
     }
     log_msg(callbacks, 1, "Ticket auth sent, waiting for response...");
 
+    // CRITICAL: When use_encrypt=false, the server responds in RAW mode, not TLS!
+    // We must switch to raw mode BEFORE reading the response.
+    if !config.use_encrypt {
+        log_msg(callbacks, 1, "Switching to raw TCP for response (use_encrypt=false)");
+        conn = conn.into_plain();
+    }
+
     // Read response with timeout
     let mut codec = HttpCodec::new();
     let mut buf = vec![0u8; 8192];
