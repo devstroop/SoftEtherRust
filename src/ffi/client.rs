@@ -240,16 +240,51 @@ pub unsafe extern "C" fn softether_create(
 ) -> SoftEtherHandle {
     clear_last_error();
 
+    // Debug logging for config validation
+    eprintln!("[Rust FFI] softether_create called");
+
     if config.is_null() {
+        eprintln!("[Rust FFI] ERROR: config is null");
         set_last_error("config is null");
         return NULL_HANDLE;
     }
 
     let config = &*config;
+    
+    // Log config values for debugging
+    eprintln!("[Rust FFI] Config validation:");
+    eprintln!("  server ptr: {:?}, is_null: {}", config.server, config.server.is_null());
+    eprintln!("  hub ptr: {:?}, is_null: {}", config.hub, config.hub.is_null());
+    eprintln!("  username ptr: {:?}, is_null: {}", config.username, config.username.is_null());
+    eprintln!("  password_hash ptr: {:?}, is_null: {}", config.password_hash, config.password_hash.is_null());
+    eprintln!("  port: {}", config.port);
+    eprintln!("  max_connections: {}", config.max_connections);
+    eprintln!("  mtu: {}", config.mtu);
+    
     if !config.is_valid() {
+        // Detailed validation failure logging
+        let server_ok = !config.server.is_null();
+        let hub_ok = !config.hub.is_null();
+        let username_ok = !config.username.is_null();
+        let password_ok = !config.password_hash.is_null();
+        let port_ok = config.port > 0 && config.port <= 65535;
+        let connections_ok = config.max_connections >= 1 && config.max_connections <= 32;
+        let mtu_ok = config.mtu >= 576 && config.mtu <= 1500;
+        
+        eprintln!("[Rust FFI] Validation failures:");
+        if !server_ok { eprintln!("  - server is null"); }
+        if !hub_ok { eprintln!("  - hub is null"); }
+        if !username_ok { eprintln!("  - username is null"); }
+        if !password_ok { eprintln!("  - password_hash is null"); }
+        if !port_ok { eprintln!("  - port {} out of range (1-65535)", config.port); }
+        if !connections_ok { eprintln!("  - max_connections {} out of range (1-32)", config.max_connections); }
+        if !mtu_ok { eprintln!("  - mtu {} out of range (576-1500)", config.mtu); }
+        
         set_last_error("config validation failed: check server, hub, username, password_hash, port (1-65535), max_connections (1-32), mtu (576-1500)");
         return NULL_HANDLE;
     }
+
+    eprintln!("[Rust FFI] Config validation passed");
 
     // Parse configuration
     let server = match cstr_to_string(config.server) {
@@ -1195,6 +1230,16 @@ async fn connect_redirect(
         None,
     );
 
+    // Log connection options for debugging
+    log_msg(
+        callbacks,
+        1,
+        &format!(
+            "Ticket auth options: use_encrypt={}, use_compress={}, max_conn={}, half_conn={}",
+            options.use_encrypt, options.use_compress, options.max_connections, options.half_connection
+        ),
+    );
+
     let request = HttpRequest::post(VPN_TARGET)
         .header("Content-Type", CONTENT_TYPE_PACK)
         .header("Connection", "Keep-Alive")
@@ -1203,33 +1248,65 @@ async fn connect_redirect(
     let host = format!("{redirect_server}:{redirect_port}");
     let request_bytes = request.build(&host);
 
-    log_msg(callbacks, 1, "Sending ticket authentication");
+    log_msg(
+        callbacks,
+        1,
+        &format!("Sending ticket authentication ({} bytes)", request_bytes.len()),
+    );
     if let Err(e) = conn.write_all(&request_bytes).await {
         log_msg(callbacks, 3, &format!("Failed to send ticket auth: {e}"));
         return Err(e.into());
     }
+    // Flush to ensure the request is fully sent
+    if let Err(e) = conn.flush().await {
+        log_msg(callbacks, 3, &format!("Failed to flush ticket auth: {e}"));
+        return Err(e.into());
+    }
     log_msg(callbacks, 1, "Ticket auth sent, waiting for response...");
 
-    // Read response
+    // Read response with timeout
     let mut codec = HttpCodec::new();
     let mut buf = vec![0u8; 8192];
+    let read_timeout = std::time::Duration::from_secs(30);
 
     loop {
-        let n = match conn.read(&mut buf).await {
-            Ok(n) => n,
-            Err(e) => {
+        log_msg(callbacks, 0, &format!("Reading from redirect connection (TLS={})...", conn.is_tls()));
+        let read_result = tokio::time::timeout(read_timeout, conn.read(&mut buf)).await;
+        
+        let n = match read_result {
+            Ok(Ok(n)) => {
+                log_msg(callbacks, 0, &format!("Read returned {} bytes", n));
+                n
+            }
+            Ok(Err(e)) => {
                 log_msg(callbacks, 3, &format!("Failed to read redirect auth response: {e}"));
                 return Err(e.into());
             }
+            Err(_) => {
+                log_msg(callbacks, 3, "Timeout waiting for redirect auth response (30s)");
+                return Err(crate::error::Error::Timeout);
+            }
         };
         if n == 0 {
-            log_msg(callbacks, 3, "Connection closed during redirect auth (read returned 0)");
+            log_msg(
+                callbacks,
+                3,
+                &format!(
+                    "Connection closed during redirect auth (read returned 0, TLS={})",
+                    conn.is_tls()
+                ),
+            );
             return Err(crate::error::Error::ConnectionFailed(
                 "Connection closed during redirect auth".into(),
             ));
         }
         
         log_msg(callbacks, 1, &format!("Received {} bytes from redirect server", n));
+        
+        // Log first few bytes for debugging
+        let preview_len = std::cmp::min(n, 64);
+        let hex_preview: String = buf[..preview_len].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+        log_msg(callbacks, 0, &format!("Data preview (first {} bytes): {}", preview_len, hex_preview));
 
         if let Some(response) = codec.feed(&buf[..n])? {
             log_msg(callbacks, 1, &format!("HTTP response status: {}", response.status_code));
