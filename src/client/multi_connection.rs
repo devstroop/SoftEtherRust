@@ -205,11 +205,14 @@ pub struct ConnectionManager {
     send_index: usize,
     /// Index of next connection to use for receiving (round-robin).
     recv_index: usize,
-    /// Whether to use raw TCP mode (no TLS) for tunnel data.
-    /// This is set when use_encrypt=false and server doesn't provide RC4 keys.
+    /// Whether RC4 encryption layer is active on top of TLS.
+    /// This is set when use_ssl_data_encryption=false, meaning:
+    /// - Server provided RC4 keys for an additional encryption layer
+    /// Note: TLS is always the baseline transport; this indicates RC4 is layered on top.
     use_raw_mode: bool,
-    /// RC4 key pair for creating per-connection encryption.
+    /// RC4 key pair for per-connection encryption layer.
     /// Each new connection gets fresh cipher state from this key pair.
+    /// Applied on top of TLS when server enables RC4 encryption.
     rc4_key_pair: Option<Rc4KeyPair>,
 }
 
@@ -219,9 +222,9 @@ impl ConnectionManager {
     /// Note: `actual_server` and `actual_port` should be the server we're actually
     /// connected to (after any cluster redirect), not the original config server.
     ///
-    /// `use_raw_mode` indicates whether the server switched to raw TCP mode
-    /// (when use_encrypt=false and no RC4 keys). Additional connections must
-    /// also use raw TCP mode in this case.
+    /// `use_raw_mode` indicates whether RC4 encryption layer is active.
+    /// This is the inverse of use_ssl_data_encryption from AuthResult.
+    /// When true, RC4 encryption is applied on top of TLS for all connections.
     ///
     /// `rc4_key_pair` provides keys for per-connection RC4 encryption. Each connection
     /// gets its own fresh cipher state because the server maintains independent RC4
@@ -386,9 +389,10 @@ impl ConnectionManager {
         // Send additional connection authentication
         let direction = self.upload_additional_auth(&mut conn).await?;
 
-        // Convert to raw TCP if use_encrypt=false (same as primary connection)
-        let conn = if self.use_raw_mode {
-            debug!("Converting additional connection {} to raw TCP mode", index);
+        // Switch to raw TCP if use_raw_mode is enabled.
+        // This mirrors what the primary connection does.
+        let conn = if self.use_raw_mode && conn.is_tls() {
+            debug!("Additional connection {}: switching from TLS to raw TCP", index);
             conn.into_plain()
         } else {
             conn

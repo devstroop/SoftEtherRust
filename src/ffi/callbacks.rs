@@ -1,9 +1,31 @@
 //! FFI callbacks for event notifications.
 //!
 //! Mobile apps can register callbacks to receive events from the VPN client.
+//!
+//! # Log Levels
+//! - `LOG_TRACE` (0): Verbose debug output (packet contents, protocol details)
+//! - `LOG_DEBUG` (1): Debug info (connection steps, state changes)
+//! - `LOG_INFO` (2): Normal operational messages (connected, disconnected)
+//! - `LOG_WARN` (3): Warnings (retries, degraded operation)
+//! - `LOG_ERROR` (4): Errors (failures, exceptions)
 
 use super::types::{SoftEtherResult, SoftEtherSession, SoftEtherState};
 use std::ffi::c_void;
+
+/// Log level constants for consistent logging across the codebase.
+/// These match iOS/macOS os_log levels for seamless integration.
+pub mod log_level {
+    /// Verbose trace output (packet hex dumps, protocol wire data)
+    pub const TRACE: i32 = 0;
+    /// Debug information (connection steps, internal state)
+    pub const DEBUG: i32 = 1;
+    /// Informational messages (connected, auth success)
+    pub const INFO: i32 = 2;
+    /// Warnings (retries, recoverable errors)
+    pub const WARN: i32 = 3;
+    /// Errors (failures, unrecoverable conditions)
+    pub const ERROR: i32 = 4;
+}
 
 /// Callback for state changes.
 ///
@@ -51,7 +73,7 @@ pub type PacketsReceivedCallback = Option<
 ///
 /// # Parameters
 /// - `context`: User-provided context pointer.
-/// - `level`: Log level (0=debug, 1=info, 2=warn, 3=error).
+/// - `level`: Log level (0=trace, 1=debug, 2=info, 3=warn, 4=error).
 /// - `message`: Null-terminated UTF-8 log message.
 pub type LogCallback =
     Option<extern "C" fn(context: *mut c_void, level: i32, message: *const std::ffi::c_char)>;
@@ -125,7 +147,7 @@ impl SoftEtherCallbacks {
     /// Log a message through the registered callback.
     ///
     /// # Parameters
-    /// - `level`: Log level (0=debug, 1=info, 2=warn, 3=error)
+    /// - `level`: Log level (use `log_level::*` constants)
     /// - `msg`: The message to log
     #[inline]
     pub fn log(&self, level: i32, msg: &str) {
@@ -136,21 +158,33 @@ impl SoftEtherCallbacks {
         }
     }
 
-    /// Log an info message (level 1).
+    /// Log a trace message (level 0) - verbose protocol details.
+    #[inline]
+    pub fn log_trace(&self, msg: &str) {
+        self.log(log_level::TRACE, msg);
+    }
+
+    /// Log a debug message (level 1) - connection steps.
+    #[inline]
+    pub fn log_debug(&self, msg: &str) {
+        self.log(log_level::DEBUG, msg);
+    }
+
+    /// Log an info message (level 2) - normal operation.
     #[inline]
     pub fn log_info(&self, msg: &str) {
-        self.log(1, msg);
+        self.log(log_level::INFO, msg);
     }
 
-    /// Log a warning message (level 2).
+    /// Log a warning message (level 3) - recoverable issues.
     #[inline]
     pub fn log_warn(&self, msg: &str) {
-        self.log(2, msg);
+        self.log(log_level::WARN, msg);
     }
 
-    /// Log an error message (level 3).
+    /// Log an error message (level 4) - failures.
     #[inline]
     pub fn log_error(&self, msg: &str) {
-        self.log(3, msg);
+        self.log(log_level::ERROR, msg);
     }
 }

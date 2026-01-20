@@ -220,21 +220,28 @@ impl VpnClient {
             "Session key received"
         );
 
-        // CRITICAL: When use_encrypt=false and server doesn't provide RC4 keys,
-        // the server switches from TLS to raw TCP mode after authentication.
-        // We must unwrap the TLS stream to read/write raw tunnel data.
-        //
-        // When use_encrypt=true (or server provides RC4 keys), TLS continues.
-        let use_raw_mode = !self.config.use_encrypt && auth_result.rc4_key_pair.is_none();
-        let active_conn = if use_raw_mode {
-            info!("Switching to raw TCP mode (use_encrypt=false, no RC4 keys)");
+        // Determine whether to use raw TCP mode for tunnel data.
+        // SoftEther protocol: UseSSLDataEncryption = (UseEncrypt && !UseFastRC4)
+        // - When use_ssl_data_encryption=true: Keep TLS for data (use_raw_mode=false)
+        // - When use_ssl_data_encryption=false: Switch to raw TCP (use_raw_mode=true)
+        let use_raw_mode = !auth_result.use_ssl_data_encryption;
+
+        if use_raw_mode {
+            if auth_result.rc4_key_pair.is_some() {
+                debug!("Using raw TCP + RC4 encryption (UseFastRC4 mode)");
+            } else {
+                debug!("Using raw TCP without encryption (use_encrypt=false)");
+            }
+        } else {
+            debug!("Using TLS for tunnel data");
+        }
+
+        // If use_raw_mode is enabled and we have a TLS connection, convert to raw TCP.
+        // The server will send raw tunnel data (not TLS-wrapped) after authentication.
+        let active_conn = if use_raw_mode && active_conn.is_tls() {
+            debug!("Switching primary connection from TLS to raw TCP");
             active_conn.into_plain()
         } else {
-            if auth_result.rc4_key_pair.is_some() {
-                debug!("Using TLS + RC4 encryption (defense-in-depth mode)");
-            } else {
-                debug!("Using TLS encryption only");
-            }
             active_conn
         };
 

@@ -82,6 +82,7 @@ mod packet_loop;
 mod types;
 
 pub use callbacks::*;
+pub use callbacks::log_level;
 pub use client::*;
 pub use types::*;
 

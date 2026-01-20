@@ -92,11 +92,18 @@ pub struct AuthResult {
     pub redirect: Option<RedirectInfo>,
     /// Connection direction for half-connection mode (0=both, 1=c2s, 2=s2c).
     pub direction: u32,
-    /// RC4 key pair for defense-in-depth encryption (if server provides keys).
-    /// Note: TLS encryption is ALWAYS active regardless of this.
+    /// Server's RC4 encryption decision.
+    /// When true, RC4 encryption is applied on top of the TLS baseline.
+    /// This is what the server decided, which may differ from what we requested.
+    pub use_encrypt: bool,
+    /// RC4 key pair for tunnel encryption (if server provides keys).
+    /// When present, RC4 encryption is applied on top of TLS.
+    /// Note: TLS is always the baseline transport; RC4 is an optional top layer.
     pub rc4_key_pair: Option<Rc4KeyPair>,
-    /// Legacy flag: true when RC4 keys not present.
-    /// Note: TLS is ALWAYS used regardless of this flag.
+    /// Whether TLS-only mode is used (no RC4 layer).
+    /// - true: TLS only (use_encrypt=true but no RC4 keys from server)
+    /// - false: TLS + RC4 encryption layer (server provided RC4 keys)
+    /// Note: TLS is always active; this just indicates whether RC4 is layered on top.
     pub use_ssl_data_encryption: bool,
     /// UDP acceleration server response (if server supports it).
     pub udp_accel_response: Option<UdpAccelServerResponse>,
@@ -141,6 +148,7 @@ impl AuthResult {
                 session_key: Bytes::new(),
                 redirect: None,
                 direction: 0,
+                use_encrypt: true,
                 rc4_key_pair: None,
                 use_ssl_data_encryption: false,
                 udp_accel_response: None,
@@ -166,6 +174,7 @@ impl AuthResult {
                 session_key: Bytes::new(),
                 redirect: Some(RedirectInfo { ip, port, ticket }),
                 direction: 0,
+                use_encrypt: true,
                 rc4_key_pair: None,
                 use_ssl_data_encryption: false,
                 udp_accel_response: None,
@@ -175,15 +184,20 @@ impl AuthResult {
         // Parse direction for half-connection mode (0=both, 1=c2s, 2=s2c)
         let direction = pack.get_int("direction").unwrap_or(0);
 
+        // Parse the server's use_encrypt decision
+        // This is what the server decided to use, may differ from what we requested
+        let use_encrypt = pack.get_int("use_encrypt").unwrap_or(1) != 0;
+
         // Parse RC4 key pair for tunnel encryption (UseFastRC4 mode)
         // Server sends these in the Welcome packet if encryption is enabled
         let rc4_key_pair = Self::parse_rc4_keys(pack);
 
-        // RC4 defense-in-depth mode:
-        // - If RC4 keys present -> RC4 encryption applied inside TLS tunnel
-        // - If no RC4 keys -> TLS-only (TLS encryption is ALWAYS active regardless)
-        // Note: use_ssl_data_encryption is a legacy flag, TLS is always used.
-        let use_ssl_data_encryption = rc4_key_pair.is_none();
+        // use_ssl_data_encryption = (UseEncrypt && !UseFastRC4)
+        // This follows SoftEther's Protocol.c logic:
+        // - true: TLS only (no RC4 layer) - use_encrypt=true but no RC4 keys
+        // - false: TLS + RC4 layer (server provided RC4 keys for encryption)
+        // Note: TLS is always the baseline transport; this flag indicates RC4 layer presence.
+        let use_ssl_data_encryption = use_encrypt && rc4_key_pair.is_none();
 
         // Parse UDP acceleration response if server supports it
         let udp_accel_response = remote_ip.and_then(|ip| Self::parse_udp_accel_response(pack, ip));
@@ -195,6 +209,7 @@ impl AuthResult {
             session_key: pack.get_data("session_key").cloned().unwrap_or_default(),
             redirect: None,
             direction,
+            use_encrypt,
             rc4_key_pair,
             use_ssl_data_encryption,
             udp_accel_response,
@@ -796,6 +811,155 @@ mod tests {
             Some("Authentication failed".to_string())
         );
     }
+}
+
+/// Welcome packet from server after successful authentication.
+///
+/// This is sent as a separate HTTP response after the auth response.
+/// It contains session parameters, RC4 keys (if enabled), and policy.
+#[derive(Debug, Clone)]
+pub struct WelcomePacket {
+    /// Session name assigned by server.
+    pub session_name: String,
+    /// Connection name assigned by server.
+    pub connection_name: String,
+    /// Maximum number of connections.
+    pub max_connection: u32,
+    /// Whether tunnel encryption is enabled.
+    pub use_encrypt: bool,
+    /// Whether fast RC4 encryption is enabled.
+    pub use_fast_rc4: bool,
+    /// Whether compression is enabled.
+    pub use_compress: bool,
+    /// Whether half-connection mode is enabled.
+    pub half_connection: bool,
+    /// Session timeout in milliseconds.
+    pub timeout: u32,
+    /// Whether QoS is enabled.
+    pub qos: bool,
+    /// Session key (20 bytes).
+    pub session_key: [u8; SHA0_DIGEST_LEN],
+    /// Session key as 32-bit value.
+    pub session_key_32: u32,
+    /// VLAN ID (0 = no VLAN).
+    pub vlan_id: u32,
+    /// RC4 key pair (if use_fast_rc4 is true).
+    pub rc4_key_pair: Option<Rc4KeyPair>,
+    /// Message to display to user.
+    pub message: Option<String>,
+    /// Whether to suppress signature.
+    pub no_send_signature: bool,
+    /// Whether this is an Azure session.
+    pub is_azure_session: bool,
+}
+
+impl WelcomePacket {
+    /// Parse a Welcome packet from a Pack.
+    pub fn from_pack(pack: &Pack) -> Result<Self> {
+        // Check for error first
+        if let Some(error) = pack.get_int("error") {
+            if error != 0 {
+                return Err(Error::server(error, format!("Welcome packet error: {error}")));
+            }
+        }
+
+        // Parse session name
+        let session_name = pack.get_str("session_name")
+            .ok_or_else(|| Error::invalid_response("Missing session_name in Welcome packet"))?
+            .to_string();
+
+        // Parse connection name
+        let connection_name = pack.get_str("connection_name")
+            .ok_or_else(|| Error::invalid_response("Missing connection_name in Welcome packet"))?
+            .to_string();
+
+        // Parse session key
+        let session_key_data = pack.get_data("session_key")
+            .ok_or_else(|| Error::invalid_response("Missing session_key in Welcome packet"))?;
+        
+        if session_key_data.len() < SHA0_DIGEST_LEN {
+            return Err(Error::invalid_response(format!(
+                "Invalid session_key length: {} (expected {})",
+                session_key_data.len(), SHA0_DIGEST_LEN
+            )));
+        }
+
+        let mut session_key = [0u8; SHA0_DIGEST_LEN];
+        session_key.copy_from_slice(&session_key_data[..SHA0_DIGEST_LEN]);
+
+        // Parse numeric fields
+        let max_connection = pack.get_int("max_connection").unwrap_or(1);
+        let use_encrypt = pack.get_int("use_encrypt").unwrap_or(0) != 0;
+        let use_fast_rc4 = pack.get_int("use_fast_rc4").unwrap_or(0) != 0;
+        let use_compress = pack.get_int("use_compress").unwrap_or(0) != 0;
+        let half_connection = pack.get_int("half_connection").unwrap_or(0) != 0;
+        let timeout = pack.get_int("timeout").unwrap_or(20000);
+        let qos = pack.get_int("qos").unwrap_or(0) != 0;
+        let session_key_32 = pack.get_int("session_key_32").unwrap_or(0);
+        let vlan_id = pack.get_int("vlan_id").unwrap_or(0);
+        let no_send_signature = pack.get_int("no_send_signature").unwrap_or(0) != 0;
+        let is_azure_session = pack.get_int("is_azure_session").unwrap_or(0) != 0;
+
+        // Parse RC4 key pair if fast RC4 is enabled
+        let rc4_key_pair = if use_fast_rc4 {
+            Self::parse_rc4_keys(pack)
+        } else {
+            None
+        };
+
+        // Parse message (UTF-8 encoded)
+        let message = pack.get_data("Msg")
+            .and_then(|data| String::from_utf8(data.to_vec()).ok())
+            .filter(|s| !s.is_empty());
+
+        Ok(Self {
+            session_name,
+            connection_name,
+            max_connection,
+            use_encrypt,
+            use_fast_rc4,
+            use_compress,
+            half_connection,
+            timeout,
+            qos,
+            session_key,
+            session_key_32,
+            vlan_id,
+            rc4_key_pair,
+            message,
+            no_send_signature,
+            is_azure_session,
+        })
+    }
+
+    /// Parse RC4 key pair from Welcome packet.
+    fn parse_rc4_keys(pack: &Pack) -> Option<Rc4KeyPair> {
+        let c2s_key = pack.get_data("rc4_key_client_to_server")?;
+        let s2c_key = pack.get_data("rc4_key_server_to_client")?;
+
+        if c2s_key.len() != RC4_KEY_SIZE || s2c_key.len() != RC4_KEY_SIZE {
+            tracing::warn!(
+                "Invalid RC4 key sizes in Welcome: c2s={}, s2c={} (expected {})",
+                c2s_key.len(),
+                s2c_key.len(),
+                RC4_KEY_SIZE
+            );
+            return None;
+        }
+
+        let mut client_to_server = [0u8; RC4_KEY_SIZE];
+        let mut server_to_client = [0u8; RC4_KEY_SIZE];
+        client_to_server.copy_from_slice(c2s_key);
+        server_to_client.copy_from_slice(s2c_key);
+
+        tracing::debug!("Parsed RC4 key pair from Welcome packet");
+        Some(Rc4KeyPair::new(client_to_server, server_to_client))
+    }
+}
+
+#[cfg(test)]
+mod tests_welcome {
+    use super::*;
 
     #[test]
     fn test_redirect_ip_string() {

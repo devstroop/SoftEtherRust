@@ -567,23 +567,15 @@ pub unsafe extern "C" fn softether_connect(handle: SoftEtherHandle) -> SoftEther
             }
             Err(ref e) => {
                 if let Some(cb) = callbacks.on_log {
-                    // Log both user-friendly message and debug details
                     if let Ok(cstr) = std::ffi::CString::new(format!("Connection error: {e}")) {
-                        cb(callbacks.context, 3, cstr.as_ptr());
-                    }
-                    if let Ok(cstr) = std::ffi::CString::new(format!("Error details: {e:?}")) {
                         cb(callbacks.context, 3, cstr.as_ptr());
                     }
                 }
                 match e {
                     crate::error::Error::AuthenticationFailed(_) => SoftEtherResult::AuthFailed,
                     crate::error::Error::ConnectionFailed(_) => SoftEtherResult::ConnectionFailed,
-                    crate::error::Error::Timeout | crate::error::Error::TimeoutMessage(_) => SoftEtherResult::Timeout,
+                    crate::error::Error::Timeout => SoftEtherResult::Timeout,
                     crate::error::Error::UserAlreadyLoggedIn => SoftEtherResult::AuthFailed,
-                    crate::error::Error::Io(_) => SoftEtherResult::IoError,
-                    crate::error::Error::Tls(_) => SoftEtherResult::ConnectionFailed,
-                    crate::error::Error::DhcpFailed(_) => SoftEtherResult::DhcpFailed,
-                    crate::error::Error::ServerError(_) | crate::error::Error::ServerErrorCode { .. } => SoftEtherResult::ConnectionFailed,
                     _ => SoftEtherResult::InternalError,
                 }
             }
@@ -650,7 +642,7 @@ async fn connect_and_run(
                 if attempt < MAX_USER_IN_USE_RETRIES {
                     log_message(
                         &callbacks,
-                        2,
+                        log_level::WARN,
                         &format!(
                             "User already logged in. Waiting {RETRY_DELAY_SECS}s for old session to expire... (attempt {attempt}/{MAX_USER_IN_USE_RETRIES})"
                         ),
@@ -660,7 +652,7 @@ async fn connect_and_run(
                 } else {
                     log_message(
                         &callbacks,
-                        3,
+                        log_level::ERROR,
                         &format!(
                             "User already logged in - max retries ({MAX_USER_IN_USE_RETRIES}) exceeded"
                         ),
@@ -694,12 +686,12 @@ async fn connect_and_run_inner(
 
     log_message(
         callbacks,
-        1,
+        log_level::INFO,
         &format!("Connecting to {}:{}", config.server, config.port),
     );
     log_message(
         callbacks,
-        1,
+        log_level::INFO,
         &format!("Hub: {}, User: {}", config.hub, config.auth.username),
     );
 
@@ -707,7 +699,7 @@ async fn connect_and_run_inner(
     let server_ip = match resolve_server_ip(&config.server) {
         Ok(ip) => ip,
         Err(e) => {
-            log_message(callbacks, 3, &format!("DNS resolution failed: {e}"));
+            log_message(callbacks, log_level::ERROR, &format!("DNS resolution failed: {e}"));
             return Err(e);
         }
     };
@@ -728,11 +720,11 @@ async fn connect_and_run_inner(
 
     let mut conn = match VpnConnection::connect_with_protect(config, protect_fn).await {
         Ok(c) => {
-            log_message(callbacks, 1, "TCP/TLS connection established (protected)");
+            log_message(callbacks, log_level::INFO, "TCP/TLS connection established (protected)");
             c
         }
         Err(e) => {
-            log_message(callbacks, 3, &format!("TCP/TLS connection failed: {e}"));
+            log_message(callbacks, log_level::ERROR, &format!("TCP/TLS connection failed: {e}"));
             return Err(e);
         }
     };
@@ -754,7 +746,7 @@ async fn connect_and_run_inner(
             h
         }
         Err(e) => {
-            log_message(callbacks, 3, &format!("Handshake failed: {e}"));
+            log_message(callbacks, log_level::ERROR, &format!("Handshake failed: {e}"));
             return Err(e);
         }
     };
@@ -765,11 +757,11 @@ async fn connect_and_run_inner(
     // Authenticate
     let mut auth_result = match authenticate(&mut conn, config, &hello, callbacks).await {
         Ok(r) => {
-            log_message(callbacks, 1, "Authentication successful");
+            log_message(callbacks, log_level::INFO, "Authentication successful");
             r
         }
         Err(e) => {
-            log_message(callbacks, 3, &format!("Authentication failed: {e}"));
+            log_message(callbacks, log_level::ERROR, &format!("Authentication failed: {e}"));
             return Err(e);
         }
     };
@@ -800,12 +792,15 @@ async fn connect_and_run_inner(
             drop(conn);
 
             // Connect to redirect server
-            // NOTE: Tickets are one-time use, so we cannot retry with the same ticket.
-            // If redirect fails, the upper layer should reconnect from scratch.
-            log_message(callbacks, 1, "Connecting to redirect server...");
+            // If use_encrypt=false fails with TLS error, retry with use_encrypt=true
+            let redirect_result = connect_redirect(config, &redirect, callbacks).await;
             
-            match connect_redirect(config, &redirect, callbacks).await {
+            match redirect_result {
                 Ok((redirect_conn, redirect_auth)) => {
+                    // The ticket auth response IS the Welcome packet in SoftEther protocol.
+                    // AuthResult::from_pack already extracts session_key, use_encrypt, and rc4_key_pair.
+                    // When use_encrypt=false, rc4_key_pair will be None, which is correct.
+                    
                     let new_ip = match redirect_ip.parse::<Ipv4Addr>() {
                         Ok(ip) => ip,
                         Err(_) => server_ip,
@@ -814,20 +809,51 @@ async fn connect_and_run_inner(
                         redirect_conn,
                         redirect_auth,
                         new_ip,
-                        redirect_ip.clone(),
+                        redirect_ip,
                         redirect.port,
                     )
                 }
                 Err(e) => {
-                    log_message(callbacks, 3, &format!("Redirect connection failed: {e}"));
-                    log_message(callbacks, 3, "Ticket authentication failed - ticket may have been consumed or expired. Please reconnect.");
-                    return Err(e);
+                    // Check if this is a TLS error that might be fixed by using use_encrypt=true
+                    let error_str = format!("{e}");
+                    if !config.use_encrypt && error_str.contains("use_encrypt=true") {
+                        log_message(callbacks, log_level::WARN, "Server doesn't support use_encrypt=false, retrying with use_encrypt=true...");
+                        
+                        // Create modified config with use_encrypt=true
+                        let mut retry_config = config.clone();
+                        retry_config.use_encrypt = true;
+                        
+                        // Retry with use_encrypt=true
+                        match connect_redirect(&retry_config, &redirect, callbacks).await {
+                            Ok((redirect_conn, redirect_auth)) => {
+                                log_message(callbacks, log_level::INFO, "Retry with use_encrypt=true succeeded");
+                                let new_ip = match redirect_ip.parse::<Ipv4Addr>() {
+                                    Ok(ip) => ip,
+                                    Err(_) => server_ip,
+                                };
+                                (
+                                    redirect_conn,
+                                    redirect_auth,
+                                    new_ip,
+                                    redirect_ip,
+                                    redirect.port,
+                                )
+                            }
+                            Err(retry_e) => {
+                                log_message(callbacks, log_level::ERROR, &format!("Retry with use_encrypt=true also failed: {retry_e}"));
+                                return Err(e); // Return original error
+                            }
+                        }
+                    } else {
+                        log_message(callbacks, log_level::ERROR, &format!("Redirect failed: {e}"));
+                        return Err(e);
+                    }
                 }
             }
         } else {
             // No redirect - check session key now
             if auth_result.session_key.is_empty() {
-                log_message(callbacks, 3, "No session key received and no redirect");
+                log_message(callbacks, log_level::ERROR, "No session key received and no redirect");
                 return Err(crate::error::Error::AuthenticationFailed(
                     "No session key received".into(),
                 ));
@@ -843,21 +869,37 @@ async fn connect_and_run_inner(
 
     // Verify we have session key after redirect handling
     if final_auth.session_key.is_empty() {
-        log_message(callbacks, 3, "No session key after redirect");
+        log_message(callbacks, log_level::ERROR, "No session key after redirect");
         return Err(crate::error::Error::AuthenticationFailed(
             "No session key received from redirect server".into(),
         ));
     }
 
-    // Create connection manager for packet I/O
+    // Determine whether RC4 encryption layer is active.
+    // SoftEther protocol: UseSSLDataEncryption = (UseEncrypt && !UseFastRC4)
+    // - When use_ssl_data_encryption=true: TLS only (no RC4 layer)
+    // - When use_ssl_data_encryption=false: TLS + RC4 encryption layer
+    //
+    // Note: TLS is always the baseline transport. use_encrypt controls the RC4 layer.
+    // When server provides RC4 keys, the RC4 layer is applied on top of TLS.
+    let use_raw_mode = !final_auth.use_ssl_data_encryption;
 
-    // Determine if we need raw TCP mode (when use_encrypt=false and no RC4 keys)
-    let use_raw_mode = !config.use_encrypt && final_auth.rc4_key_pair.is_none();
+    log_message(
+        callbacks,
+        log_level::INFO,
+        &format!(
+            "Encryption mode: use_encrypt(RC4)={}, has_rc4_keys={}, rc4_layer_active={}",
+            final_auth.use_encrypt,
+            final_auth.rc4_key_pair.is_some(),
+            use_raw_mode
+        ),
+    );
 
-    // Convert primary connection to raw TCP if needed
-    // When use_encrypt=false, the server expects raw TCP tunnel protocol, not TLS
-    let active_conn = if use_raw_mode {
-        log_message(callbacks, 1, "Switching to raw TCP mode (use_encrypt=false)");
+    // Note: TLS remains active. If RC4 layer is enabled, it's applied on top of TLS.
+    // The into_plain() call below handles the SoftEther protocol requirement where
+    // the server expects the client to read/write differently after auth completes.
+    let active_conn = if use_raw_mode && active_conn.is_tls() {
+        log_message(callbacks, log_level::INFO, "Enabling RC4 encryption layer on connection");
         active_conn.into_plain()
     } else {
         active_conn
@@ -908,7 +950,7 @@ async fn connect_and_run_inner(
                     if let Some(dir) = original_direction {
                         conn_mgr.restore_primary_direction(dir);
                     }
-                    log_message(callbacks, 3, &format!("DHCP failed: {e}"));
+                    log_message(callbacks, log_level::ERROR, &format!("DHCP failed: {e}"));
                     return Err(e);
                 }
             };
@@ -916,7 +958,7 @@ async fn connect_and_run_inner(
             // Try DHCPv6 (optional)
             let dhcpv6 = perform_dhcpv6(&mut conn_mgr, mac, callbacks, config.use_compress).await;
             if dhcpv6.is_some() {
-                log_message(callbacks, 1, "DHCPv6: Dual-stack enabled");
+                log_message(callbacks, log_level::INFO, "DHCPv6: Dual-stack enabled");
             }
 
             (Some(dhcp), dhcpv6)
@@ -940,7 +982,7 @@ async fn connect_and_run_inner(
                     if let Some(dir) = original_direction {
                         conn_mgr.restore_primary_direction(dir);
                     }
-                    log_message(callbacks, 3, &format!("DHCP failed: {e}"));
+                    log_message(callbacks, log_level::ERROR, &format!("DHCP failed: {e}"));
                     return Err(e);
                 }
             };
@@ -951,14 +993,14 @@ async fn connect_and_run_inner(
             let dhcpv6 = perform_dhcpv6(&mut conn_mgr, mac, callbacks, config.use_compress).await;
             match dhcpv6 {
                 Some(cfg) => {
-                    log_message(callbacks, 1, "DHCPv6: IPv6 address obtained");
+                    log_message(callbacks, log_level::INFO, "DHCPv6: IPv6 address obtained");
                     (None, Some(cfg))
                 }
                 None => {
                     if let Some(dir) = original_direction {
                         conn_mgr.restore_primary_direction(dir);
                     }
-                    log_message(callbacks, 3, "DHCPv6 failed - no IPv6 address available");
+                    log_message(callbacks, log_level::ERROR, "DHCPv6 failed - no IPv6 address available");
                     return Err(crate::error::Error::DhcpFailed("DHCPv6 failed".into()));
                 }
             }
@@ -1022,7 +1064,7 @@ async fn connect_and_run_inner(
 
     // Log RC4 encryption status (TLS is ALWAYS active, this is defense-in-depth)
     if final_auth.rc4_key_pair.is_some() {
-        log_message(callbacks, 1, "RC4 encryption: enabled");
+        log_message(callbacks, log_level::INFO, "RC4 encryption: enabled");
     }
 
     // Initialize UDP acceleration if server supports it
@@ -1049,7 +1091,7 @@ async fn connect_and_run_inner(
                 }
             }
             Err(e) => {
-                log_message(callbacks, 2, &format!("Failed to create UDP socket: {e}"));
+                log_message(callbacks, log_level::WARN, &format!("Failed to create UDP socket: {e}"));
                 None
             }
         }
@@ -1075,7 +1117,7 @@ async fn connect_and_run_inner(
             domain_name: String::new(),
         }
     });
-    log_message(callbacks, 1, "Starting packet loop...");
+    log_message(callbacks, log_level::INFO, "Starting packet loop...");
     run_packet_loop(
         &mut conn_mgr,
         running,
@@ -1252,11 +1294,19 @@ async fn connect_redirect(
             options.use_encrypt, options.use_compress, options.max_connections, options.half_connection
         ),
     );
+    
+    // Log Pack content for debugging (level 0 = debug)
+    let pack_bytes = auth_pack.to_bytes();
+    log_msg(callbacks, log_level::TRACE, &format!("Auth pack size: {} bytes", pack_bytes.len()));
+    // Log first 128 bytes of pack as hex for debugging
+    let preview_len = std::cmp::min(pack_bytes.len(), 128);
+    let hex_preview: String = pack_bytes[..preview_len].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+    log_msg(callbacks, log_level::TRACE, &format!("Auth pack preview: {}", hex_preview));
 
     let request = HttpRequest::post(VPN_TARGET)
         .header("Content-Type", CONTENT_TYPE_PACK)
         .header("Connection", "Keep-Alive")
-        .body(auth_pack.to_bytes());
+        .body(pack_bytes);
 
     let host = format!("{redirect_server}:{redirect_port}");
     let request_bytes = request.build(&host);
@@ -1267,22 +1317,18 @@ async fn connect_redirect(
         &format!("Sending ticket authentication ({} bytes)", request_bytes.len()),
     );
     if let Err(e) = conn.write_all(&request_bytes).await {
-        log_msg(callbacks, 3, &format!("Failed to send ticket auth: {e}"));
+        log_msg(callbacks, log_level::ERROR, &format!("Failed to send ticket auth: {e}"));
         return Err(e.into());
     }
     // Flush to ensure the request is fully sent
     if let Err(e) = conn.flush().await {
-        log_msg(callbacks, 3, &format!("Failed to flush ticket auth: {e}"));
+        log_msg(callbacks, log_level::ERROR, &format!("Failed to flush ticket auth: {e}"));
         return Err(e.into());
     }
-    log_msg(callbacks, 1, "Ticket auth sent, waiting for response...");
+    log_msg(callbacks, log_level::INFO, "Ticket auth sent, waiting for response...");
 
-    // CRITICAL: When use_encrypt=false, the server responds in RAW mode, not TLS!
-    // We must switch to raw mode BEFORE reading the response.
-    if !config.use_encrypt {
-        log_msg(callbacks, 1, "Switching to raw TCP for response (use_encrypt=false)");
-        conn = conn.into_plain();
-    }
+    // TLS is ALWAYS active - use_encrypt only controls an INNER encryption layer
+    // (RC4 defense-in-depth), NOT the TLS layer itself.
 
     // Read response with timeout
     let mut codec = HttpCodec::new();
@@ -1290,45 +1336,47 @@ async fn connect_redirect(
     let read_timeout = std::time::Duration::from_secs(30);
 
     loop {
-        log_msg(callbacks, 0, &format!("Reading from redirect connection (TLS={})...", conn.is_tls()));
-        let read_result = tokio::time::timeout(read_timeout, conn.read(&mut buf)).await;
+        log_msg(callbacks, log_level::TRACE, &format!("Reading from redirect connection (TLS={})...", conn.is_tls()));
+        
+        let read_future = conn.read(&mut buf);
+        log_msg(callbacks, log_level::TRACE, "Read future created, awaiting with timeout...");
+        
+        let read_result = tokio::time::timeout(read_timeout, read_future).await;
+        log_msg(callbacks, log_level::TRACE, &format!("Read completed, result type: {}", 
+            match &read_result {
+                Ok(Ok(n)) => format!("Ok({})", n),
+                Ok(Err(e)) => format!("Err({})", e),
+                Err(_) => "Timeout".to_string(),
+            }
+        ));
         
         let n = match read_result {
             Ok(Ok(n)) => {
-                log_msg(callbacks, 0, &format!("Read returned {} bytes", n));
+                log_msg(callbacks, log_level::TRACE, &format!("Read returned {} bytes", n));
                 n
             }
             Ok(Err(e)) => {
-                // Log detailed error info for TLS errors
+                // Detailed error logging for TLS errors
+                log_msg(callbacks, log_level::ERROR, &format!("Failed to read redirect auth response: {e}"));
+                
+                // Check if this is a TLS InvalidContentType error
+                // This happens when the server sends raw data instead of TLS-wrapped data
                 let error_str = format!("{e}");
-                let error_debug = format!("{e:?}");
-                log_msg(callbacks, 1, &format!("REDIRECT_READ_ERROR: {}", error_str));
-                log_msg(callbacks, 1, &format!("REDIRECT_ERROR_DEBUG: {}", error_debug));
-                
-                // Check error type for specific handling
-                let is_tls_content_error = error_str.contains("InvalidContentType") 
-                    || error_str.contains("corrupt message")
-                    || error_str.contains("decrypt")
-                    || error_str.contains("AlertReceived");
+                if error_str.contains("InvalidContentType") {
+                    log_msg(callbacks, log_level::ERROR, "TLS received non-TLS data from server");
+                    log_msg(callbacks, log_level::ERROR, "This may indicate the server doesn't support use_encrypt=false over TLS");
+                    log_msg(callbacks, log_level::ERROR, "The server may be sending raw HTTP instead of TLS-wrapped HTTP");
                     
-                let is_connection_reset = error_str.contains("reset") 
-                    || error_str.contains("Connection reset")
-                    || error_str.contains("broken pipe");
-                
-                if is_tls_content_error {
-                    log_msg(callbacks, 1, "REDIRECT_FAILURE: TLS protocol error - server may have sent unexpected data");
-                    log_msg(callbacks, 1, "This can occur if the server doesn't support the requested encryption settings");
-                } else if is_connection_reset {
-                    log_msg(callbacks, 1, "REDIRECT_FAILURE: Connection was reset by server");
-                    log_msg(callbacks, 1, "The server may have rejected the ticket or closed the connection");
+                    // Return a specific error that can trigger retry with use_encrypt=true
+                    return Err(crate::error::Error::Tls(
+                        "Server sent non-TLS response when use_encrypt=false. Server may require use_encrypt=true.".into()
+                    ));
                 }
                 
-                return Err(crate::error::Error::ConnectionFailed(
-                    format!("Redirect read failed: {}", error_str)
-                ));
+                return Err(e.into());
             }
             Err(_) => {
-                log_msg(callbacks, 3, "Timeout waiting for redirect auth response (30s)");
+                log_msg(callbacks, log_level::ERROR, "Timeout waiting for redirect auth response (30s)");
                 return Err(crate::error::Error::Timeout);
             }
         };
@@ -1346,49 +1394,67 @@ async fn connect_redirect(
             ));
         }
         
-        log_msg(callbacks, 1, &format!("Received {} bytes from redirect server", n));
+        log_msg(callbacks, log_level::INFO, &format!("Received {} bytes from redirect server", n));
         
         // Log first few bytes for debugging
         let preview_len = std::cmp::min(n, 64);
         let hex_preview: String = buf[..preview_len].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
-        log_msg(callbacks, 0, &format!("Data preview (first {} bytes): {}", preview_len, hex_preview));
+        log_msg(callbacks, log_level::TRACE, &format!("Data preview (first {} bytes): {}", preview_len, hex_preview));
+        
+        // Also log as ASCII for HTTP detection
+        let ascii_preview: String = buf[..preview_len].iter()
+            .map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' })
+            .collect();
+        log_msg(callbacks, log_level::TRACE, &format!("Data as ASCII: {}", ascii_preview));
 
-        if let Some(response) = codec.feed(&buf[..n])? {
-            log_msg(callbacks, 1, &format!("HTTP response status: {}", response.status_code));
-            if response.status_code != 200 {
-                log_msg(callbacks, 3, &format!("Redirect server returned non-200 status: {}", response.status_code));
-                return Err(crate::error::Error::AuthenticationFailed(format!(
-                    "Redirect server returned status {}",
-                    response.status_code
-                )));
-            }
-
-            if !response.body.is_empty() {
-                let pack = Pack::deserialize(&response.body)?;
-                let result = AuthResult::from_pack(&pack)?;
-
-                if result.error > 0 {
-                    log_msg(callbacks, 3, &format!("Redirect auth error code: {}", result.error));
+        match codec.feed(&buf[..n]) {
+            Ok(Some(response)) => {
+                log_msg(callbacks, log_level::INFO, &format!("HTTP response parsed! status: {}", response.status_code));
+                if response.status_code != 200 {
+                    log_msg(callbacks, log_level::ERROR, &format!("Redirect server returned non-200 status: {}", response.status_code));
                     return Err(crate::error::Error::AuthenticationFailed(format!(
-                        "Redirect auth error: {}",
-                        result.error
+                        "Redirect server returned status {}",
+                        response.status_code
                     )));
                 }
 
-                log_msg(
-                    callbacks,
-                    1,
-                    &format!(
-                        "Redirect auth success, session key: {} bytes",
-                        result.session_key.len()
-                    ),
-                );
-                return Ok((conn, result));
-            } else {
-                log_msg(callbacks, 3, "Empty response body from redirect server");
-                return Err(crate::error::Error::ServerError(
-                    "Empty redirect auth response".into(),
-                ));
+                if !response.body.is_empty() {
+                    log_msg(callbacks, log_level::INFO, &format!("Response body: {} bytes", response.body.len()));
+                    let pack = Pack::deserialize(&response.body)?;
+                    let result = AuthResult::from_pack(&pack)?;
+
+                    if result.error > 0 {
+                        log_msg(callbacks, log_level::ERROR, &format!("Redirect auth error code: {}", result.error));
+                        return Err(crate::error::Error::AuthenticationFailed(format!(
+                            "Redirect auth error: {}",
+                            result.error
+                        )));
+                    }
+
+                    log_msg(
+                        callbacks,
+                        1,
+                        &format!(
+                            "Redirect auth success! session_key: {} bytes, use_encrypt: {}",
+                            result.session_key.len(),
+                            result.use_encrypt
+                        ),
+                    );
+                    return Ok((conn, result));
+                } else {
+                    log_msg(callbacks, log_level::ERROR, "Empty response body from redirect server");
+                    return Err(crate::error::Error::ServerError(
+                        "Empty redirect auth response".into(),
+                    ));
+                }
+            }
+            Ok(None) => {
+                log_msg(callbacks, log_level::TRACE, "HTTP response not complete yet, reading more...");
+                // Continue reading
+            }
+            Err(e) => {
+                log_msg(callbacks, log_level::ERROR, &format!("HTTP codec error: {}", e));
+                return Err(e);
             }
         }
     }
@@ -1398,10 +1464,19 @@ async fn connect_redirect(
 async fn perform_dhcp(
     conn_mgr: &mut ConnectionManager,
     mac: [u8; 6],
-    _callbacks: &SoftEtherCallbacks,
+    callbacks: &SoftEtherCallbacks,
     use_compress: bool,
 ) -> crate::error::Result<DhcpConfig> {
     use tokio::time::timeout;
+
+    // Log helper
+    fn log_msg(callbacks: &SoftEtherCallbacks, level: i32, msg: &str) {
+        if let Some(cb) = callbacks.on_log {
+            if let Ok(cstr) = std::ffi::CString::new(msg) {
+                cb(callbacks.context, level, cstr.as_ptr());
+            }
+        }
+    }
 
     let mut dhcp = DhcpClient::new(mac);
     let mut codec = TunnelCodec::new();
@@ -1412,11 +1487,16 @@ async fn perform_dhcp(
 
     // Send DHCP DISCOVER
     let discover = dhcp.build_discover();
+    log_msg(callbacks, log_level::INFO, &format!("[DHCP] Sending DISCOVER ({} bytes)", discover.len()));
     send_frame(conn_mgr, &discover, &mut send_buf, use_compress).await?;
+    log_msg(callbacks, log_level::INFO, "[DHCP] DISCOVER sent, waiting for response...");
+
+    let mut read_count = 0u32;
 
     // Wait for OFFER/ACK
     loop {
         if std::time::Instant::now() > deadline {
+            log_msg(callbacks, log_level::ERROR, &format!("[DHCP] Timeout after {} reads", read_count));
             return Err(crate::error::Error::TimeoutMessage(
                 "DHCP timeout - no response received".into(),
             ));
@@ -1424,31 +1504,60 @@ async fn perform_dhcp(
 
         match timeout(Duration::from_secs(3), conn_mgr.read_any(&mut buf)).await {
             Ok(Ok((_conn_idx, n))) if n > 0 => {
+                read_count += 1;
+                log_msg(callbacks, log_level::TRACE, &format!("[DHCP] Read #{}: {} bytes", read_count, n));
+                
+                // Log first 32 bytes for debugging
+                let preview: String = buf[..n.min(32)].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+                log_msg(callbacks, log_level::TRACE, &format!("[DHCP] Data preview: {}", preview));
+                
                 // Decode tunnel frames
-                let frames = codec.feed(&buf[..n])?;
+                let frames = match codec.feed(&buf[..n]) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        log_msg(callbacks, log_level::WARN, &format!("[DHCP] Codec error: {}", e));
+                        continue;
+                    }
+                };
+                
+                log_msg(callbacks, log_level::TRACE, &format!("[DHCP] Decoded {} frames", frames.len()));
+                
                 for frame in frames {
                     if frame.is_keepalive() {
+                        log_msg(callbacks, log_level::TRACE, "[DHCP] Got keepalive frame");
                         continue;
                     }
                     if let Some(packets) = frame.packets() {
+                        log_msg(callbacks, log_level::TRACE, &format!("[DHCP] Frame has {} packets", packets.len()));
                         for packet in packets {
                             // Decompress if needed
                             let packet_data: Vec<u8> = if is_compressed(packet) {
                                 match decompress(packet) {
-                                    Ok(decompressed) => decompressed,
-                                    Err(_) => continue,
+                                    Ok(decompressed) => {
+                                        log_msg(callbacks, log_level::TRACE, &format!("[DHCP] Decompressed packet: {} -> {} bytes", packet.len(), decompressed.len()));
+                                        decompressed
+                                    }
+                                    Err(e) => {
+                                        log_msg(callbacks, log_level::WARN, &format!("[DHCP] Decompress failed: {}", e));
+                                        continue;
+                                    }
                                 }
                             } else {
                                 packet.to_vec()
                             };
 
+                            log_msg(callbacks, log_level::TRACE, &format!("[DHCP] Checking packet: {} bytes", packet_data.len()));
+                            
                             // Check if this is a DHCP response
                             if is_dhcp_response(&packet_data) {
+                                log_msg(callbacks, log_level::INFO, "[DHCP] Found DHCP response!");
                                 if dhcp.process_response(&packet_data) {
                                     // Got ACK
+                                    log_msg(callbacks, log_level::INFO, &format!("[DHCP] Got ACK! IP: {}", dhcp.config().ip));
                                     return Ok(dhcp.config().clone());
                                 } else if dhcp.state() == DhcpState::DiscoverSent {
                                     // Got OFFER, send REQUEST
+                                    log_msg(callbacks, log_level::INFO, "[DHCP] Got OFFER, sending REQUEST");
                                     if let Some(request) = dhcp.build_request() {
                                         send_frame(conn_mgr, &request, &mut send_buf, use_compress)
                                             .await?;
@@ -1461,17 +1570,22 @@ async fn perform_dhcp(
             }
             Ok(Ok(_)) => {
                 // Zero bytes - continue
+                log_msg(callbacks, log_level::TRACE, "[DHCP] Read returned 0 bytes");
             }
-            Ok(Err(_)) => {
+            Ok(Err(e)) => {
                 // Read error - continue
+                log_msg(callbacks, log_level::WARN, &format!("[DHCP] Read error: {}", e));
             }
             Err(_) => {
                 // Timeout, retry
+                log_msg(callbacks, log_level::INFO, &format!("[DHCP] 3s timeout, retrying... (state: {:?})", dhcp.state()));
                 if dhcp.state() == DhcpState::DiscoverSent {
                     let discover = dhcp.build_discover();
+                    log_msg(callbacks, log_level::INFO, "[DHCP] Re-sending DISCOVER");
                     send_frame(conn_mgr, &discover, &mut send_buf, use_compress).await?;
                 } else if dhcp.state() == DhcpState::RequestSent {
                     if let Some(request) = dhcp.build_request() {
+                        log_msg(callbacks, log_level::INFO, "[DHCP] Re-sending REQUEST");
                         send_frame(conn_mgr, &request, &mut send_buf, use_compress).await?;
                     }
                 }
@@ -1854,7 +1968,7 @@ async fn run_packet_loop(
             let ul_mbps = (ul_bytes as f64 * 8.0) / (5.0 * 1_000_000.0);
             
             // Log main throughput stats
-            log_msg(&callbacks, 1, &format!(
+            log_msg(&callbacks, log_level::INFO, &format!(
                 "[DL] TCP: {} reads, {:.1} Mbps, {} frames, {} cb | [UL] {} recv, {} pkts, {:.1} Mbps",
                 tcp_reads, dl_mbps, frames, cb_count, ul_recv, ul_pkts, ul_mbps
             ));
@@ -1866,12 +1980,12 @@ async fn run_packet_loop(
             let avg_ul_proc = if ul_hits > 0 { ul_proc_us / ul_hits } else { 0 };
             let avg_ul_write = if ul_hits > 0 { ul_write_us / ul_hits } else { 0 };
             
-            log_msg(&callbacks, 1, &format!(
+            log_msg(&callbacks, log_level::INFO, &format!(
                 "[TIMING] iters:{} DL:{} UL:{} | DL avg: read {}us, decode {}us, cb {}us | UL avg: proc {}us, write {}us",
                 select_iters, dl_hits, ul_hits, avg_dl_read, avg_dl_decode, avg_dl_cb, avg_ul_proc, avg_ul_write
             ));
             
-            log_msg(&callbacks, 1, &format!(
+            log_msg(&callbacks, log_level::INFO, &format!(
                 "[MAX] DL read: {} bytes | UL drain: {} msgs | WQ: depth {} blocked {} writes {} bytes {}",
                 max_read, max_drain, wq_depth, wq_blocked, tcp_writes, tcp_write_bytes
             ));
@@ -1914,7 +2028,7 @@ async fn run_packet_loop(
                 keepalive.to_vec()
             };
             if let Err(e) = conn_mgr.write_all(&to_send).await {
-                log_msg(&callbacks, 3, &format!("Keepalive failed: {e}"));
+                log_msg(&callbacks, log_level::ERROR, &format!("Keepalive failed: {e}"));
                 return Err(crate::error::Error::Io(e));
             }
             last_keepalive = std::time::Instant::now();
@@ -1924,12 +2038,12 @@ async fn run_packet_loop(
         if let Some(ref mut ua) = udp_accel {
             if ua.is_send_ready() {
                 if !udp_ready_logged {
-                    log_msg(&callbacks, 1, "UDP acceleration path is now active!");
+                    log_msg(&callbacks, log_level::INFO, "UDP acceleration path is now active!");
                     udp_ready_logged = true;
                 }
                 if last_udp_keepalive.elapsed() >= udp_keepalive_interval {
                     if let Err(e) = ua.send_keepalive().await {
-                        log_msg(&callbacks, 2, &format!("UDP keepalive failed: {e}"));
+                        log_msg(&callbacks, log_level::WARN, &format!("UDP keepalive failed: {e}"));
                     }
                     last_udp_keepalive = std::time::Instant::now();
                 }
@@ -2009,7 +2123,7 @@ async fn run_packet_loop(
                                             arp.process_arp(frame_slice);
                                             if let Some(gw_mac) = arp.gateway_mac() {
                                                 if last_logged_gateway_mac != Some(*gw_mac) {
-                                                    log_msg(&callbacks, 1, &format!(
+                                                    log_msg(&callbacks, log_level::INFO, &format!(
                                                         "Learned gateway MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
                                                         gw_mac[0], gw_mac[1], gw_mac[2], gw_mac[3], gw_mac[4], gw_mac[5]
                                                     ));
@@ -2045,16 +2159,16 @@ async fn run_packet_loop(
                             }
                             }
                             Err(e) => {
-                                log_msg(&callbacks, 3, &format!("RX decode error: {e:?}"));
+                                log_msg(&callbacks, log_level::ERROR, &format!("RX decode error: {e:?}"));
                             }
                         }
                     }
                     Ok(_) => {
-                        log_msg(&callbacks, 2, "Connection closed by server");
+                        log_msg(&callbacks, log_level::WARN, "Connection closed by server");
                         break;
                     }
                     Err(e) => {
-                        log_msg(&callbacks, 3, &format!("Read error: {e}"));
+                        log_msg(&callbacks, log_level::ERROR, &format!("Read error: {e}"));
                         return Err(crate::error::Error::Io(e));
                     }
                 }
@@ -2129,7 +2243,7 @@ async fn run_packet_loop(
                             // Send each frame via UDP (no tunnel framing needed)
                             for frame in &modified_frames {
                                 if let Err(e) = ua.send(frame, false).await {
-                                    log_msg(&callbacks, 2, &format!("UDP send failed: {e}"));
+                                    log_msg(&callbacks, log_level::WARN, &format!("UDP send failed: {e}"));
                                     break;
                                 }
                             }
@@ -2171,13 +2285,13 @@ async fn run_packet_loop(
                                 // This only happens when network is congested
                                 WRITE_QUEUE_BLOCKED.fetch_add(1, Ordering::Relaxed);
                                 if write_tx.send(data).await.is_err() {
-                                    log_msg(&callbacks, 2, "Write queue closed");
+                                    log_msg(&callbacks, log_level::WARN, "Write queue closed");
                                     break;
                                 }
                                 WRITE_QUEUE_DEPTH.fetch_add(1, Ordering::Relaxed);
                             }
                             Err(mpsc::error::TrySendError::Closed(_)) => {
-                                log_msg(&callbacks, 2, "Write queue closed");
+                                log_msg(&callbacks, log_level::WARN, "Write queue closed");
                                 break;
                             }
                         }
@@ -2219,7 +2333,7 @@ async fn run_packet_loop(
                                     arp.process_arp(&frame_data);
                                     if let Some(gw_mac) = arp.gateway_mac() {
                                         if last_logged_gateway_mac != Some(*gw_mac) {
-                                            log_msg(&callbacks, 1, &format!(
+                                            log_msg(&callbacks, log_level::INFO, &format!(
                                                 "Learned gateway MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
                                                 gw_mac[0], gw_mac[1], gw_mac[2], gw_mac[3], gw_mac[4], gw_mac[5]
                                             ));
@@ -2254,7 +2368,7 @@ async fn run_packet_loop(
             let write_start = std::time::Instant::now();
             
             if let Err(e) = conn_mgr.write_all(&data).await {
-                log_msg(&callbacks, 3, &format!("TX error: {e}"));
+                log_msg(&callbacks, log_level::ERROR, &format!("TX error: {e}"));
                 return Err(crate::error::Error::Io(e));
             }
             
@@ -2265,7 +2379,7 @@ async fn run_packet_loop(
         }
     }
 
-    log_msg(&callbacks, 1, "Packet loop ended");
+    log_msg(&callbacks, log_level::INFO, "Packet loop ended");
     Ok(())
 }
 
@@ -2526,13 +2640,13 @@ async fn authenticate(
                         r
                     }
                     Err(e) => {
-                        log_msg(callbacks, 3, &format!("AuthResult parse error: {e}"));
+                        log_msg(callbacks, log_level::ERROR, &format!("AuthResult parse error: {e}"));
                         return Err(e);
                     }
                 };
 
                 if result.error > 0 {
-                    log_msg(callbacks, 3, &format!("Auth error code: {}", result.error));
+                    log_msg(callbacks, log_level::ERROR, &format!("Auth error code: {}", result.error));
                     if result.error == 20 {
                         return Err(crate::error::Error::UserAlreadyLoggedIn);
                     }
@@ -2556,7 +2670,7 @@ async fn authenticate(
                             ),
                         );
                     } else {
-                        log_msg(callbacks, 2, "Server does not support UDP acceleration");
+                        log_msg(callbacks, log_level::WARN, "Server does not support UDP acceleration");
                     }
                 }
 
@@ -2570,7 +2684,7 @@ async fn authenticate(
                 );
                 return Ok(result);
             } else {
-                log_msg(callbacks, 3, "Empty auth response body");
+                log_msg(callbacks, log_level::ERROR, "Empty auth response body");
                 return Err(crate::error::Error::ServerError(
                     "Empty authentication response".into(),
                 ));

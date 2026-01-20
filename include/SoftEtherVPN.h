@@ -171,6 +171,20 @@ typedef struct {
 } SoftEtherStats;
 
 // =============================================================================
+// Log Levels
+// =============================================================================
+
+/// Log levels for SoftEtherLogCallback.
+/// These match iOS os_log levels for seamless integration.
+typedef enum {
+    SOFTETHER_LOG_TRACE = 0,   // Verbose trace (packet hex dumps, wire data)
+    SOFTETHER_LOG_DEBUG = 1,   // Debug info (connection steps, internal state)
+    SOFTETHER_LOG_INFO = 2,    // Informational (connected, auth success)
+    SOFTETHER_LOG_WARN = 3,    // Warnings (retries, recoverable errors)
+    SOFTETHER_LOG_ERROR = 4,   // Errors (failures, unrecoverable conditions)
+} SoftEtherLogLevel;
+
+// =============================================================================
 // Callbacks
 // =============================================================================
 
@@ -178,7 +192,13 @@ typedef void (*SoftEtherStateCallback)(void* context, SoftEtherState state);
 typedef void (*SoftEtherConnectedCallback)(void* context, const SoftEtherSession* session);
 typedef void (*SoftEtherDisconnectedCallback)(void* context, SoftEtherResult result);
 typedef void (*SoftEtherPacketsCallback)(void* context, const uint8_t* packets, size_t total_size, uint32_t count);
+
+/// Log callback.
+/// @param context User context passed to callbacks.
+/// @param level Log level (see SoftEtherLogLevel enum).
+/// @param message Null-terminated UTF-8 log message.
 typedef void (*SoftEtherLogCallback)(void* context, int level, const char* message);
+
 typedef int (*SoftEtherProtectSocketCallback)(void* context, int socket_fd);  // Returns 1 on success, 0 on failure
 typedef int (*SoftEtherExcludeIpCallback)(void* context, const char* ip);     // Returns 1 on success, 0 on failure
 

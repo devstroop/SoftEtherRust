@@ -505,16 +505,21 @@ impl VpnConnection {
         }
     }
 
-    /// Convert a TLS connection to a plain TCP connection.
+    /// Convert a TLS connection to extract the underlying TCP stream.
     ///
-    /// This is needed when `use_encrypt=false` - the SoftEther server switches
-    /// from TLS to raw TCP after authentication. The server sends raw tunnel
-    /// protocol data directly over TCP instead of wrapping it in TLS records.
+    /// This is used when `use_ssl_data_encryption=false`, which happens when
+    /// the server provides RC4 keys for encryption. In this mode:
+    /// - TLS was used for initial handshake and authentication
+    /// - After auth, tunnel data uses RC4 encryption (configured via use_encrypt)
+    /// - The underlying TCP stream is used with RC4 applied on top
+    ///
+    /// Note: TLS is always the baseline for handshake/auth. This conversion
+    /// happens when RC4 encryption layer is enabled for tunnel data.
     ///
     /// # Warning
     /// After calling this, any remaining TLS buffered data may be lost.
     /// This should only be called immediately after authentication when the
-    /// server indicates it's switching to raw mode.
+    /// server indicates RC4 mode is active.
     pub fn into_plain(self) -> Self {
         match self {
             VpnConnection::Tls(tls_stream) => {

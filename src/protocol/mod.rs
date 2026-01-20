@@ -12,7 +12,7 @@ mod http;
 mod pack;
 mod tunnel;
 
-pub use auth::{AuthPack, AuthResult, AuthType, ConnectionOptions, HelloResponse, RedirectInfo};
+pub use auth::{AuthPack, AuthResult, AuthType, ConnectionOptions, HelloResponse, RedirectInfo, WelcomePacket};
 pub use constants::*;
 pub use http::{HttpCodec, HttpRequest, HttpResponse};
 pub use pack::{Pack, PackValue};
