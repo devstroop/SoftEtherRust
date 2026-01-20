@@ -2305,25 +2305,39 @@ async fn run_packet_loop(
                             encoded.to_vec()
                         };
 
-                        // NON-BLOCKING: Queue data for async write instead of blocking here
-                        // This prevents upload from blocking TCP reads
-                        match write_tx.try_send(to_send) {
-                            Ok(_) => {
-                                WRITE_QUEUE_DEPTH.fetch_add(1, Ordering::Relaxed);
+                        // OPTIMIZED: Write directly if no pending write, otherwise queue
+                        // This matches Swift's simpler write pattern for lower latency
+                        // Only use queue when there's already a write in flight
+                        if pending_write.is_none() {
+                            // Direct write path - lowest latency
+                            let write_start = std::time::Instant::now();
+                            if let Err(e) = conn_mgr.write_all(&to_send).await {
+                                log_msg(&callbacks, log_level::ERROR, &format!("TX error: {e}"));
+                                return Err(crate::error::Error::Io(e));
                             }
-                            Err(mpsc::error::TrySendError::Full(data)) => {
-                                // Queue full - apply backpressure by doing blocking send
-                                // This only happens when network is congested
-                                WRITE_QUEUE_BLOCKED.fetch_add(1, Ordering::Relaxed);
-                                if write_tx.send(data).await.is_err() {
+                            let write_time = write_start.elapsed();
+                            UL_WRITE_TIME_US.fetch_add(write_time.as_micros() as u64, Ordering::Relaxed);
+                            TCP_WRITES.fetch_add(1, Ordering::Relaxed);
+                            TCP_WRITE_BYTES.fetch_add(to_send.len() as u64, Ordering::Relaxed);
+                        } else {
+                            // Queue for async write - only when write already in flight
+                            match write_tx.try_send(to_send) {
+                                Ok(_) => {
+                                    WRITE_QUEUE_DEPTH.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(mpsc::error::TrySendError::Full(data)) => {
+                                    // Queue full - apply backpressure by doing blocking send
+                                    WRITE_QUEUE_BLOCKED.fetch_add(1, Ordering::Relaxed);
+                                    if write_tx.send(data).await.is_err() {
+                                        log_msg(&callbacks, log_level::WARN, "Write queue closed");
+                                        break;
+                                    }
+                                    WRITE_QUEUE_DEPTH.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => {
                                     log_msg(&callbacks, log_level::WARN, "Write queue closed");
                                     break;
                                 }
-                                WRITE_QUEUE_DEPTH.fetch_add(1, Ordering::Relaxed);
-                            }
-                            Err(mpsc::error::TrySendError::Closed(_)) => {
-                                log_msg(&callbacks, log_level::WARN, "Write queue closed");
-                                break;
                             }
                         }
                         
