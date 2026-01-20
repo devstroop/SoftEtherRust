@@ -754,17 +754,80 @@ async fn connect_and_run_inner(
     // Notify state: Authenticating
     update_state(atomic_state, callbacks, SoftEtherState::Authenticating);
 
-    // Authenticate
-    let mut auth_result = match authenticate(&mut conn, config, &hello, callbacks).await {
+    // Authenticate - with retry logic for use_encrypt=false failures
+    let (mut auth_result, mut conn, config_used) = match authenticate(&mut conn, config, &hello, callbacks).await {
         Ok(r) => {
             log_message(callbacks, log_level::INFO, "Authentication successful");
-            r
+            (r, conn, config.clone())
         }
         Err(e) => {
-            log_message(callbacks, log_level::ERROR, &format!("Authentication failed: {e}"));
-            return Err(e);
+            let error_str = format!("{e}");
+            let is_tls_error = error_str.contains("InvalidContentType") 
+                || error_str.contains("TLS") 
+                || error_str.contains("tls")
+                || error_str.contains("non-TLS");
+            
+            // If use_encrypt=false caused a TLS error, retry with use_encrypt=true
+            if !config.use_encrypt && is_tls_error {
+                log_message(callbacks, log_level::WARN, &format!(
+                    "TLS error with use_encrypt=false: {}. Retrying with use_encrypt=true...", 
+                    error_str
+                ));
+                
+                // Drop the current connection
+                drop(conn);
+                
+                // Create modified config with use_encrypt=true
+                let mut retry_config = config.clone();
+                retry_config.use_encrypt = true;
+                
+                // Reconnect with socket protection
+                let protect_cb2 = callbacks.protect_socket;
+                let protect_ctx2 = callbacks.context as usize;
+                let protect_fn2 = move |fd: i32| -> bool {
+                    if let Some(cb) = protect_cb2 {
+                        return cb(protect_ctx2 as *mut std::ffi::c_void, fd);
+                    }
+                    true
+                };
+                
+                let mut retry_conn = match VpnConnection::connect_with_protect(&retry_config, protect_fn2).await {
+                    Ok(c) => c,
+                    Err(conn_e) => {
+                        log_message(callbacks, log_level::ERROR, &format!("Retry connection failed: {conn_e}"));
+                        return Err(e);
+                    }
+                };
+                
+                // Re-do handshake
+                let retry_hello = match perform_handshake(&mut retry_conn, &retry_config).await {
+                    Ok(h) => h,
+                    Err(hs_e) => {
+                        log_message(callbacks, log_level::ERROR, &format!("Retry handshake failed: {hs_e}"));
+                        return Err(e);
+                    }
+                };
+                
+                // Re-authenticate with use_encrypt=true
+                match authenticate(&mut retry_conn, &retry_config, &retry_hello, callbacks).await {
+                    Ok(r) => {
+                        log_message(callbacks, log_level::INFO, "Retry with use_encrypt=true succeeded");
+                        (r, retry_conn, retry_config)
+                    }
+                    Err(auth_e) => {
+                        log_message(callbacks, log_level::ERROR, &format!("Retry authentication failed: {auth_e}"));
+                        return Err(e);
+                    }
+                }
+            } else {
+                log_message(callbacks, log_level::ERROR, &format!("Authentication failed: {e}"));
+                return Err(e);
+            }
         }
     };
+
+    // Use the actual config that was successful (might be retry_config with use_encrypt=true)
+    let config = &config_used;
 
     // Handle cluster redirect if present
     // NOTE: When redirect is present, session_key will be empty - we get it from redirect server
@@ -791,65 +854,29 @@ async fn connect_and_run_inner(
             tokio::time::sleep(Duration::from_millis(100)).await;
             drop(conn);
 
-            // Connect to redirect server
-            // If use_encrypt=false fails with TLS error, retry with use_encrypt=true
-            let redirect_result = connect_redirect(config, &redirect, callbacks).await;
+            // Connect to redirect server with use_encrypt=true (forced in connect_redirect)
+            // This ensures TLS layer is always active during redirect auth
+            let (redirect_conn, redirect_auth) = connect_redirect(config, &redirect, callbacks).await
+                .map_err(|e| {
+                    log_message(callbacks, log_level::ERROR, &format!("Redirect failed: {e}"));
+                    e
+                })?;
             
-            match redirect_result {
-                Ok((redirect_conn, redirect_auth)) => {
-                    // The ticket auth response IS the Welcome packet in SoftEther protocol.
-                    // AuthResult::from_pack already extracts session_key, use_encrypt, and rc4_key_pair.
-                    // When use_encrypt=false, rc4_key_pair will be None, which is correct.
-                    
-                    let new_ip = match redirect_ip.parse::<Ipv4Addr>() {
-                        Ok(ip) => ip,
-                        Err(_) => server_ip,
-                    };
-                    (
-                        redirect_conn,
-                        redirect_auth,
-                        new_ip,
-                        redirect_ip,
-                        redirect.port,
-                    )
-                }
-                Err(e) => {
-                    // Check if this is a TLS error that might be fixed by using use_encrypt=true
-                    let error_str = format!("{e}");
-                    if !config.use_encrypt && error_str.contains("use_encrypt=true") {
-                        log_message(callbacks, log_level::WARN, "Server doesn't support use_encrypt=false, retrying with use_encrypt=true...");
-                        
-                        // Create modified config with use_encrypt=true
-                        let mut retry_config = config.clone();
-                        retry_config.use_encrypt = true;
-                        
-                        // Retry with use_encrypt=true
-                        match connect_redirect(&retry_config, &redirect, callbacks).await {
-                            Ok((redirect_conn, redirect_auth)) => {
-                                log_message(callbacks, log_level::INFO, "Retry with use_encrypt=true succeeded");
-                                let new_ip = match redirect_ip.parse::<Ipv4Addr>() {
-                                    Ok(ip) => ip,
-                                    Err(_) => server_ip,
-                                };
-                                (
-                                    redirect_conn,
-                                    redirect_auth,
-                                    new_ip,
-                                    redirect_ip,
-                                    redirect.port,
-                                )
-                            }
-                            Err(retry_e) => {
-                                log_message(callbacks, log_level::ERROR, &format!("Retry with use_encrypt=true also failed: {retry_e}"));
-                                return Err(e); // Return original error
-                            }
-                        }
-                    } else {
-                        log_message(callbacks, log_level::ERROR, &format!("Redirect failed: {e}"));
-                        return Err(e);
-                    }
-                }
-            }
+            // The ticket auth response IS the Welcome packet in SoftEther protocol.
+            // AuthResult::from_pack already extracts session_key, use_encrypt, and rc4_key_pair.
+            // When use_encrypt=false, rc4_key_pair will be None, which is correct.
+            
+            let new_ip = match redirect_ip.parse::<Ipv4Addr>() {
+                Ok(ip) => ip,
+                Err(_) => server_ip,
+            };
+            (
+                redirect_conn,
+                redirect_auth,
+                new_ip,
+                redirect_ip,
+                redirect.port,
+            )
         } else {
             // No redirect - check session key now
             if auth_result.session_key.is_empty() {
@@ -1263,11 +1290,15 @@ async fn connect_redirect(
         ),
     );
 
-    // Build connection options
+    // Build connection options for redirect auth.
+    // CRITICAL: Always use use_encrypt=true for redirect/ticket auth to keep TLS layer happy.
+    // Some servers switch to raw TCP mode immediately when use_encrypt=false is requested,
+    // which breaks the TLS layer before we can receive the auth response.
+    // After successful auth, the server's Welcome response tells us the actual encryption mode.
     let options = ConnectionOptions {
         max_connections: config.max_connections,
         half_connection: config.half_connection,
-        use_encrypt: config.use_encrypt,
+        use_encrypt: true, // Always true for redirect auth - server decides final mode
         use_compress: config.use_compress,
         udp_accel: false,
         bridge_mode: false,
@@ -1290,7 +1321,7 @@ async fn connect_redirect(
         callbacks,
         1,
         &format!(
-            "Ticket auth options: use_encrypt={}, use_compress={}, max_conn={}, half_conn={}",
+            "Ticket auth options: use_encrypt={} (forced for redirect), use_compress={}, max_conn={}, half_conn={}",
             options.use_encrypt, options.use_compress, options.max_connections, options.half_connection
         ),
     );

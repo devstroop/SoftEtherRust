@@ -337,10 +337,14 @@ impl VpnClient {
 
         // Build connection options from config
         // Multi-connection support: use actual max_connections value
+        // CRITICAL: Always use use_encrypt=true for redirect/ticket auth to keep TLS layer happy.
+        // Some servers switch to raw TCP mode immediately when use_encrypt=false is requested,
+        // which breaks the TLS layer before we can receive the auth response.
+        // After successful auth, the server's Welcome response tells us the actual encryption mode.
         let options = ConnectionOptions {
             max_connections: self.config.max_connections,
             half_connection: self.config.half_connection,
-            use_encrypt: self.config.use_encrypt,
+            use_encrypt: true, // Always true for redirect auth - server decides final mode
             use_compress: self.config.use_compress,
             udp_accel: self.config.udp_accel,
             bridge_mode: !self.config.nat_traversal,
