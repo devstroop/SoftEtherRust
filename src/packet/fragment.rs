@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
 /// Default MTU for IP fragmentation (typical tunnel MTU minus overhead)
-pub const DEFAULT_FRAGMENT_MTU: usize = 1400;
+pub const DEFAULT_FRAGMENT_MTU: usize = 1420;
 
 /// Minimum MTU per RFC 791
 pub const MIN_MTU: usize = 576;
