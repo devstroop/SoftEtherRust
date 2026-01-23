@@ -2543,11 +2543,10 @@ async fn authenticate(
     // Build auth pack based on auth method
     let auth_pack = match config.auth.method {
         crate::config::AuthMethod::StandardPassword => {
-            let auth_type = if hello.use_secure_password {
-                AuthType::SecurePassword
-            } else {
-                AuthType::Password
-            };
+            // Always use Password (1) for hashed password authentication.
+            // The use_secure_password flag only affects password hash computation.
+            // SecurePassword (4) is for hardware security devices.
+            let auth_type = AuthType::Password;
 
             // Decode password hash - hex format only (40 chars = 20 bytes)
             let password_hash_str = config.auth.password_hash.as_ref().ok_or_else(|| {

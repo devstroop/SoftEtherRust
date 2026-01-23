@@ -123,7 +123,7 @@ class SoftEtherVpnService : VpnService(), SoftEtherBridge.Listener {
         
         val builder = Builder()
             .setSession("SoftEther VPN")
-            .setMtu(1400)
+            .setMtu(1420)
             .addAddress(session.ipAddressString, 16) // /16 subnet
         
         // Add VPN server IP to exclusion list

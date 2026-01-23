@@ -137,7 +137,7 @@ pub struct SoftEtherConfig {
     pub half_connection: c_int,
     /// Connection timeout in seconds.
     pub timeout_seconds: c_uint,
-    /// MTU size (default 1400).
+    /// MTU size (default 1420).
     pub mtu: c_uint,
 
     // IP Version

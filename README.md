@@ -171,7 +171,7 @@ See [config.example.json](config.example.json) for a complete example.
 |--------|------|---------|-------------|
 | `max_connections` | number | `1` | TCP connections (1–32) |
 | `half_connection` | boolean | `false` | Split send/receive connections |
-| `mtu` | number | `1400` | TUN device MTU |
+| `mtu` | number | `1420` | TUN device MTU |
 
 ### IP Version
 

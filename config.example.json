@@ -31,7 +31,7 @@
   "_comment_performance": "Performance settings",
   "max_connections": 1,
   "half_connection": false,
-  "mtu": 1400,
+  "mtu": 1420,
 
   "ip_version": "auto",
 

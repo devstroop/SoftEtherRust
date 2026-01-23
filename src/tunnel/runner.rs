@@ -70,7 +70,7 @@ impl Default for TunnelConfig {
         Self {
             keepalive_interval: 5,
             dhcp_timeout: 30,
-            mtu: 1400,
+            mtu: 1420,
             default_route: false,
             routes: Vec::new(),
             use_compress: false,

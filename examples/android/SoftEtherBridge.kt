@@ -150,7 +150,7 @@ class SoftEtherBridge {
         // Connection Settings
         val maxConnections: Int = 1,
         val timeoutSeconds: Int = 30,
-        val mtu: Int = 1400,
+        val mtu: Int = 1420,
         // Protocol Features
         val useEncrypt: Boolean = true,
         val useCompress: Boolean = false,

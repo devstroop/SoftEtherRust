@@ -141,7 +141,7 @@ impl TunDevice {
             Ok(Self {
                 fd: OwnedFd::from_raw_fd(fd),
                 name,
-                mtu: 1400,
+                mtu: 1420,
                 routes_added: Mutex::new(Vec::new()),
                 original_gateway: Mutex::new(None),
             })

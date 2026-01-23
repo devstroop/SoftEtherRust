@@ -155,7 +155,7 @@ public class SoftEtherBridge {
             certFingerprintSha256: String? = nil,
             maxConnections: UInt8 = 1,
             timeoutSeconds: UInt32 = 30,
-            mtu: UInt32 = 1400,
+            mtu: UInt32 = 1420,
             useEncrypt: Bool = true,
             useCompress: Bool = false,
             udpAccel: Bool = false,

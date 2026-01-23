@@ -12,14 +12,15 @@ use bytes::Bytes;
 use std::net::IpAddr;
 
 /// Authentication types supported by SoftEther.
+/// Values must match Cedar.h: CLIENT_AUTHTYPE_* constants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum AuthType {
     Anonymous = 0,
     Password = 1,
     PlainPassword = 2,
-    SecurePassword = 3,
-    Certificate = 4,
+    Certificate = 3,      // CLIENT_AUTHTYPE_CERT
+    SecurePassword = 4,   // CLIENT_AUTHTYPE_SECURE (secure device auth)
     Ticket = 99,
 }
 

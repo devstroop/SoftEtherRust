@@ -167,9 +167,9 @@ pub struct VpnConfig {
     // ─────────────────────────────────────────────────────────────────────────
     // TLS
     // ─────────────────────────────────────────────────────────────────────────
-    /// Skip TLS certificate verification (default: true).
-    /// Set to false to require valid server certificates.
-    /// Most SoftEther servers use self-signed certificates.
+    /// Skip TLS certificate verification (default: false).
+    /// Set to true for self-signed certificates (most SoftEther servers).
+    /// WARNING: Setting to true disables certificate validation.
     pub skip_tls_verify: bool,
 
     /// Custom CA certificate in PEM format (optional).
@@ -228,7 +228,7 @@ pub struct VpnConfig {
     /// Requires max_connections >= 2.
     pub half_connection: bool,
 
-    /// MTU size for the TUN device (default: 1400).
+    /// MTU size for the TUN device (default: 1420).
     /// Used for packet handling, not sent to server.
     pub mtu: u16,
 
@@ -442,7 +442,7 @@ impl Default for VpnConfig {
             // Authentication
             auth: AuthConfig::default(),
             // TLS
-            skip_tls_verify: true, // SoftEther often uses self-signed certs
+            skip_tls_verify: false, // Security-first default; set true for self-signed certs
             custom_ca_pem: None,
             cert_fingerprint_sha256: None,
             // Tunnel Features
@@ -456,7 +456,7 @@ impl Default for VpnConfig {
             // Performance
             max_connections: 1,
             half_connection: false,
-            mtu: 1400,
+            mtu: 1420,
             // IP Version
             ip_version: IpVersion::Auto,
             // Routing

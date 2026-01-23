@@ -508,12 +508,11 @@ impl VpnClient {
         // Build authentication pack based on auth method
         let auth_pack = match self.config.auth.method {
             AuthMethod::StandardPassword => {
-                // Determine wire protocol auth type based on server capability
-                let auth_type = if hello.use_secure_password {
-                    AuthType::SecurePassword
-                } else {
-                    AuthType::Password
-                };
+                // Always use Password (1) for hashed password authentication.
+                // The use_secure_password flag from server only affects how the password hash
+                // is computed (secure_password field), not the authtype value sent.
+                // SecurePassword (4) is for hardware security devices (smart cards, etc.).
+                let auth_type = AuthType::Password;
                 info!(
                     "Using standard password authentication (wire type: {:?})",
                     auth_type
@@ -736,7 +735,7 @@ impl VpnClient {
         // Configure TUN device
         tun.configure(dhcp_config.ip, dhcp_config.netmask)?;
         tun.set_up()?;
-        tun.set_mtu(1400)?; // Leave room for VPN overhead
+        tun.set_mtu(1420)?; // Leave room for VPN overhead
 
         // Set up routes
         if let Some(gateway) = dhcp_config.gateway {

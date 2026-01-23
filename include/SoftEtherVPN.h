@@ -96,7 +96,7 @@ typedef struct {
     unsigned int max_connections; // Max TCP connections (1-32, default 1)
     int half_connection;          // Half-connection mode (1 = yes, 0 = no). Requires max_connections >= 2
     unsigned int timeout_seconds; // Connection timeout in seconds (default 30)
-    unsigned int mtu;             // MTU size (576-1500, default 1400)
+    unsigned int mtu;             // MTU size (576-1500, default 1420)
     SoftEtherIpVersion ip_version; // IP version preference (default: Auto)
     
     // Protocol Features
@@ -175,13 +175,14 @@ typedef struct {
 // =============================================================================
 
 /// Log levels for SoftEtherLogCallback.
-/// These match iOS os_log levels for seamless integration.
+/// Uses severity-based ordering (0 = most severe) matching the unified WorxVPN
+/// logging standard and iOS os_log levels. See docs/LOGGING_STANDARD.md.
 typedef enum {
-    SOFTETHER_LOG_TRACE = 0,   // Verbose trace (packet hex dumps, wire data)
-    SOFTETHER_LOG_DEBUG = 1,   // Debug info (connection steps, internal state)
+    SOFTETHER_LOG_ERROR = 0,   // Errors (failures, unrecoverable conditions)
+    SOFTETHER_LOG_WARN = 1,    // Warnings (retries, recoverable errors)
     SOFTETHER_LOG_INFO = 2,    // Informational (connected, auth success)
-    SOFTETHER_LOG_WARN = 3,    // Warnings (retries, recoverable errors)
-    SOFTETHER_LOG_ERROR = 4,   // Errors (failures, unrecoverable conditions)
+    SOFTETHER_LOG_DEBUG = 3,   // Debug info (connection steps, internal state)
+    SOFTETHER_LOG_TRACE = 4,   // Verbose trace (packet hex dumps, wire data)
 } SoftEtherLogLevel;
 
 // =============================================================================

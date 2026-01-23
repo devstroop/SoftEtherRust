@@ -112,7 +112,7 @@ class SoftEtherPacketTunnelProvider: NEPacketTunnelProvider {
         }
         settings.dnsSettings = NEDNSSettings(servers: dnsServers)
         
-        settings.mtu = 1400
+        settings.mtu = 1420
         
         setTunnelNetworkSettings(settings) { [weak self] error in
             if let error = error {
